@@ -12,6 +12,7 @@ import { AlertWebhookDispatcher } from "./alert-dispatcher.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
 import { RayLinkStore } from "./database.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
+import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
 import {
   ProtocolActivationManager,
@@ -620,7 +621,8 @@ export async function createRayLinkApp(options) {
   });
   const ruleSetCache = options.ruleSetCache || new ManagedRuleSetCache({
     dataDir: options.dataDir,
-    fetchImpl: options.ruleSetFetch
+    fetchImpl: options.ruleSetFetch,
+    ...(options.ruleSetManifestPath ? { manifestPath: options.ruleSetManifestPath } : {})
   });
   const backupManager = options.backupManager || new BackupManager({
     store,
@@ -634,7 +636,8 @@ export async function createRayLinkApp(options) {
   const refreshRuleSets = () => ruleSetCache.prepare().catch((error) => {
     console.warn(`[RayLink] Managed rule-set refresh failed: ${error.message}`);
   });
-  refreshRuleSets();
+  // Load the verified bundled/cache generation before serving the first export.
+  await refreshRuleSets();
   const localTelemetryCollector = new LocalTelemetryCollector();
   const telemetryProvider = options.telemetryProvider
     || ((runtime) => localTelemetryCollector.collect(runtime));
@@ -1696,6 +1699,8 @@ export async function createRayLinkApp(options) {
             access: store.setupStatus().access,
             certificate: store.certificateSettings(),
             routingPolicy: store.routingPolicy(),
+            routingRuleSets: typeof ruleSetCache.status === "function"
+              ? { ...ruleSetCache.status(), bundledVersion: getBundledRoutingVersion() } : null,
             telemetry: store.telemetryOverview(),
             runtime,
             runtimePreview: runtimeManager.preview(),

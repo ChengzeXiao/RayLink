@@ -18,28 +18,28 @@ RayLink v0.2.26 继续定位为生产候选版本。正式商用版本必须让�
 
 ### 路由策略
 
-`server/routing/policy.js` 是唯一的路由策略来源，Mihomo、Egern 和 sing-box 只是导出器。统一语义如下：
+`server/routing/policy.js` 管理路由模式、自定义规则和候选组，`server/routing/rule-sets/` 提供经过校验的完整国内基线。Mihomo、Egern 和 sing-box 按原生能力生成配置。当前语义如下：
 
 | 策略 | 语义 |
 | --- | --- |
 | RayLink 代理 | 用户默认入口 |
-| AI 网站代理 | AI 域名单独选路，默认继承 RayLink 代理 |
+| AI 网站代理 | 独立稳定候选，支持固定具体出口，DNS 分路径适配 |
 | RayLink 智能 | TCP 节点加上已证明稳定的 UDP 节点 |
 | TCP 稳定 | VLESS、Trojan、AnyTLS、VMess、Shadowsocks 等 TCP 节点 |
 | UDP 高速 | Hysteria、Hysteria 2、TUIC 等 UDP 节点 |
-| 故障回退 | 仅在服务端健康准入通过时优先 UDP，失败自动回退 TCP |
+| 故障回退 | Mihomo/Egern 有序 TCP 优先回退；sing-box 默认使用 TCP URLTest，UDP 保留手选 |
 | 手动选择 | 暴露全部可用节点供用户选择 |
 | DIRECT | 中国域名、IP、局域网、私网与链路本地地址直连 |
 
 统一策略还负责：
 
 - AI 域名集合；
-- 中国直连回退域名；
+- 同源完整中国域名及 IP 基线；
 - 策略候选节点；
 - 健康探测地址；
 - TCP/UDP 稳定性准入。
 
-客户端能力不同时可以使用不同语法，但不得改变上述默认行为。
+原生 fallback、URLTest 与 DNS 内部路径并非完全等价；实现、版本更新范围与实测边界见 [智能分流验收](smart-routing-implementation.md)。
 
 ### 协议健康
 

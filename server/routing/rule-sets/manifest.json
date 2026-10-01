@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "version": "cn-a9958574-5605651c",
+  "publishedAt": "2026-10-01T00:00:00Z",
+  "description": "Complete geolocation-cn domain and CN IP baseline from previously pinned SagerNet commits; packaging date is not upstream freshness.",
+  "rules": [
+    {
+      "filename": "geosite-geolocation-cn.srs",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/a9958574d2c9c8c1f01b726ef9930e0244b10b23/geosite-geolocation-cn.srs",
+      "sha256": "342f2173df2c2ec3a31a3e6aa0c5eb11dae6db82a4a1fff923f631b17e26f92a",
+      "bytes": 53977,
+      "statistics": {
+        "domain": 618,
+        "domain_suffix": 8232,
+        "domain_regex": 8
+      },
+      "jsonFilename": "geosite-geolocation-cn.json",
+      "jsonSha256": "a966674a53889fa9f683e850417fff73e4ffa5c2b0bf498ef14e883f2a5ba303"
+    },
+    {
+      "filename": "geoip-cn.srs",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/5605651c12ed5b2fcf3b5de580c041eb9d8d938e/geoip-cn.srs",
+      "sha256": "bc1a9eb66f9c6a0fe9fc5300cf5b5e885e0f9eadd7213b085b767a95d6af3d2a",
+      "bytes": 33920,
+      "statistics": {
+        "ip_cidr": 7774
+      },
+      "jsonFilename": "geoip-cn.json",
+      "jsonSha256": "9c5ade468337a9589e55c61fac536d52f951eff4b7eae291ff2af655fcba5161"
+    }
+  ]
+}

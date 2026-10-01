@@ -269,11 +269,11 @@
           </div>
           <section class="policy-layout" data-policy-panel="route">
             <div class="panel policy-list">
-              <div class="panel-heading"><div><p class="eyebrow">简单模式</p><h2>选择路由行为</h2></div><span class="status-badge good"><i></i>三端一致</span></div>
+              <div class="panel-heading"><div><p class="eyebrow">简单模式</p><h2>选择路由行为</h2></div><span class="status-badge good"><i></i>按客户端适配</span></div>
               <form id="routing-mode-form" class="routing-mode-grid">
                 <label class="routing-mode-card"><input type="radio" name="mode" value="smart"><span><strong>智能分流</strong><small>内网和国内直连；AI 与境外流量走代理；未知域名解析真实 IP 后判断。</small></span></label>
                 <label class="routing-mode-card"><input type="radio" name="mode" value="global-proxy"><span><strong>全局代理</strong><small>除内网和显式直连规则外，全部流量使用 RayLink 代理。</small></span></label>
-                <label class="routing-mode-card"><input type="radio" name="mode" value="direct"><span><strong>全部直连</strong><small>除拦截规则外不使用代理，适合临时排障。</small></span></label>
+                <label class="routing-mode-card"><input type="radio" name="mode" value="direct"><span><strong>全部直连</strong><small>默认直连，仍遵从自定义代理、AI 和拦截例外。</small></span></label>
                 <button class="button primary" type="submit">保存路由模式</button>
               </form>
             </div>
@@ -282,6 +282,8 @@
               <p id="routing-mode-description">正在读取统一路由策略。</p>
               <div class="setting-row"><div><strong>DNS 分流</strong><small>直连域名使用国内 DNS，代理域名使用远程加密 DNS</small></div><span class="status-badge good"><i></i>自动</span></div>
               <div class="setting-row"><div><strong>未知域名</strong><small>先解析真实 A / AAAA，再由 GeoIP 判断</small></div><span class="status-badge good"><i></i>安全判定</span></div>
+              <div class="setting-row"><div><strong>主控 / sing-box 规则集</strong><small id="routing-rule-set-status">正在加载规则集状态</small></div><span id="routing-rule-set-version">—</span></div>
+              <div class="setting-row"><div><strong>Mihomo / Egern 基线</strong><small>完整规则随应用发布更新</small></div><span id="routing-bundled-version">—</span></div>
               <div class="setting-row"><div><strong>自定义规则</strong><small>按优先级先于内置规则执行</small></div><span class="status-badge neutral"><i></i><span id="routing-rule-count">0</span> 条</span></div>
             </aside>
           </section>
@@ -292,7 +294,7 @@
             </div>
             <aside class="panel policy-inspector">
               <p class="eyebrow">新增例外</p><h2>添加路由规则</h2>
-              <p>仅填写匹配值，不要输入 URL 路径。域名后缀会同时匹配主域名和所有子域名。</p>
+              <p>仅填写匹配值，不要输入 URL 路径。域名后缀包含主域名和子域名；DNS 选项适用于域名规则，IP 规则按解析结果分流。</p>
               <form id="routing-rule-form" class="field-grid routing-rule-form">
                 <label class="field"><span>匹配类型</span><select name="match"><option value="domain_suffix">域名后缀</option><option value="domain">完整域名</option><option value="ip_cidr">IP 网段</option><option value="ip">单个 IP</option></select></label>
                 <label class="field"><span>动作</span><select name="action"><option value="direct">直连</option><option value="proxy">代理</option><option value="ai">AI 专用代理</option><option value="block">拦截</option></select></label>
@@ -313,7 +315,7 @@
               </form>
               <div id="routing-diagnose-result" class="routing-diagnose-result"><span>输入域名后，将展示 DNS 结果、命中规则、出口和判断原因。</span></div>
             </div>
-            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 国内域名 → 国内 IP → 代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
+            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 默认代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
           </section>
         </section>
 

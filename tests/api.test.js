@@ -1873,14 +1873,18 @@ test("subscription uses control-plane managed official rule sets when cached", a
   assert.equal(await ruleSetResponse.text(), "managed-geosite");
 });
 
-test("subscription falls back to inline routing when managed rule-set validation fails", async (t) => {
+test("offline cold start serves the complete bundled routing baseline and reports its version", async (t) => {
   const testApp = await startTestApp({
     proxyHost: "node.example.com",
     ruleSetCache: undefined,
     ruleSetFetch: async () => new Response("not-a-binary-rule-set", { status: 200 })
   });
   t.after(() => testApp.close());
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const adminCookie = await login(testApp.baseUrl);
+  const bootstrap = await (await api(testApp.baseUrl, adminCookie, "/api/bootstrap")).json();
+  assert.equal(bootstrap.routingRuleSets.available, true);
+  assert.equal(bootstrap.routingRuleSets.degraded, false);
+  assert.ok(bootstrap.routingRuleSets.version);
   const loginResponse = await fetch(`${testApp.baseUrl}/api/portal/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1893,11 +1897,10 @@ test("subscription falls back to inline routing when managed rule-set validation
   const config = await (await fetch(`${testApp.baseUrl}/api/portal/config/sing-box`, {
     headers: { cookie: portalCookie }
   })).json();
-  assert.ok(config.route.rule_set.every((ruleSet) => ruleSet.type === "inline"));
-  assert.ok(config.route.rule_set.every((ruleSet) => !Object.hasOwn(ruleSet, "url")));
+  assert.ok(config.route.rule_set.every((ruleSet) => ruleSet.type === "remote"));
   assert.equal(
     (await fetch(`${testApp.baseUrl}/rule-sets/geosite-geolocation-cn.srs`)).status,
-    404
+    200
   );
 });
 

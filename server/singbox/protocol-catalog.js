@@ -2,12 +2,13 @@ import { createHmac } from "node:crypto";
 
 import {
   AI_DOMAIN_SUFFIXES,
-  CHINA_FALLBACK_DOMAIN_SUFFIXES,
   DEFAULT_ROUTE_PROBE_URL,
   LOCAL_DOMAIN_SUFFIXES,
   normalizeRoutingPolicy,
+  PROXY_DOMAIN_SUFFIXES,
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
+import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
 
 const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.14.2";
 const docsRoot = "https://sing-box.sagernet.org/configuration/inbound";
@@ -470,6 +471,16 @@ function clientConfigForOutbounds(
     ...(udpTags.length ? [urlTestOutbound("raylink-udp", udpTags, probeUrl)] : []),
     urlTestOutbound("raylink-fastest", tags, probeUrl)
   ];
+  // Native URLTest has no ordered fallback. A tolerance equal to its 15s
+  // probe deadline keeps a healthy AI exit stable; failed probes remove it.
+  // Leave headroom for uint16 delay + tolerance arithmetic in sing-box.
+  const aiStableGroup = {
+    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, tcpTags.length ? tcpTags : usableSmartTags, probeUrl, 15_000),
+    interval: "1m"
+  };
+  for (const outbound of automaticGroups) {
+    if (outbound.tag === ROUTE_POLICY_GROUPS.tcp.tag) outbound.interval = "1m";
+  }
   const selectorGroups = automaticGroups.map((outbound) => outbound.tag);
   const ruleSets = ruleSetBaseUrl
     ? [
@@ -494,21 +505,12 @@ function clientConfigForOutbounds(
         {
           type: "inline",
           tag: "geosite-geolocation-cn",
-          rules: [{
-            domain_suffix: [...CHINA_FALLBACK_DOMAIN_SUFFIXES]
-          }]
+          rules: getBundledRoutingRules().geosite
         },
         {
           type: "inline",
           tag: "geoip-cn",
-          rules: [{
-            ip_cidr: [
-              "119.29.29.29/32",
-              "180.76.76.76/32",
-              "223.5.5.5/32",
-              "223.6.6.6/32"
-            ]
-          }]
+          rules: getBundledRoutingRules().geoip
         }
       ];
   const customDnsRules = routePolicy.rules.flatMap((rule) => {
@@ -517,11 +519,12 @@ function clientConfigForOutbounds(
     return [{
       [field]: [rule.value],
       action: "route",
-      server: rule.dns === "domestic" || rule.dns === "system"
-        ? "dns-local"
-        : "dns-remote"
+      server: rule.dns === "system" ? "dns-local"
+        : rule.dns === "domestic" ? "dns-domestic"
+          : rule.action === "ai" ? "dns-ai" : "dns-remote"
     }];
   });
+  let resolvesCustomIps = false;
   const customRouteRules = routePolicy.rules.flatMap((rule) => {
     if (!rule.enabled) return [];
     const field = {
@@ -533,10 +536,16 @@ function clientConfigForOutbounds(
     const value = rule.match === "ip"
       ? `${rule.value}/${String(rule.value).includes(":") ? 128 : 32}`
       : rule.value;
+    const resolveRules = field === "ip_cidr" && !resolvesCustomIps
+      ? [{ action: "resolve" }]
+      : [];
+    if (field === "ip_cidr") resolvesCustomIps = true;
     if (rule.action === "block") {
-      return [{ [field]: [value], action: "reject" }];
+      return [...resolveRules, { [field]: [value], action: "reject" }];
     }
-    return [{
+    return [...resolveRules,
+      ...(field !== "ip_cidr" && !resolvesCustomIps
+        ? [{ [field]: [value], action: "resolve" }] : []), {
       [field]: [value],
       action: "route",
       outbound: rule.action === "direct"
@@ -546,15 +555,34 @@ function clientConfigForOutbounds(
           : ROUTE_POLICY_GROUPS.proxy.tag
     }];
   });
+  // Keep the exact addresses already checked by earlier IP rules. Re-resolving
+  // a TTL=0/rotating answer here could dial an IP that those rules would reject.
+  const resolveRemaining = (match = {}) => resolvesCustomIps ? [] : [{ ...match, action: "resolve" }];
   const managedRouteRules = routePolicy.mode === "smart"
     ? [
+        ...resolveRemaining({ domain_suffix: [...AI_DOMAIN_SUFFIXES] }),
         {
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.ai.tag
         },
+        ...resolveRemaining({ domain_suffix: [...PROXY_DOMAIN_SUFFIXES] }),
+        {
+          domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
+          action: "route",
+          outbound: ROUTE_POLICY_GROUPS.proxy.tag
+        },
+        ...resolveRemaining({ rule_set: "geosite-geolocation-cn" }),
         {
           rule_set: "geosite-geolocation-cn",
+          action: "route",
+          outbound: ROUTE_POLICY_GROUPS.direct.tag
+        },
+        // SOCKS/HTTP hostname requests have no destination IP until resolved.
+        // default_domain_resolver only affects dialing, after rule selection.
+        ...resolveRemaining(),
+        {
+          ip_is_private: true,
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.direct.tag
         },
@@ -564,7 +592,10 @@ function clientConfigForOutbounds(
           outbound: ROUTE_POLICY_GROUPS.direct.tag
         }
       ]
-    : [];
+    : [
+        ...resolveRemaining(),
+        { ip_is_private: true, action: "route", outbound: ROUTE_POLICY_GROUPS.direct.tag }
+      ];
   return {
     log: { level: "info", timestamp: true },
     dns: {
@@ -577,10 +608,23 @@ function clientConfigForOutbounds(
           tag: "dns-local"
         },
         {
+          type: "https",
+          tag: "dns-domestic",
+          server: "223.5.5.5",
+          path: "/dns-query",
+          detour: "direct"
+        },
+        {
           type: "tls",
           tag: "dns-remote",
           server: "8.8.8.8",
           detour: "raylink-auto"
+        },
+        {
+          type: "tls",
+          tag: "dns-ai",
+          server: "8.8.8.8",
+          detour: ROUTE_POLICY_GROUPS.ai.tag
         }
       ],
       rules: [
@@ -592,12 +636,20 @@ function clientConfigForOutbounds(
         },
         ...customDnsRules,
         ...(routePolicy.mode === "smart" ? [{
+          domain_suffix: [...AI_DOMAIN_SUFFIXES],
+          action: "route",
+          server: "dns-ai"
+        }, {
+          domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
+          action: "route",
+          server: "dns-remote"
+        }, {
           rule_set: "geosite-geolocation-cn",
           action: "route",
-          server: "dns-local"
+          server: "dns-domestic"
         }] : [])
       ],
-      final: routePolicy.mode === "direct" ? "dns-local" : "dns-remote",
+      final: routePolicy.mode === "direct" ? "dns-domestic" : "dns-remote",
       strategy: "prefer_ipv4"
     },
     inbounds: [
@@ -619,23 +671,25 @@ function clientConfigForOutbounds(
     outbounds: [
       ...protocolOutbounds,
       ...automaticGroups,
+      aiStableGroup,
       {
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.proxy.tag,
         outbounds: [...selectorGroups, ...tags],
-        default: ROUTE_POLICY_GROUPS.smart.tag,
-        interrupt_exist_connections: true
+        default: tcpTags.length ? ROUTE_POLICY_GROUPS.tcp.tag : ROUTE_POLICY_GROUPS.smart.tag,
+        interrupt_exist_connections: false
       },
       {
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.ai.tag,
         outbounds: [
+          ROUTE_POLICY_GROUPS.aiStable.tag,
           ROUTE_POLICY_GROUPS.proxy.tag,
           ...selectorGroups,
           ...tags
         ],
-        default: ROUTE_POLICY_GROUPS.proxy.tag,
-        interrupt_exist_connections: true
+        default: ROUTE_POLICY_GROUPS.aiStable.tag,
+        interrupt_exist_connections: false
       },
       { type: "direct", tag: "direct" }
     ],
@@ -655,6 +709,13 @@ function clientConfigForOutbounds(
           ip_is_private: true,
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.direct.tag
+        },
+        {
+          domain: ["localhost"],
+          domain_suffix: [...LOCAL_DOMAIN_SUFFIXES],
+          action: "resolve",
+          server: "dns-local",
+          disable_optimistic_cache: true
         },
         {
           domain: ["localhost"],

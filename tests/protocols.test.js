@@ -220,12 +220,12 @@ test("client configuration includes every enabled user-facing protocol", () => {
   );
   assert.equal(
     config.outbounds.find((outbound) => outbound.type === "selector").default,
-    "raylink-smart"
+    "raylink-tcp"
   );
   assert.deepEqual(config.inbounds.map((inbound) => inbound.type), ["tun", "mixed"]);
   assert.equal(config.inbounds[0].auto_route, true);
   assert.equal(config.inbounds[0].strict_route, true);
-  assert.deepEqual(config.dns.servers.map((server) => server.tag), ["dns-local", "dns-remote"]);
+  assert.deepEqual(config.dns.servers.map((server) => server.tag), ["dns-local", "dns-domestic", "dns-remote", "dns-ai"]);
   assert.deepEqual(config.dns.servers[0], {
     type: "local",
     tag: "dns-local"
@@ -235,7 +235,7 @@ test("client configuration includes every enabled user-facing protocol", () => {
   assert.equal(config.route.rules[1].action, "hijack-dns");
   assert.equal(
     config.outbounds.find((outbound) => outbound.tag === "raylink-ai").default,
-    "raylink-auto"
+    "raylink-ai-stable"
   );
   assert.deepEqual(
     config.route.rules.find((rule) => rule.outbound === "raylink-ai").domain_suffix.slice(0, 2),
@@ -286,7 +286,7 @@ test("sing-box client configuration compiles custom routing and DNS before manag
   });
 
   const customDirectIndex = config.route.rules.findIndex(
-    (rule) => rule.domain_suffix?.includes("work.example")
+    (rule) => rule.domain_suffix?.includes("work.example") && rule.action === "route"
   );
   const aiIndex = config.route.rules.findIndex((rule) => rule.outbound === "raylink-ai");
   assert.ok(customDirectIndex > 1);
@@ -296,7 +296,7 @@ test("sing-box client configuration compiles custom routing and DNS before manag
     (rule) => rule.ip_cidr?.includes("192.0.2.0/24") && rule.action === "reject"
   ));
   assert.ok(config.dns.rules.some(
-    (rule) => rule.domain_suffix?.includes("work.example") && rule.server === "dns-local"
+    (rule) => rule.domain_suffix?.includes("work.example") && rule.server === "dns-domestic"
   ));
 });
 
@@ -465,7 +465,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
     ["raylink-local-vless", "raylink-local-hysteria2"]
   );
   const selector = config.outbounds.find((outbound) => outbound.tag === "raylink-auto");
-  assert.equal(selector.default, "raylink-smart");
+  assert.equal(selector.default, "raylink-tcp");
   assert.deepEqual(selector.outbounds.slice(0, 3), [
     "raylink-smart",
     "raylink-tcp",
@@ -546,7 +546,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
   );
   assert.equal(
     config.outbounds.find((outbound) => outbound.tag === "raylink-auto").default,
-    "raylink-smart"
+    "raylink-tcp"
   );
 });
 

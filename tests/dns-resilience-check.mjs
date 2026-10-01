@@ -83,7 +83,7 @@ try {
     credential: { email: "dns@example.com", runtimePassword: randomBytes(16).toString("base64"),
       serverPassword: randomBytes(16).toString("base64") } });
   // Replace only environmental endpoints. Retain generated DNS/cache/routing policy.
-  config.dns.servers = ["dns-local", "dns-remote"].map((tag) => ({ type: "udp", tag,
+  config.dns.servers = config.dns.servers.map(({ tag }) => ({ type: "udp", tag,
     server: "127.0.0.1", server_port: upstreamPort }));
   config.inbounds = [{ type: "direct", listen: "127.0.0.1", listen_port: inboundPort,
     override_address: "8.8.8.8", override_port: 53 }];

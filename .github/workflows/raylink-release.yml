@@ -36,11 +36,7 @@ jobs:
         run: npm install --ignore-scripts
       - name: Run production acceptance suite
         run: |
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:protocols
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:traffic
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:dns
-          npm run check:soak
+          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:production
 
   build:
     name: linux-${{ matrix.arch }}

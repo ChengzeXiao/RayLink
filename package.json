@@ -13,8 +13,9 @@
     "check": "node --check server/index.js && node --check web/app.js && npm test",
     "check:protocols": "node tests/protocol-check.mjs",
     "check:soak": "node --expose-gc tests/soak-memory.mjs",
-    "check:production": "npm run check && npm run check:protocols && npm run check:traffic && npm run check:dns && npm run check:soak",
+    "check:production": "npm run check && npm run check:protocols && npm run check:traffic && npm run check:dns && npm run check:routing && npm run check:soak",
     "check:traffic": "node tests/runtime-traffic-check.mjs",
-    "check:dns": "node tests/dns-resilience-check.mjs"
+    "check:dns": "node tests/dns-resilience-check.mjs",
+    "check:routing": "node tests/smart-routing-check.mjs && node tests/smart-routing-check.mjs --ip-priority && node tests/route-failover-check.mjs"
   }
 }

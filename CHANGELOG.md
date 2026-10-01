@@ -2,6 +2,11 @@
 
 ## 0.2.33 (unreleased)
 
+- Resolve hostname requests before IP routing, preserve explicit rule priority, and align system/domestic/AI DNS with their selected exits.
+- Default sing-box to TCP candidates, give AI an independent stable selection, and preserve active connections during policy changes.
+- Correct Egern top-level selection and provide complete verified offline China rules, atomic rule-set updates and visible version/degradation status.
+- Distinguish control-plane DNS predictions from measured client routing, including mixed-IP and oversized-response warnings.
+- Add native smart-routing and failover simulations with a negative control for AI exit stability.
 - Upgrade the approved metered sing-box Runtime to 1.14.2 and the builder to Go 1.26.8.
 - Migrate ACME per Host version and enable bounded optimistic DNS caching in 1.14+ client configurations.
 - Add Node 0.8.0 program-only updates, preserve the Runtime/Cronet pair during application upgrades, and gate Runtime upgrades on the Node version.

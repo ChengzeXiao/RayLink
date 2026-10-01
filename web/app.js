@@ -47,6 +47,7 @@ const controlPlane = {
   access: null,
   certificate: { mode: null, email: "" },
   routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
+  routingRuleSets: null,
   portalProfile: null
 };
 
@@ -230,6 +231,7 @@ function applyBootstrap(data) {
   controlPlane.telemetry = data.telemetry || { windowHours: 24, networkSeries: [] };
   controlPlane.access = data.access || null;
   controlPlane.certificate = data.certificate || { mode: null, email: "" };
+  controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
     unknownDomain: "resolve-geoip",
@@ -306,7 +308,7 @@ const routingModeCopy = {
   },
   direct: {
     title: "全部直连",
-    description: "不使用代理，仅保留拦截规则，适合临时排障或停用代理。"
+    description: "默认直连，仍遵从自定义代理、AI 和拦截例外，适合临时排障。"
   }
 };
 
@@ -334,6 +336,12 @@ function renderRoutingPolicy() {
   setText("#routing-mode-description", mode.description);
   setText("#routing-rule-count", policy.rules.length);
   setText("#routing-rules-badge", policy.rules.length);
+  const ruleSets = controlPlane.routingRuleSets;
+  setText("#routing-rule-set-version", ruleSets?.version || "随包基线");
+  setText("#routing-bundled-version", ruleSets?.bundledVersion || "随应用更新");
+  setText("#routing-rule-set-status", ruleSets?.degraded
+    ? `更新降级：${ruleSets.lastError || "使用最近有效基线"}`
+    : ruleSets?.available ? "完整规则可用 · 校验通过" : "导出使用完整随包规则");
   const list = document.querySelector("#routing-rule-list");
   if (!list) return;
   if (!policy.rules.length) {
@@ -362,7 +370,7 @@ async function persistRoutingPolicy(nextPolicy, successMessage) {
   });
   controlPlane.routingPolicy = saved;
   renderRoutingPolicy();
-  showToast("策略已生效", successMessage);
+  showToast("策略已保存", successMessage);
   return saved;
 }
 
@@ -433,10 +441,13 @@ async function diagnoseRouting(event) {
       ? diagnostic.addresses.map((entry) => entry.address).join("、")
       : "无需解析";
     result.innerHTML = `
-      <div><small>最终出口</small><strong>${escapeHtml(diagnostic.outbound)}</strong></div>
+      <div><small>推断出口</small><strong>${escapeHtml(diagnostic.outbound || "混合结果，需客户端确认")}</strong></div>
       <div><small>命中来源</small><strong>${escapeHtml(diagnostic.source)}</strong></div>
+      <div><small>策略 DNS</small><strong>${escapeHtml(diagnostic.dns)}</strong></div>
+      <div><small>证据来源</small><strong>${diagnostic.evidence?.kind === "control-plane-dns" ? "主控系统 DNS" : "规则推断"}</strong></div>
       <div class="full"><small>解析地址</small><strong>${escapeHtml(addressText)}</strong></div>
       <p>${escapeHtml(diagnostic.explanation)} · ${escapeHtml(new Date(diagnostic.checkedAt).toLocaleString("zh-CN"))}</p>
+      ${(diagnostic.warnings || []).map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}
     `;
   } catch (error) {
     result.innerHTML = `<span class="danger-text">${escapeHtml(error.message)}</span>`;

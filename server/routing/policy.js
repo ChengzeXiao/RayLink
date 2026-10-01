@@ -1,8 +1,9 @@
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 
 export const ROUTE_POLICY_GROUPS = Object.freeze({
   proxy: Object.freeze({ tag: "raylink-auto", name: "RayLink 代理" }),
   ai: Object.freeze({ tag: "raylink-ai", name: "AI 网站代理" }),
+  aiStable: Object.freeze({ tag: "raylink-ai-stable", name: "AI 稳定出口" }),
   smart: Object.freeze({ tag: "raylink-smart", name: "RayLink 智能" }),
   tcp: Object.freeze({ tag: "raylink-tcp", name: "TCP 稳定" }),
   udp: Object.freeze({ tag: "raylink-udp", name: "UDP 高速" }),
@@ -26,6 +27,14 @@ export const AI_DOMAIN_SUFFIXES = Object.freeze([
   "grok.com",
   "gemini.google.com",
   "generativelanguage.googleapis.com"
+]);
+
+// Explicit overseas services precede geographic inference; keep AI exceptions first.
+export const PROXY_DOMAIN_SUFFIXES = Object.freeze([
+  "google.com", "googleapis.com", "gstatic.com", "youtube.com", "youtu.be",
+  "googlevideo.com", "ytimg.com", "github.com", "githubusercontent.com",
+  "githubassets.com", "wikipedia.org", "wikimedia.org", "twitter.com", "x.com",
+  "t.co", "twimg.com", "telegram.org", "t.me"
 ]);
 
 export const CHINA_FALLBACK_DOMAIN_SUFFIXES = Object.freeze([
@@ -96,7 +105,7 @@ function normalizeDomain(value) {
   if (
     !normalized
     || normalized.length > 253
-    || !normalized.includes(".")
+    || (!normalized.includes(".") && normalized !== "localhost")
     || normalized.split(".").some((label) => (
       !label
       || label.length > 63
@@ -205,27 +214,41 @@ function matchesSuffix(domain, suffix) {
   return domain === normalized || domain.endsWith(`.${normalized}`);
 }
 
-export function routingDecisionForDomain(inputPolicy, inputDomain) {
+export function routingRuleMatchesIp(rule, address) {
+  const family = isIP(address);
+  if (!family) return false;
+  const [network, prefix] = rule.value.split("/");
+  if (isIP(network) !== family) return false;
+  const blockList = new BlockList();
+  const type = family === 4 ? "ipv4" : "ipv6";
+  if (rule.match === "ip") blockList.addAddress(network, type);
+  else blockList.addSubnet(network, Number(prefix), type);
+  return blockList.check(address, type);
+}
+
+export function routingDecisionForDomain(inputPolicy, inputDomain, { addresses } = {}) {
   const policy = normalizeRoutingPolicy(inputPolicy);
   const domain = normalizeDomain(inputDomain);
-  if (LOCAL_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
+  if (domain === "localhost" || LOCAL_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
     return { action: "direct", source: "local", ruleId: null, dns: "system" };
+  }
+  const domainDns = () => routingDecisionForDomain({ ...policy, rules: policy.rules.filter((entry) => (
+    !["ip", "ip_cidr"].includes(entry.match)
+  )) }, domain).dns;
+  for (const rule of policy.rules) {
+    if (!rule.enabled) continue;
+    const needsAddress = ["ip", "ip_cidr"].includes(rule.match);
+    if (needsAddress && addresses === undefined) {
+      return { action: "resolve", source: "custom-ip", ruleId: rule.id, dns: domainDns() };
+    }
+    if (needsAddress
+      ? addresses.some((address) => routingRuleMatchesIp(rule, typeof address === "string" ? address : address.address))
+      : domainMatches(domain, rule)) {
+      return { action: rule.action, source: "custom", ruleId: rule.id, dns: needsAddress ? domainDns() : rule.dns };
+    }
   }
   if (policy.mode === "direct") {
     return { action: "direct", source: "mode", ruleId: null, dns: "domestic" };
-  }
-  const custom = policy.rules.find((rule) => (
-    rule.enabled
-    && ["domain", "domain_suffix"].includes(rule.match)
-    && domainMatches(domain, rule)
-  ));
-  if (custom) {
-    return {
-      action: custom.action,
-      source: "custom",
-      ruleId: custom.id,
-      dns: custom.dns
-    };
   }
   if (policy.mode === "global-proxy") {
     return { action: "proxy", source: "mode", ruleId: null, dns: "remote" };
@@ -233,10 +256,13 @@ export function routingDecisionForDomain(inputPolicy, inputDomain) {
   if (AI_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
     return { action: "ai", source: "ai", ruleId: null, dns: "remote" };
   }
+  if (PROXY_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
+    return { action: "proxy", source: "proxy-domain", ruleId: null, dns: "remote" };
+  }
   if (CHINA_FALLBACK_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
     return { action: "direct", source: "geosite", ruleId: null, dns: "domestic" };
   }
-  return { action: "resolve", source: "geoip", ruleId: null, dns: "domestic" };
+  return { action: "resolve", source: "geoip", ruleId: null, dns: "remote" };
 }
 
 function uniqueExisting(members, names) {
