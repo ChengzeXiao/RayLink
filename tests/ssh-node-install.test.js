@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
@@ -13,7 +13,7 @@ const script = new URL("../web/node/install.sh", import.meta.url).pathname;
 const enrollmentToken = "test-enrollment-token-0000000000";
 
 async function fixture(t, { enrolled = true } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), "raylink-ssh-install-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "raylink-ssh-install-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, "program");
   const config = join(directory, "config");
@@ -24,7 +24,12 @@ async function fixture(t, { enrolled = true } = {}) {
   const bin = join(directory, "commands");
   const log = join(directory, "commands.log");
   for (const path of [join(root, "node", "bin"), config, data, units, runtime, tmpfiles, bin]) await mkdir(path, { recursive: true });
-  await symlink(process.execPath, join(root, "node", "bin", "node"));
+  await writeFile(join(root, "node", "bin", "node"), `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, process.argv.slice(2), { stdio: "inherit", env: process.env, timeout: 3000 });
+if (result.error) { process.stderr.write("Node validation exceeded its deadline\\n"); process.exit(124); }
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
   const commands = {
     id: '#!/bin/sh\nprintf "0\\n"\n',
     uname: '#!/bin/sh\nif [ "$1" = -s ]; then printf "Linux\\n"; else printf "x86_64\\n"; fi\n',
@@ -63,6 +68,7 @@ fi
   await chmod(join(runtime, "raylink-sing-box"), 0o755);
   const env = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, RAYLINK_NODE_ROOT: root,
+    TMPDIR: directory, RAYLINK_RUNTIME_MODE: "dry-run", RAYLINK_NODE_STATE: join(directory, "import-state.json"),
     RAYLINK_NODE_CONFIG_ROOT: config, RAYLINK_NODE_DATA_ROOT: data,
     RAYLINK_SYSTEMD_ROOT: units, RAYLINK_TMPFILES_ROOT: tmpfiles, RAYLINK_RUNTIME_BIN_DIR: runtime,
     RAYLINK_SYSCTL_ROOT: join(directory, "sysctl.d"),
@@ -243,6 +249,11 @@ test("explicit loopback HTTP development installs allow only their initial HTTP 
 
 test("fresh staged install persists Host binding and a same-Host retry leaves every artifact intact", async (t) => {
   const f = await freshFixture(t);
+  // The real Node has a daemon entry point. Both initial and retry import
+  // preflights must validate it without starting its poll loop.
+  for (const asset of ["raylink-node.mjs", "network-tuning.mjs", "software-update.mjs"]) {
+    await writeFile(join(f.env.INSTALL_TEST_ASSETS, asset), await readFile(new URL(`../web/node/${asset}`, import.meta.url)));
+  }
   const { result, commands } = await f.run();
   assert.ok(!(result instanceof Error), result.stderr || result.message);
   const environment = await readFile(join(f.config, "node.env"), "utf8");
@@ -257,6 +268,7 @@ test("fresh staged install persists Host binding and a same-Host retry leaves ev
   assert.ok(!(again.result instanceof Error), again.result.stderr || again.result.message);
   const after = await Promise.all(paths.map((path) => readFile(path)));
   assert.deepEqual(after, before);
+  await assert.rejects(stat(f.env.RAYLINK_NODE_STATE), { code: "ENOENT" }, "preflight must not enroll or create daemon state");
 });
 
 test("fresh Node installation stages BBR support and persists its boot-time kernel configuration link", async (t) => {

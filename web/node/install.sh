@@ -109,8 +109,8 @@ if [ -e "$node_environment" ] || [ -e "$node_state" ]; then
   if [ -x "$RAYLINK_NODE_ROOT/node/bin/node" ] && [ -f "$RAYLINK_NODE_ROOT/raylink-node.mjs" ] \
     && [ -f "$RAYLINK_SYSTEMD_ROOT/raylink-node.service" ] \
     && [ -f "$RAYLINK_SYSTEMD_ROOT/raylink-sing-box.service" ] && [ -x "$sing_box_bin" ] \
-    && "$RAYLINK_NODE_ROOT/node/bin/node" --input-type=module -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.argv[1]).href);' \
-      "$RAYLINK_NODE_ROOT/raylink-node.mjs" 2>/dev/null; then
+    && RAYLINK_VERIFY_MODULE="$RAYLINK_NODE_ROOT/raylink-node.mjs" "$RAYLINK_NODE_ROOT/node/bin/node" --input-type=module \
+      -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.env.RAYLINK_VERIFY_MODULE).href);' 2>/dev/null; then
     systemctl enable raylink-node.service
     if [ "$control_plane_trust_changed" = true ]; then systemctl restart raylink-node.service
     elif ! systemctl is-active --quiet raylink-node.service; then systemctl start raylink-node.service; fi
@@ -222,8 +222,11 @@ fi
 "$node_binary" --check "$temporary_root/raylink-node.mjs" || fail "下载的 Node 程序语法校验失败"
 "$node_binary" --check "$temporary_root/network-tuning.mjs" || fail "下载的 BBR 模块语法校验失败"
 "$node_binary" --check "$temporary_root/software-update.mjs" || fail "下载的更新模块语法校验失败"
-"$node_binary" --input-type=module -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.argv[1]).href);' \
-  "$temporary_root/raylink-node.mjs" || fail "下载的 Node 程序依赖校验失败"
+# argv[1] must stay absent during import-only validation; supplying the module
+# there would start its CLI polling loop before installation or service handoff.
+RAYLINK_VERIFY_MODULE="$temporary_root/raylink-node.mjs" "$node_binary" --input-type=module \
+  -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.env.RAYLINK_VERIFY_MODULE).href);' \
+  || fail "下载的 Node 程序依赖校验失败"
 
 runtime_name="raylink-sing-box-${SING_BOX_VERSION}-linux-${runtime_arch}"
 runtime_url="$RAYLINK_SERVER/node/runtime/$runtime_name"

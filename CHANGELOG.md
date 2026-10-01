@@ -2,6 +2,8 @@
 
 ## 0.2.33 - 2026-10-02
 
+- Fix Linux Node installer/updater preflight imports inadvertently starting the daemon and blocking completion.
+
 - Fix whole-client startup on sing-box 1.14.2 by removing the empty direct DNS detour; embed complete routing rules for IP self-signed deployments without weakening TLS verification.
 - Allow ACME writes in a dedicated systemd state directory while retaining read-only Runtime configuration.
 - Resume interrupted first installations with private ownership/state checks and preserved credentials, certificates and encryption keys.

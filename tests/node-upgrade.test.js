@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,7 +8,9 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 
 async function updateNode(t, { healthFails = false, downloadFails = false, existingModules = false, savedCa = false } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), "raylink-node-update-"));
+  // Resolve macOS /var aliases so the import preflight sees the same paths as
+  // Linux. Otherwise a mistaken CLI entry-point match is silently masked.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "raylink-node-update-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, "node");
   const bin = join(directory, "bin");
@@ -22,7 +24,12 @@ async function updateNode(t, { healthFails = false, downloadFails = false, exist
     await writeFile(join(config, "control-plane-ca.pem"), "saved-public-control-plane-ca\n");
     await writeFile(join(config, "node.env"), `RAYLINK_SERVER=https://panel.example.com\nNODE_EXTRA_CA_CERTS=${config}/control-plane-ca.pem\nRAYLINK_CONTROL_CA_FILE=${config}/control-plane-ca.pem\n`);
   }
-  await symlink(process.execPath, join(root, "node", "bin", "node"));
+  await writeFile(join(root, "node", "bin", "node"), `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, process.argv.slice(2), { stdio: "inherit", env: process.env, timeout: 3000 });
+if (result.error) { process.stderr.write("Node validation exceeded its deadline\\n"); process.exit(124); }
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
   const preserved = {
     "raylink-node.mjs": "export const AGENT_VERSION = '0.7.0';\n",
     "build-metered-runtime.sh": "#!/bin/sh\n# old builder\n",
@@ -66,6 +73,7 @@ cp "$NODE_TEST_SOURCE/$asset" "$output"
   try {
     await exec("bash", [new URL("../web/node/upgrade.sh", import.meta.url).pathname], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RAYLINK_NODE_ROOT: root,
+        RAYLINK_RUNTIME_MODE: "dry-run", RAYLINK_NODE_STATE: join(directory, "import-state.json"),
         RAYLINK_NODE_CONFIG_ROOT: join(directory, "config"), RAYLINK_SYSCTL_ROOT: join(directory, "sysctl.d"),
         RAYLINK_SERVER: "https://panel.example.com", NODE_TEST_LOG: log,
         NODE_TEST_STARTED: started, NODE_TEST_SOURCE: new URL("../web/node", import.meta.url).pathname,

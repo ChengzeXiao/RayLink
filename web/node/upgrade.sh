@@ -85,11 +85,12 @@ done
 "$node_binary" --check "$candidate_root/network-tuning.mjs"
 "$node_binary" --check "$candidate_root/software-update.mjs"
 bash -n "$candidate_root/build-metered-runtime.sh"
-"$node_binary" --input-type=module -e '
+RAYLINK_VERIFY_MODULE="$candidate_root/raylink-node.mjs" "$node_binary" --input-type=module -e '
   import { pathToFileURL } from "node:url";
-  const node = await import(pathToFileURL(process.argv[1]).href);
+  // Keep argv[1] empty: importing a program must not trigger its CLI main guard.
+  const node = await import(pathToFileURL(process.env.RAYLINK_VERIFY_MODULE).href);
   if (node.AGENT_VERSION !== "0.9.0") throw new Error("控制面未提供 Node 0.9.0");
-' "$candidate_root/raylink-node.mjs"
+'
 cp -p "$RAYLINK_NODE_ROOT/raylink-node.mjs" "$backup_root/raylink-node.mjs"
 for asset in build-metered-runtime.sh network-tuning.mjs software-update.mjs; do
   if [ -f "$RAYLINK_NODE_ROOT/$asset" ]; then cp -p "$RAYLINK_NODE_ROOT/$asset" "$backup_root/$asset"; fi
