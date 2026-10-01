@@ -23,7 +23,7 @@ const clientCatalog = {
     platforms: "iPhone / iPad · 仅添加节点，保留现有规则",
     action: "下载节点订阅"
   },
-  "sing-box": { name: "sing-box", platforms: "iOS / Android / Desktop", action: "下载配置" }
+  "sing-box": { name: "sing-box", platforms: "1.14+ · iOS / Android / Desktop", action: "下载配置" }
 };
 const universalClientFormats = Object.freeze(["mihomo", "loon", "egern-profile", "egern", "sing-box"]);
 
@@ -1461,7 +1461,7 @@ function userSubscriptionAccessMarkup(user) {
                 <span class="subscription-client-badge">添加</span>
               </a>
               <a class="subscription-client-action" href="#" data-subscription-format="singbox">
-                <span><strong>sing-box JSON</strong><small>下载高级客户端配置</small></span>
+                <span><strong>sing-box JSON</strong><small>需要 sing-box 1.14 或更新版本</small></span>
                 <span class="subscription-client-badge">下载</span>
               </a>
             </div>

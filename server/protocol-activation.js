@@ -393,7 +393,7 @@ export class ProtocolActivationManager {
       throw activationError(
         "PROTOCOL_UNAVAILABLE",
         !availability.versionSupported
-          ? `RayLink 当前协议 schema 支持 sing-box 1.13.x，检测到 ${installation.version || "未知版本"}`
+          ? `RayLink 当前协议 schema 支持 sing-box 1.13.x / 1.14.x，检测到 ${installation.version || "未知版本"}`
           : availability.platformSupported
             ? `当前 sing-box 构建缺少 ${availability.missingTags.join(", ") || "所需能力"}`
             : `当前平台不支持 ${catalog.name}`

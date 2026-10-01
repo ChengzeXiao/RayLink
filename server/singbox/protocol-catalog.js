@@ -9,7 +9,7 @@ import {
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
 
-const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.13.14";
+const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.14.2";
 const docsRoot = "https://sing-box.sagernet.org/configuration/inbound";
 const protocolProbeTypes = new Set([
   "shadowsocks",
@@ -313,7 +313,7 @@ export function protocolAvailability(catalog, installation) {
     ...catalog.requiredTags,
     ...(catalog.clientCapable ? catalog.clientRequiredTags : [])
   ];
-  const versionSupported = /^1\.13(?:\.|$)/.test(String(installation?.version || ""));
+  const versionSupported = /^1\.(?:13|14)\.\d+$/.test(String(installation?.version || ""));
   return {
     ...catalog,
     available: installation?.installed === true
@@ -328,7 +328,7 @@ export function protocolAvailability(catalog, installation) {
   };
 }
 
-export function buildProtocolInbounds({ profiles, users, masterPassword }) {
+export function buildProtocolInbounds({ profiles, users, masterPassword, runtimeVersion = "1.14.2" }) {
   return profiles.filter((profile) => profile.enabled).map((profile) => {
     const catalog = protocolByType.get(profile.type);
     const base = {
@@ -340,7 +340,7 @@ export function buildProtocolInbounds({ profiles, users, masterPassword }) {
       base.listen = profile.listen;
       base.listen_port = profile.port;
     }
-    const tls = buildServerTls(profile);
+    const tls = buildServerTls(profile, runtimeVersion);
     if (tls) base.tls = tls;
     const transport = buildTransport(profile);
     if (transport) base.transport = transport;
@@ -568,6 +568,9 @@ function clientConfigForOutbounds(
   return {
     log: { level: "info", timestamp: true },
     dns: {
+      timeout: "5s",
+      cache_capacity: 4096,
+      optimistic: { enabled: true, timeout: "30s" },
       servers: [
         {
           type: "local",
@@ -672,7 +675,7 @@ function clientConfigForOutbounds(
     experimental: {
       cache_file: {
         enabled: true,
-        store_rdrc: true
+        store_dns: true
       }
     }
   };
@@ -752,7 +755,7 @@ function buildClientOutbound(profile, credential, server, tag = `raylink-${profi
   throw protocolError("CLIENT_PROTOCOL_UNSUPPORTED", `${profile.type} 无法生成用户客户端配置`, 409);
 }
 
-function buildServerTls(profile) {
+function buildServerTls(profile, runtimeVersion) {
   if (profile.tls.mode === "none") return null;
   if (profile.tls.mode === "certificate") {
     return {
@@ -763,10 +766,13 @@ function buildServerTls(profile) {
     };
   }
   if (profile.tls.mode === "acme") {
+    const useCertificateProvider = /^1\.14\./.test(runtimeVersion);
     return {
       enabled: true,
       server_name: profile.tls.serverName,
-      acme: {
+      // Unknown/legacy Hosts keep the 1.13 syntax during rolling upgrades.
+      [useCertificateProvider ? "certificate_provider" : "acme"]: {
+        ...(useCertificateProvider ? { type: "acme" } : {}),
         domain: [profile.tls.serverName],
         default_server_name: profile.tls.serverName,
         email: profile.tls.acmeEmail,

@@ -35,7 +35,7 @@ if (!archiveArgument || !runtimeArgument || !cronetArgument) {
   fail("用法：generate-release-metadata.mjs ARCHIVE RUNTIME VERSION RUNTIME_VERSION ARCH CRONET");
 }
 if (!/^\d+\.\d+\.\d+$/.test(version)) fail("RayLink 版本格式无效");
-if (!/^1\.13\.\d+$/.test(runtimeVersion)) fail("sing-box Runtime 版本格式无效");
+if (!/^1\.14\.2$/.test(runtimeVersion)) fail("sing-box Runtime 版本格式无效");
 if (!["amd64", "arm64"].includes(architecture)) fail("发布架构必须是 amd64 或 arm64");
 
 const archivePath = resolve(archiveArgument);

@@ -16,7 +16,7 @@ function createTestInstaller() {
     async status() {
       return {
         installed: true,
-        version: "1.13.14",
+        version: "1.14.2",
         platform: "linux",
         architecture: "amd64",
         tags: ["with_utls", "with_acme", "with_quic"],
@@ -40,6 +40,8 @@ async function startTestApp(overrides = {}) {
     adminPassword: "Admin@2026",
     publicOrigin: "http://127.0.0.1",
     runtimeMode: "dry-run",
+    // Keep mock capabilities independent of whatever Runtime is installed on the developer's PATH.
+    singBoxBinary: process.env.SING_BOX_BIN || join(dataDir, "uninstalled-test-runtime"),
     nodeHeartbeatMinIntervalMs: 0,
     runtimeUpdateCheckIntervalMs: 0,
     installer: createTestInstaller(),
@@ -218,7 +220,7 @@ test("admin can configure the ACME notification email before one-click TLS activ
     async status() {
       return {
         installed: true,
-        version: "1.13.14",
+        version: "1.14.2",
         platform: "linux",
         architecture: "amd64",
         tags: ["with_utls", "with_acme", "with_quic"]
@@ -330,7 +332,7 @@ test("remote one-click activation automatically retries the next port reported f
     async status() {
       return {
         installed: true,
-        version: "1.13.14",
+        version: "1.14.2",
         platform: "linux",
         architecture: "amd64",
         tags: ["with_utls", "with_acme", "with_quic"]
@@ -363,7 +365,7 @@ test("remote one-click activation automatically retries the next port reported f
       platform: "linux",
       architecture: "x64",
       agentVersion: "0.7.0",
-      runtimeVersion: "1.13.14",
+      runtimeVersion: "1.14.2",
       buildTags: ["with_utls", "with_acme", "with_quic"]
     })
   })).json();
@@ -688,7 +690,7 @@ test("empty-database API workflow reaches a multi-Host client configuration", as
         state: "running",
         mode: "test",
         configPath: this.activePath,
-        runtimeVersion: "1.13.14"
+        runtimeVersion: "1.14.2"
       };
     },
     async publish() {
@@ -724,7 +726,7 @@ test("empty-database API workflow reaches a multi-Host client configuration", as
       platform: "linux",
       architecture: "amd64",
       agentVersion: "0.7.0",
-      runtimeVersion: "1.13.14",
+      runtimeVersion: "1.14.2",
       buildTags: ["with_quic", "with_utls", "with_v2ray_api"]
     })
   });
@@ -785,7 +787,7 @@ test("empty-database API workflow reaches a multi-Host client configuration", as
       body: JSON.stringify({
         attempt: task.attempt,
         status: "succeeded",
-        runtimeVersion: "1.13.14",
+        runtimeVersion: "1.14.2",
         validation: "sing-box"
       })
     }
@@ -795,7 +797,7 @@ test("empty-database API workflow reaches a multi-Host client configuration", as
     method: "POST",
     headers: { ...nodeHeaders, "content-type": "application/json" },
     body: JSON.stringify({
-      runtimeVersion: "1.13.14",
+      runtimeVersion: "1.14.2",
       buildTags: ["with_quic", "with_utls", "with_v2ray_api"],
       runtimeState: "running",
       telemetry: {
@@ -1273,12 +1275,12 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
   const release = () => ({
     status: "ready",
     currentVersion: localVersion,
-    latestVersion: "1.13.14",
-    approvedVersion: "1.13.14",
-    updateAvailable: localVersion !== "1.13.14",
+    latestVersion: "1.14.2",
+    approvedVersion: "1.14.2",
+    updateAvailable: localVersion !== "1.14.2",
     compatible: true,
     checkedAt: "2026-07-26T08:00:00.000Z",
-    releaseUrl: "https://github.com/SagerNet/sing-box/releases/tag/v1.13.14"
+    releaseUrl: "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2"
   });
   const installer = {
     async status() {
@@ -1307,13 +1309,13 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
 
   const checkResponse = await api(testApp.baseUrl, cookie, "/api/runtime/update");
   assert.equal(checkResponse.status, 200);
-  assert.equal((await checkResponse.json()).latestVersion, "1.13.14");
+  assert.equal((await checkResponse.json()).latestVersion, "1.14.2");
 
   const upgradeResponse = await api(testApp.baseUrl, cookie, "/api/runtime/upgrade", {
     method: "POST"
   });
   assert.equal(upgradeResponse.status, 200);
-  assert.equal((await upgradeResponse.json()).version, "1.13.14");
+  assert.equal((await upgradeResponse.json()).version, "1.14.2");
   assert.equal(upgradeCalls, 1);
 
   const created = await (await api(testApp.baseUrl, cookie, "/api/hosts", {
@@ -1331,7 +1333,7 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
       token: created.enrollmentToken,
       hostname: "upgrade-sg",
       agentVersion: "0.7.0",
-      runtimeVersion: "1.13.14",
+      runtimeVersion: "1.14.2",
       buildTags: ["with_quic"]
     })
   })).json();
@@ -1344,7 +1346,7 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
   );
   assert.equal(remoteUpgrade.status, 202);
   const queued = await remoteUpgrade.json();
-  assert.equal(queued.targetVersion, "1.13.14");
+  assert.equal(queued.targetVersion, "1.14.2");
 
   const task = await (await fetch(`${testApp.baseUrl}/api/node/tasks/next`, {
     headers: {
@@ -1353,7 +1355,7 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
     }
   })).json();
   assert.equal(task.kind, "upgrade-runtime");
-  assert.equal(task.payload.targetVersion, "1.13.14");
+  assert.equal(task.payload.targetVersion, "1.14.2");
   await fetch(`${testApp.baseUrl}/api/node/tasks/${encodeURIComponent(task.id)}/complete`, {
     method: "POST",
     headers: {
@@ -2957,7 +2959,7 @@ test("RayLink Node reports real cumulative user counters idempotently and enforc
     body: JSON.stringify({
       token: createdHost.enrollmentToken,
       agentVersion: "0.7.0",
-      runtimeVersion: "1.13.14",
+      runtimeVersion: "1.14.2",
       buildTags: ["with_v2ray_api"]
     })
   })).json();

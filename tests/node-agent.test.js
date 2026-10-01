@@ -227,7 +227,7 @@ test("remote TCP protocol activation performs a real protocol probe before repor
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async (activation) => {
         events.push(["firewall", activation.network, activation.port]);
@@ -287,7 +287,7 @@ test("Hysteria 2 activation completes a real sing-box protocol fetch before repo
         if (probeAttempts === 1) throw new Error("temporary probe failure");
         return { stdout: "", stderr: "" };
       }
-      return { stdout: "sing-box version 1.13.14\n", stderr: "" };
+      return { stdout: "sing-box version 1.14.2\n", stderr: "" };
     },
     protocolProbeDelayMs: 0,
     firewallManager: {
@@ -367,7 +367,7 @@ test("a failed TUIC protocol probe restores the previous config and firewall rul
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async ({ port, network }) => ({
         managed: true,
@@ -461,7 +461,7 @@ test("remote protocol activation rolls config and firewall back after a failed p
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async () => ({
         managed: true,
@@ -510,7 +510,7 @@ test("remote protocol activation rejects an occupied system port before changing
       if (command === "ss") {
         return { stdout: "LISTEN 0 4096 *:18444 *:*\n", stderr: "" };
       }
-      return { stdout: "sing-box version 1.13.14\n", stderr: "" };
+      return { stdout: "sing-box version 1.14.2\n", stderr: "" };
     },
     firewallManager: {
       open: async () => {
@@ -554,7 +554,7 @@ test("RayLink Node applies a runtime upgrade task and reports the new version", 
       id: "task-upgrade-1",
       kind: "upgrade-runtime",
       attempt: 1,
-      payload: { targetVersion: "1.13.14" }
+      payload: { targetVersion: "1.14.2" }
     }),
     jsonResponse({ ok: true })
   ];
@@ -577,12 +577,12 @@ test("RayLink Node applies a runtime upgrade task and reports the new version", 
 
   await node.pollOnce();
 
-  assert.deepEqual(upgrades, [{ targetVersion: "1.13.14" }]);
+  assert.deepEqual(upgrades, [{ targetVersion: "1.14.2" }]);
   const completion = calls.find((call) => call.url.endsWith("/api/node/tasks/task-upgrade-1/complete"));
   assert.deepEqual(JSON.parse(completion.init.body), {
     attempt: 1,
     status: "succeeded",
-    result: { runtimeVersion: "1.13.14", rolledBack: false }
+    result: { runtimeVersion: "1.14.2", rolledBack: false }
   });
 });
 
@@ -596,7 +596,7 @@ test("RayLink Node reports an automatic Runtime rollback to the control plane", 
       id: "task-upgrade-failed",
       kind: "upgrade-runtime",
       attempt: 1,
-      payload: { targetVersion: "1.13.14" }
+      payload: { targetVersion: "1.14.2" }
     }),
     jsonResponse({ ok: true })
   ];
@@ -665,7 +665,7 @@ test("node runtime upgrade rolls the binary back when the new build rejects the 
     }
   });
 
-  await assert.rejects(adapter.upgrade({ targetVersion: "1.13.14" }), /已回滚/);
+  await assert.rejects(adapter.upgrade({ targetVersion: "1.14.2" }), /已回滚/);
   assert.equal(await readFile(binaryPath, "utf8"), "previous-binary");
   assert.equal(restarts, 1);
 });
@@ -689,7 +689,7 @@ test("node runtime refuses an upgrade before touching a Host without an active c
   });
 
   await assert.rejects(
-    adapter.upgrade({ targetVersion: "1.13.14" }),
+    adapter.upgrade({ targetVersion: "1.14.2" }),
     /没有活动配置/
   );
   assert.equal(installCalls, 0);
@@ -702,7 +702,7 @@ test("managed node upgrades an untagged Runtime to the approved metered build", 
   await writeFile(binaryPath, "previous-binary");
   await writeFile(builderPath, "#!/bin/sh\n");
   await writeFile(join(directory, "config.json"), "{}");
-  let version = "1.13.14";
+  let version = "1.14.2";
   let metered = false;
   const adapter = new NodeRuntimeAdapter({
     dataDir: directory,
@@ -730,8 +730,8 @@ test("managed node upgrades an untagged Runtime to the approved metered build", 
     }
   });
 
-  const result = await adapter.upgrade({ targetVersion: "1.13.14" });
-  assert.equal(result.runtimeVersion, "1.13.14");
+  const result = await adapter.upgrade({ targetVersion: "1.14.2" });
+  assert.equal(result.runtimeVersion, "1.14.2");
   assert.equal(metered, true);
 });
 
@@ -755,11 +755,11 @@ test("managed node upgrades from the signed release artifact without compiling",
     runtimeArch: "arm64",
     fetchFn: async (url) => {
       downloads.push(url);
-      if (url.endsWith("raylink-libcronet-1.13.14-linux-arm64.so.sha256")) {
+      if (url.endsWith("raylink-libcronet-1.14.2-linux-arm64.so.sha256")) {
         installed = true;
         return new Response(`${cronetChecksum}  raylink-libcronet.so\n`);
       }
-      if (url.endsWith("raylink-libcronet-1.13.14-linux-arm64.so")) {
+      if (url.endsWith("raylink-libcronet-1.14.2-linux-arm64.so")) {
         return new Response(cronetArtifact);
       }
       if (url.endsWith(".sha256")) {
@@ -774,7 +774,7 @@ test("managed node upgrades from the signed release artifact without compiling",
       if (command === binaryPath && args[0] === "version") {
         return {
           stdout: installed
-            ? "sing-box version 1.13.14\nTags: with_v2ray_api\n"
+            ? "sing-box version 1.14.2\nTags: with_v2ray_api\n"
             : "sing-box version 1.13.13\n",
           stderr: ""
         };
@@ -787,15 +787,15 @@ test("managed node upgrades from the signed release artifact without compiling",
     }
   });
 
-  const result = await adapter.upgrade({ targetVersion: "1.13.14" });
+  const result = await adapter.upgrade({ targetVersion: "1.14.2" });
 
-  assert.equal(result.runtimeVersion, "1.13.14");
+  assert.equal(result.runtimeVersion, "1.14.2");
   assert.equal(builderCalls, 0);
   assert.deepEqual(downloads, [
-    "https://panel.example.com/node/runtime/raylink-sing-box-1.13.14-linux-arm64",
-    "https://panel.example.com/node/runtime/raylink-sing-box-1.13.14-linux-arm64.sha256",
-    "https://panel.example.com/node/runtime/raylink-libcronet-1.13.14-linux-arm64.so",
-    "https://panel.example.com/node/runtime/raylink-libcronet-1.13.14-linux-arm64.so.sha256"
+    "https://panel.example.com/node/runtime/raylink-sing-box-1.14.2-linux-arm64",
+    "https://panel.example.com/node/runtime/raylink-sing-box-1.14.2-linux-arm64.sha256",
+    "https://panel.example.com/node/runtime/raylink-libcronet-1.14.2-linux-arm64.so",
+    "https://panel.example.com/node/runtime/raylink-libcronet-1.14.2-linux-arm64.so.sha256"
   ]);
   assert.deepEqual(await readFile(binaryPath), artifact);
   assert.deepEqual(await readFile(join(directory, "libcronet.so")), cronetArtifact);

@@ -151,13 +151,13 @@ try {
     singBoxVersionLine = command(singBoxBinary, ["version"]).split("\n")[0];
   } catch {
     throw new Error(
-      `找不到可执行的 sing-box；请安装 1.13.14 或设置 SING_BOX_BIN（当前：${singBoxBinary}）`
+      `找不到可执行的 sing-box；请安装 1.14.2 或设置 SING_BOX_BIN（当前：${singBoxBinary}）`
     );
   }
   assert.match(
     singBoxVersionLine,
-    /^sing-box version 1\.13\.14\b/,
-    `协议验收要求 sing-box 1.13.14，当前为：${singBoxVersionLine}`
+    /^sing-box version 1\.14\.2\b/,
+    `协议验收要求 sing-box 1.14.2，当前为：${singBoxVersionLine}`
   );
   try {
     command("openssl", ["version"]);
@@ -191,6 +191,7 @@ try {
     const profile = enabledProfile(protocol.type);
     const config = buildSingBoxConfig({
       host: {
+        runtimeVersion: "1.14.2",
         region: "test",
         buildTags: []
       },
@@ -207,6 +208,7 @@ try {
     const profile = realityProfile(protocol.type);
     const serverConfig = buildSingBoxConfig({
       host: {
+        runtimeVersion: "1.14.2",
         region: "test",
         buildTags: ["with_utls"]
       },
@@ -262,6 +264,7 @@ try {
     const profile = acmeProfile(type);
     const serverConfig = buildSingBoxConfig({
       host: {
+        runtimeVersion: "1.14.2",
         region: "test",
         buildTags: ["with_acme", "with_quic"]
       },
@@ -361,7 +364,7 @@ try {
   console.log(JSON.stringify({
     singBoxVersion: singBoxVersionLine,
     serverProtocolsChecked: checkedProtocols,
-    clientProtocolsChecked: clientProfiles.map((profile) => profile.type),
+    clientProtocolsChecked: clientConfig.outbounds.filter((outbound) => outbound.server_port).map((outbound) => outbound.type),
     realityProtocolsChecked: checkedRealityProtocols,
     acmeProtocolsChecked: checkedAcmeProtocols,
     protocolProbesChecked: checkedProtocolProbes

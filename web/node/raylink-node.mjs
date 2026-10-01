@@ -1140,8 +1140,8 @@ export class NodeRuntimeAdapter {
 
   async upgrade(task) {
     const targetVersion = String(task?.targetVersion || "");
-    if (targetVersion !== "1.13.14") {
-      throw new Error("RayLink 当前只批准升级到 sing-box 1.13.14 计量版");
+    if (targetVersion !== "1.14.2") {
+      throw new Error("RayLink 当前只批准升级到 sing-box 1.14.2 计量版");
     }
     await mkdir(this.dataDir, { recursive: true, mode: 0o750 });
     const resolvedBinaryPath = await this.resolveBinaryPath();

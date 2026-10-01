@@ -55,7 +55,7 @@ test("client capabilities match the TCP-only managed Shadowsocks listener", () =
   }
 });
 
-test("source catalog exposes the inbound protocols registered by sing-box 1.13", () => {
+test("RayLink retains its supported inbound catalog on sing-box 1.14", () => {
   assert.deepEqual(
     protocolCatalog.map((protocol) => protocol.type),
     [
@@ -113,7 +113,7 @@ test("managed protocol profiles compile separate user credentials into server in
   assert.equal(inbounds[1].users[1].name, "raylink-probe@internal");
 });
 
-test("ACME TLS profiles compile a node-bound certificate request for sing-box 1.13", () => {
+test("ACME TLS profiles compile a node-bound certificate provider for sing-box 1.14", () => {
   const profile = normalizeProtocolConfig({
     ...defaultProtocolConfigs().find((item) => item.type === "hysteria2"),
     enabled: true,
@@ -133,7 +133,8 @@ test("ACME TLS profiles compile a node-bound certificate request for sing-box 1.
   assert.deepEqual(inbound.tls, {
     enabled: true,
     server_name: "node.example.com",
-    acme: {
+    certificate_provider: {
+      type: "acme",
       domain: ["node.example.com"],
       default_server_name: "node.example.com",
       email: "ops@example.com",
@@ -247,6 +248,11 @@ test("client configuration includes every enabled user-facing protocol", () => {
   assert.ok(config.route.rule_set.every((ruleSet) => ruleSet.type === "inline"));
   assert.ok(config.route.rule_set.every((ruleSet) => !Object.hasOwn(ruleSet, "url")));
   assert.equal(config.experimental.cache_file.enabled, true);
+  assert.equal(config.experimental.cache_file.store_dns, true);
+  assert.equal(config.experimental.cache_file.store_rdrc, undefined);
+  assert.equal(config.dns.timeout, "5s");
+  assert.deepEqual(config.dns.optimistic, { enabled: true, timeout: "30s" });
+  assert.equal(config.dns.cache_capacity, 4096);
 });
 
 test("sing-box client configuration compiles custom routing and DNS before managed rules", () => {
@@ -582,6 +588,8 @@ test("protocol availability is gated by schema version, platform and client buil
   };
 
   assert.equal(protocolAvailability(naive, base).available, false);
+  assert.equal(protocolAvailability(naive, { ...base, version: "1.14.2", tags: ["with_naive_outbound"] }).available, true);
+  assert.equal(protocolAvailability(naive, { ...base, version: "1.15.0" }).versionSupported, false);
   assert.deepEqual(protocolAvailability(naive, base).missingTags, ["with_naive_outbound"]);
   assert.equal(protocolAvailability(naive, { ...base, version: "1.12.0" }).versionSupported, false);
   assert.equal(protocolAvailability(redirect, { ...base, platform: "win32" }).platformSupported, false);

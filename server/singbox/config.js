@@ -26,7 +26,8 @@ export function buildSingBoxConfig(snapshot, options = {}) {
     inbounds: buildProtocolInbounds({
       profiles,
       users,
-      masterPassword: snapshot.masterPassword
+      masterPassword: snapshot.masterPassword,
+      runtimeVersion: snapshot.host.runtimeVersion || "1.13.0"
     }),
     outbounds: [{
       type: "direct",

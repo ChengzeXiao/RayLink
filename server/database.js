@@ -2493,7 +2493,7 @@ export class RayLinkStore {
 
   runtimeSnapshot(hostId = "local") {
     const host = this.db.prepare(`
-      SELECT id, name, address, region, status, build_tags_json
+      SELECT id, name, address, region, status, build_tags_json, runtime_version AS runtimeVersion
       FROM hosts
       WHERE id = ?
     `).get(hostId);

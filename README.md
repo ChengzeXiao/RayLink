@@ -5,7 +5,7 @@
   <p>
     <a href="https://github.com/Zanetach/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Zanetach/RayLink?display_name=tag&style=flat-square"></a>
     <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-%E2%89%A522.5-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white">
-    <img alt="sing-box 1.13.x" src="https://img.shields.io/badge/sing--box-1.13.x-7BE495?style=flat-square">
+    <img alt="sing-box 1.14.x" src="https://img.shields.io/badge/sing--box-1.14.x-7BE495?style=flat-square">
     <img alt="Linux AMD64 and ARM64" src="https://img.shields.io/badge/Release-Linux%20AMD64%20%7C%20ARM64-2F3337?style=flat-square&logo=linux&logoColor=white">
   </p>
 </div>
@@ -89,26 +89,26 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
 
 - 安装并校验 Node.js 22
-- 安装预编译的 sing-box 1.13.14 计量版 Runtime
+- 安装预编译的 sing-box 1.14.2 计量版 Runtime
 - 配置 RayLink、HTTPS 入口与 systemd 自启动
 - 为 IP 首次访问生成本机证书
 - 输出仅显示一次、30 分钟有效的初始化地址
@@ -227,7 +227,7 @@ Loon/Egern 使用已解析 IP 拨号但保留 TLS SNI 域名，从而避开 Fake
 可用 `RAYLINK_ENDPOINT_PROBE_TIMEOUT_MS` 调整。可信 DNS 查询本身最多等待 2000ms，可用
 `RAYLINK_ENDPOINT_DNS_TIMEOUT_MS` 调整，确保更新请求能及时进入持久缓存或公网 IP 回退。
 
-运行自动化生产前检查。`check:production` 需要 PATH 中有 sing-box 1.13.14 与 OpenSSL；
+运行自动化生产前检查。`check:production` 需要 PATH 中有带 `with_v2ray_api` 的 sing-box 1.14.2、OpenSSL 与 curl；
 它覆盖代码回归、协议语法和短时内存烟测，但不替代干净 VPS、真实客户端、故障注入与
 72 小时运行验收：
 
@@ -279,3 +279,10 @@ npm run check:production
 - [领域模型](CONTEXT.md)
 - [架构决策记录](docs/adr/)
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
+
+
+### v0.2.33 / sing-box 1.14.2 迁移
+
+当前源码的发布目标为 v0.2.33；上面的 Release 下载命令需等对应版本发布后使用。
+服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
+证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

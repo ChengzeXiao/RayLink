@@ -267,7 +267,7 @@ function sendSubscriptionLanding(request, response, subscriptionUrl) {
       <div class="client-card"><strong>Loon 节点订阅</strong><small>复制下面的通用地址，在 Loon 中添加订阅</small><code>${escapeHtml(subscriptionUrl)}</code></div>
       <a href="${escapeHtml(egernProfileImport)}"><strong>Egern 智能配置</strong><small>iPhone、iPad · 智能选择、分流和 DNS</small></a>
       <a href="${escapeHtml(egernImport)}"><strong>Egern 节点订阅</strong><small>只导入节点，保留客户端现有规则</small></a>
-      <a href="${escapeHtml(singBoxUrl)}"><strong>sing-box JSON</strong><small>官方客户端与 Hiddify 高级配置</small></a>
+      <a href="${escapeHtml(singBoxUrl)}"><strong>sing-box JSON</strong><small>需要 sing-box 1.14+ 内核的客户端</small></a>
       <a href="${escapeHtml(mihomoUrl)}"><strong>下载 Mihomo YAML</strong><small>适用于 Clash Verge Rev、FlClash</small></a>
       <a href="${escapeHtml(egernUrl)}"><strong>下载 Egern YAML</strong><small>Egern 原生 proxies 节点集合</small></a>
     </div>
@@ -1860,7 +1860,7 @@ export async function createRayLinkApp(options) {
                 error: {
                   code: "PROTOCOL_UNAVAILABLE",
                   message: !availability.versionSupported
-                    ? `RayLink 当前协议 schema 支持 sing-box 1.13.x，检测到 ${installation.version || "未知版本"}`
+                    ? `RayLink 当前协议 schema 支持 sing-box 1.13.x / 1.14.x，检测到 ${installation.version || "未知版本"}`
                     : availability.platformSupported
                       ? `当前 sing-box 构建缺少 ${availability.missingTags.join(", ") || "所需能力"}`
                       : `当前平台不支持 ${catalog.name}`

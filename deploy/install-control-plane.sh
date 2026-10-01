@@ -155,7 +155,7 @@ install -d -m 0750 -o root -g caddy "$managed_root"
 install -d -m 0700 "$config_root"
 install -d -m 0750 -o root -g caddy /etc/caddy/raylink
 
-runtime_version=1.13.14
+runtime_version=1.14.2
 runtime_artifact="$source_root/web/node/runtime/raylink-sing-box-${runtime_version}-linux-${runtime_arch}"
 runtime_checksum="${runtime_artifact}.sha256"
 cronet_artifact="$source_root/web/node/runtime/raylink-libcronet-${runtime_version}-linux-${runtime_arch}.so"

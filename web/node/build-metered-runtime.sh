@@ -10,7 +10,7 @@ else
   default_build_root=/var/lib/raylink/toolchains
 fi
 RAYLINK_NODE_ROOT="${RAYLINK_NODE_ROOT:-$default_build_root}"
-GO_VERSION="${GO_VERSION:-1.24.7}"
+GO_VERSION="${GO_VERSION:-1.26.8}"
 SING_BOX_BUILD_TAGS="${SING_BOX_BUILD_TAGS:-with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_naive_outbound,with_v2ray_api,with_purego,badlinkname,tfogo_checklinkname0}"
 SING_BOX_LDFLAGS="${SING_BOX_LDFLAGS:--X github.com/sagernet/sing-box/constant.Version=${SING_BOX_VERSION} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0}"
 
@@ -20,9 +20,9 @@ fail() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail "必须以 root 运行"
-printf '%s' "$SING_BOX_VERSION" | grep -Eq '^1\.13\.[0-9]+$' || fail "只允许构建 sing-box 1.13.x"
+printf '%s' "$SING_BOX_VERSION" | grep -Eq '^1\.14\.2$' || fail "只允许构建 sing-box 1.14.2"
 case "$SING_BOX_VERSION" in
-  1.13.14) expected_module_sum='h1:p9/eqwilCgzyR/DpKM8hq7ppvzPIq1QMLgZWT3Cbg10=' ;;
+  1.14.2) expected_module_sum='h1:uZX7iz70o7lzoltR6sElMYP7kI7PVf23r4X0HQSozXM=' ;;
   *) fail "该版本尚未进入 RayLink 审批清单，缺少源码模块校验值" ;;
 esac
 printf '%s' "$OUTPUT_PATH" | grep -Eq '^/[A-Za-z0-9_./-]+$' || fail "输出路径无效"
@@ -41,13 +41,13 @@ case "$target_arch" in
   *) fail "不支持的目标 CPU 架构：$target_arch" ;;
 esac
 case "${GO_VERSION}:${go_arch}" in
-  1.24.7:amd64) expected_go_sha256="da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f" ;;
-  1.24.7:arm64) expected_go_sha256="fd2bccce882e29369f56c86487663bb78ba7ea9e02188a5b0269303a0c3d33ab" ;;
+  1.26.8:amd64) expected_go_sha256="d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b" ;;
+  1.26.8:arm64) expected_go_sha256="211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0" ;;
   *) fail "该 Go 版本或架构尚未进入 RayLink 审批清单" ;;
 esac
 case "${SING_BOX_VERSION}:${target_arch}" in
-  1.13.14:amd64) expected_official_archive_sha256="f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697" ;;
-  1.13.14:arm64) expected_official_archive_sha256="4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e" ;;
+  1.14.2:amd64) expected_official_archive_sha256="a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6" ;;
+  1.14.2:arm64) expected_official_archive_sha256="b43a1fb1bda131c6653576741ce527eb2bdeab7c9308ca90ee8b972abb7e4a7f" ;;
   *) fail "该 sing-box 版本或架构缺少已审批的 Cronet 依赖校验值" ;;
 esac
 

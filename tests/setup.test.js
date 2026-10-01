@@ -815,11 +815,11 @@ test("the control-plane installer emits a fragment setup URL and never persists 
   assert.doesNotMatch(runtimeBuilder, /go\.dev\/dl\/\$\{archive\}\.sha256/);
   assert.match(
     runtimeBuilder,
-    /da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f/
+    /d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b/
   );
   assert.match(
     runtimeBuilder,
-    /fd2bccce882e29369f56c86487663bb78ba7ea9e02188a5b0269303a0c3d33ab/
+    /211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0/
   );
   assert.ok(
     runtimeBuilder.includes(
@@ -862,8 +862,8 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
   const directory = await mkdtemp(join(tmpdir(), "raylink-release-metadata-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const archivePath = join(directory, "raylink-0.2.20-linux-amd64.tar.gz");
-  const runtimePath = join(directory, "raylink-sing-box-1.13.14-linux-amd64");
-  const cronetPath = join(directory, "raylink-libcronet-1.13.14-linux-amd64.so");
+  const runtimePath = join(directory, "raylink-sing-box-1.14.2-linux-amd64");
+  const cronetPath = join(directory, "raylink-libcronet-1.14.2-linux-amd64.so");
   await writeFile(archivePath, "known-raylink-archive");
   await writeFile(runtimePath, "known-sing-box-runtime");
   await writeFile(cronetPath, "known-cronet-runtime");
@@ -873,7 +873,7 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
     archivePath,
     runtimePath,
     "0.2.20",
-    "1.13.14",
+    "1.14.2",
     "amd64",
     cronetPath
   ]);
@@ -886,7 +886,7 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
   assert.equal(manifest.architecture, "amd64");
   assert.equal(manifest.archive.filename, "raylink-0.2.20-linux-amd64.tar.gz");
   assert.match(manifest.archive.sha256, /^[a-f0-9]{64}$/);
-  assert.equal(manifest.runtime.version, "1.13.14");
+  assert.equal(manifest.runtime.version, "1.14.2");
   assert.match(manifest.runtime.sha256, /^[a-f0-9]{64}$/);
   assert.equal(manifest.runtime.companions[0].name, "Cronet");
   assert.match(manifest.runtime.companions[0].sha256, /^[a-f0-9]{64}$/);
@@ -899,10 +899,10 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
     entry.name === "RayLink" && entry.versionInfo === "0.2.20"
   )));
   assert.ok(sbom.packages.some((entry) => (
-    entry.name === "sing-box" && entry.versionInfo === "1.13.14"
+    entry.name === "sing-box" && entry.versionInfo === "1.14.2"
   )));
   assert.ok(sbom.packages.some((entry) => (
-    entry.name === "Cronet" && entry.versionInfo === "1.13.14"
+    entry.name === "Cronet" && entry.versionInfo === "1.14.2"
   )));
   assert.ok(sbom.relationships.some((entry) => entry.relationshipType === "DEPENDS_ON"));
 });

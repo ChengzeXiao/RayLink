@@ -23,7 +23,7 @@ source_root="${RAYLINK_SOURCE_DIR:-}"
 health_port="${RAYLINK_PORT:-}"
 force_upgrade="${RAYLINK_FORCE_UPGRADE:-false}"
 public_ip="${RAYLINK_PUBLIC_IP:-}"
-runtime_version=1.13.14
+runtime_version=1.14.2
 cronet_install_path="${RAYLINK_CRONET_PATH:-/usr/local/bin/libcronet.so}"
 cronet_candidate_path="${cronet_install_path}.candidate.$$"
 case "$(uname -m)" in

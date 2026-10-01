@@ -1,6 +1,6 @@
 {
   "name": "raylink-control-plane",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,6 +13,8 @@
     "check": "node --check server/index.js && node --check web/app.js && npm test",
     "check:protocols": "node tests/protocol-check.mjs",
     "check:soak": "node --expose-gc tests/soak-memory.mjs",
-    "check:production": "npm run check && npm run check:protocols && npm run check:soak"
+    "check:production": "npm run check && npm run check:protocols && npm run check:traffic && npm run check:dns && npm run check:soak",
+    "check:traffic": "node tests/runtime-traffic-check.mjs",
+    "check:dns": "node tests/dns-resilience-check.mjs"
   }
 }

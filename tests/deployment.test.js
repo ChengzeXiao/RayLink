@@ -447,3 +447,24 @@ test("store waits for a concurrent SQLite bootstrap lock before enabling WAL", a
   const result = await nextMessage();
   assert.deepEqual(result, { type: "ready" });
 });
+
+test("publication migrates ACME only after the Host reports a 1.14 Runtime", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "raylink-acme-migration-"));
+  const store = new RayLinkStore({ dbPath: join(dataDir, "raylink.db"),
+    adminUsername: "admin", adminPassword: "test-upgrade-password" });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const adapter = new RecordingRuntimeAdapter();
+  const manager = new RuntimeManager({ store, adapter, listenPort: 8388 });
+  store.updateHostProtocolConfig("local", "hysteria2", {
+    enabled: true, port: 8448,
+    tls: { mode: "acme", serverName: "node.example.com", acmeEmail: "ops@example.com" }
+  });
+  for (const version of ["1.13.14", "1.14.2"]) {
+    store.updateLocalRuntimeCapabilities({ version, platform: "linux", tags: ["with_acme", "with_quic"] });
+    await manager.publish();
+    const tls = JSON.parse(adapter.publications.at(-1).configText).inbounds
+      .find((inbound) => inbound.type === "hysteria2").tls;
+    assert.equal(Boolean(tls.certificate_provider), version === "1.14.2");
+    assert.equal(Boolean(tls.acme), version === "1.13.14");
+  }
+});

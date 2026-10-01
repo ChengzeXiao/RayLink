@@ -74,7 +74,7 @@ test("Linux one-click installation uses only the approved metered builder", asyn
         return { stdout: "" };
       }
       return {
-        stdout: "sing-box version 1.13.14\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic,with_v2ray_api"
+        stdout: "sing-box version 1.14.2\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic,with_v2ray_api"
       };
     }
   });
@@ -82,7 +82,7 @@ test("Linux one-click installation uses only the approved metered builder", asyn
   assert.equal((await installer.install()).installed, true);
   assert.deepEqual(calls[1], [
     "sh",
-    [installer.meteredRuntimeBuilder, "1.13.14", binaryPath]
+    [installer.meteredRuntimeBuilder, "1.14.2", binaryPath]
   ]);
   assert.equal(calls.some(([, args]) => args[0] === "-c"), false);
 });
@@ -93,12 +93,12 @@ test("Linux one-click installation prefers the packaged Runtime artifact", async
   const binaryPath = join(directory, "raylink-sing-box");
   const artifactPath = join(
     runtimeArtifactDir,
-    "raylink-sing-box-1.13.14-linux-amd64"
+    "raylink-sing-box-1.14.2-linux-amd64"
   );
   const artifact = Buffer.from("precompiled-runtime");
   const cronetPath = join(
     runtimeArtifactDir,
-    "raylink-libcronet-1.13.14-linux-amd64.so"
+    "raylink-libcronet-1.14.2-linux-amd64.so"
   );
   const cronetArtifact = Buffer.from("precompiled-cronet");
   const checksum = createHash("sha256").update(artifact).digest("hex");
@@ -124,7 +124,7 @@ test("Linux one-click installation prefers the packaged Runtime artifact", async
           throw error;
         }
         return {
-          stdout: "sing-box version 1.13.14\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic,with_v2ray_api"
+          stdout: "sing-box version 1.14.2\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic,with_v2ray_api"
         };
       }
       return { stdout: "" };
@@ -133,7 +133,7 @@ test("Linux one-click installation prefers the packaged Runtime artifact", async
 
   const installed = await installer.install();
 
-  assert.equal(installed.version, "1.13.14");
+  assert.equal(installed.version, "1.14.2");
   assert.equal(builderCalls, 0);
   assert.deepEqual(await readFile(binaryPath), artifact);
   assert.deepEqual(await readFile(join(directory, "libcronet.so")), cronetArtifact);
@@ -157,7 +157,7 @@ test("production installer rebuilds a compatible Linux Runtime with user meterin
       }
       return {
         stdout: [
-          "sing-box version 1.13.14",
+          "sing-box version 1.14.2",
           "Environment: go1.26.5 linux/amd64",
           `Tags: with_quic${metered ? ",with_v2ray_api" : ""}`
         ].join("\n")
@@ -167,11 +167,11 @@ test("production installer rebuilds a compatible Linux Runtime with user meterin
 
   const installation = await installer.install();
 
-  assert.equal(installation.version, "1.13.14");
+  assert.equal(installation.version, "1.14.2");
   assert.equal(installation.tags.includes("with_v2ray_api"), true);
   assert.ok(calls.some(([file, args]) => (
     file === "sh"
-    && args.join(" ") === `/opt/raylink/build-metered-runtime.sh 1.13.14 ${binaryPath}`
+    && args.join(" ") === `/opt/raylink/build-metered-runtime.sh 1.14.2 ${binaryPath}`
   )));
   assert.equal(calls.some(([, args]) => args[0] === "-c"), false);
 });
@@ -185,7 +185,7 @@ test("one-click installer replaces a mismatched Linux sing-box version", async (
     runner: async (file, args) => {
       calls.push([file, args]);
       if (file === "sh") {
-        version = "1.13.14";
+        version = "1.14.2";
         return { stdout: "" };
       }
       return {
@@ -194,10 +194,10 @@ test("one-click installer replaces a mismatched Linux sing-box version", async (
     }
   });
 
-  assert.equal((await installer.install()).version, "1.13.14");
+  assert.equal((await installer.install()).version, "1.14.2");
   assert.deepEqual(calls[1], [
     "sh",
-    [installer.meteredRuntimeBuilder, "1.13.14", "/usr/local/bin/raylink-sing-box"]
+    [installer.meteredRuntimeBuilder, "1.14.2", "/usr/local/bin/raylink-sing-box"]
   ]);
 });
 
@@ -209,14 +209,14 @@ test("one-click installer keeps an approved metering-capable Runtime", async () 
     runner: async (file, args) => {
       calls.push([file, args]);
       return {
-        stdout: "sing-box version 1.13.14\nEnvironment: go1.26.5 linux/amd64\nTags: with_quic,with_v2ray_api"
+        stdout: "sing-box version 1.14.2\nEnvironment: go1.26.5 linux/amd64\nTags: with_quic,with_v2ray_api"
       };
     }
   });
 
   const installation = await installer.install();
 
-  assert.equal(installation.version, "1.13.14");
+  assert.equal(installation.version, "1.14.2");
   assert.equal(installation.alreadyInstalled, true);
   assert.equal(calls.length, 1);
 });
@@ -226,7 +226,7 @@ test("one-click installer rejects an unsupported newer Runtime instead of silent
     binaryPath: "sing-box",
     platform: "linux",
     runner: async () => ({
-      stdout: "sing-box version 1.14.0\nEnvironment: go1.27.0 linux/amd64\nTags: with_quic"
+      stdout: "sing-box version 1.15.0\nEnvironment: go1.27.0 linux/amd64\nTags: with_quic"
     })
   });
 
@@ -276,10 +276,10 @@ test("runtime update check offers only the approved metered release", async () =
       stdout: "sing-box version 1.13.12\nEnvironment: go1.26.5 linux/amd64\nTags: with_quic"
     }),
     fetchImpl: async () => new Response(JSON.stringify({
-      tag_name: "v1.13.15",
+      tag_name: "v1.14.3",
       prerelease: false,
       draft: false,
-      html_url: "https://github.com/SagerNet/sing-box/releases/tag/v1.13.15",
+      html_url: "https://github.com/SagerNet/sing-box/releases/tag/v1.14.3",
       published_at: "2026-07-25T08:00:00Z"
     }), {
       status: 200,
@@ -290,30 +290,30 @@ test("runtime update check offers only the approved metered release", async () =
   const update = await installer.checkForUpdates();
 
   assert.equal(update.currentVersion, "1.13.12");
-  assert.equal(update.latestVersion, "1.13.14");
-  assert.equal(update.discoveredVersion, "1.13.15");
+  assert.equal(update.latestVersion, "1.14.2");
+  assert.equal(update.discoveredVersion, "1.14.3");
   assert.equal(update.updateAvailable, true);
   assert.equal(update.compatible, true);
-  assert.match(update.approvalNotice, /1\.13\.15.*尚未进入/);
-  assert.equal(installer.releaseStatus().latestVersion, "1.13.14");
+  assert.match(update.approvalNotice, /1\.14\.3.*尚未进入/);
+  assert.equal(installer.releaseStatus().latestVersion, "1.14.2");
 });
 
 test("runtime update check offers a same-version rebuild when metering is missing", async () => {
   const installer = new SingBoxInstaller({
     platform: "linux",
     runner: async () => ({
-      stdout: "sing-box version 1.13.14\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic"
+      stdout: "sing-box version 1.14.2\nEnvironment: go1.24.7 linux/amd64\nTags: with_quic"
     }),
     fetchImpl: async () => new Response(JSON.stringify({
-      tag_name: "v1.13.15",
+      tag_name: "v1.14.3",
       prerelease: false,
       draft: false,
-      html_url: "https://github.com/SagerNet/sing-box/releases/tag/v1.13.15"
+      html_url: "https://github.com/SagerNet/sing-box/releases/tag/v1.14.3"
     }), { status: 200 })
   });
 
   const update = await installer.checkForUpdates();
-  assert.equal(update.latestVersion, "1.13.14");
+  assert.equal(update.latestVersion, "1.14.2");
   assert.equal(update.meteringMigrationRequired, true);
   assert.equal(update.updateAvailable, true);
 });
@@ -331,7 +331,7 @@ test("runtime update check falls back to the official latest-release redirect wh
       return {
         ok: true,
         status: 200,
-        url: "https://github.com/SagerNet/sing-box/releases/tag/v1.13.14"
+        url: "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2"
       };
     }
   });
@@ -339,9 +339,9 @@ test("runtime update check falls back to the official latest-release redirect wh
   const update = await installer.checkForUpdates();
 
   assert.equal(fetchCalls, 2);
-  assert.equal(update.latestVersion, "1.13.14");
+  assert.equal(update.latestVersion, "1.14.2");
   assert.equal(update.updateAvailable, true);
-  assert.equal(update.releaseUrl, "https://github.com/SagerNet/sing-box/releases/tag/v1.13.14");
+  assert.equal(update.releaseUrl, "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2");
 });
 
 test("runtime upgrade validates the active config and restarts the service", async () => {
@@ -377,9 +377,9 @@ test("runtime upgrade validates the active config and restarts the service", asy
     }
   });
 
-  const upgraded = await installer.upgrade("1.13.14");
+  const upgraded = await installer.upgrade("1.14.2");
 
-  assert.equal(upgraded.version, "1.13.14");
+  assert.equal(upgraded.version, "1.14.2");
   assert.equal(await readFile(binaryPath, "utf8"), "candidate-binary");
   assert.ok(calls.some(([file, args]) => file === binaryPath && args.join(" ") === `check -c ${configPath}`));
   assert.ok(calls.some(([file, args]) => file === "systemctl" && args.join(" ") === "restart raylink-sing-box.service"));
@@ -419,12 +419,12 @@ test("online upgrade preserves the with_v2ray_api metering build", async () => {
     }
   });
 
-  const upgraded = await installer.upgrade("1.13.14");
+  const upgraded = await installer.upgrade("1.14.2");
 
-  assert.equal(upgraded.version, "1.13.14");
+  assert.equal(upgraded.version, "1.14.2");
   assert.ok(calls.some(([file, args]) => (
     file === "sh"
-    && args.join(" ") === `/opt/raylink/build-metered-runtime.sh 1.13.14 ${binaryPath}`
+    && args.join(" ") === `/opt/raylink/build-metered-runtime.sh 1.14.2 ${binaryPath}`
   )));
   assert.equal(calls.some(([, args]) => args[0] === "-c"), false);
 });
@@ -479,7 +479,7 @@ test("failed runtime upgrade restores the previous binary and service", async ()
   });
 
   await assert.rejects(
-    installer.upgrade("1.13.14"),
+    installer.upgrade("1.14.2"),
     (error) => error.code === "RUNTIME_UPGRADE_ROLLED_BACK"
   );
   assert.equal(await readFile(binaryPath, "utf8"), "previous-binary");

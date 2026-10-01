@@ -9,17 +9,17 @@
 
 ## 推荐：一键安装与首次初始化
 
-v0.2.32 Release 当前支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。
+v0.2.33 源码发布目标（待发布）支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。以下 0.2.33 下载命令须在对应 Release 发布后使用。
 使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
 ```
 
 脚本检测 CPU 架构和公网 IP，自动补齐 Debian/Ubuntu 上缺少的归档校验工具，
@@ -27,25 +27,25 @@ bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/dow
 云主机若有 NAT、多块网卡，建议显式提供实际访问地址：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 安装指定版本：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --version 0.2.32'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --version 0.2.33'
 ```
 
 只验证下载、校验和解压，不修改系统：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --dry-run'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --dry-run'
 ```
 
 一键安装会完成：
 
 - 从 Node.js 官方源安装并校验 Node.js 22；
-- 优先校验并安装发布包内预编译的 sing-box 1.13.14 计量版；
+- 优先校验并安装发布包内预编译的 sing-box 1.14.2 计量版；
 - 开发源码包未携带预编译 Runtime 时，才回退到本机编译；
 - 从 Caddy 官方 APT 仓库安装 Caddy，并配置 systemd 自启动；
 - 安装 RayLink 和 sing-box systemd 服务；
@@ -62,7 +62,7 @@ sudo env RAYLINK_PUBLIC_IP=203.0.113.10 bash deploy/install-control-plane.sh
 SHA-256 证书指纹。初始化令牌只以哈希形式写入服务器，默认 30 分钟后失效；
 初始化成功后立即作废。
 
-### 升级到 v0.2.32
+### 升级到 v0.2.33
 
 在已安装 RayLink 的服务器上重新执行同一条一键命令即可。安装器会识别
 `/opt/raylink`，保持 sing-box Runtime 运行，备份当前应用和
@@ -70,7 +70,7 @@ SHA-256 证书指纹。初始化令牌只以哈希形式写入服务器，默认
 升级器会自动恢复应用、数据和 systemd 服务单元：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 升级备份保存在 `/var/backups/raylink/`。
@@ -100,7 +100,7 @@ sudo bash deploy/migrate-default-tls.sh
 Linux Runner 上执行：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14
+sudo bash deploy/build-runtime-artifact.sh 1.14.2
 ```
 
 默认产物写入 `web/node/runtime/`。每个架构包含计量版 sing-box、独立
@@ -112,30 +112,30 @@ SHA-256，以及从同版本官方发布包提取并按固定 SHA-256 验证的 
 也可以指定自定义目录；相对路径会先转换为绝对路径，避免构建器拒绝：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14 ./release-runtime
+sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime
 ```
 
 第三个参数可以指定目标架构，例如在 ARM64 构建机上交叉构建 AMD64：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14 ./release-runtime amd64
+sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime amd64
 ```
 
 交叉构建阶段会验证目标 ELF 架构；发布前还必须在 AMD64 Linux 用户空间执行
-`raylink-sing-box-1.13.14-linux-amd64 version`，确认版本和完整审批 build tags。
+`raylink-sing-box-1.14.2-linux-amd64 version`，确认版本和完整审批 build tags。
 原生架构构建会在脚本内部直接完成这项执行校验。
 
-本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.32 默认装配
+本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.33 默认装配
 AMD64 Runtime：
 
 ```bash
-bash deploy/package-release.sh 0.2.32
+bash deploy/package-release.sh 0.2.33
 ```
 
 也可以显式指定本次发布需要装配的架构：
 
 ```bash
-RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.32
+RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.33
 ```
 
 发布包包含运行程序、部署工具、README、变更日志和生产门槛文档，不会打包本地
