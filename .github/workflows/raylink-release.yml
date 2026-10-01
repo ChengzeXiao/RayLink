@@ -82,6 +82,11 @@ jobs:
           bash deploy/package-release.sh \
             "${{ steps.version.outputs.version }}" \
             "output/releases/raylink-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+      - name: Verify native installation, service sandbox and upgrade rollback
+        run: |
+          sudo env RAYLINK_DISPOSABLE_SYSTEM=1 bash tests/linux-install-smoke.sh \
+            "output/releases/raylink-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            "${{ steps.version.outputs.version }}"
       - uses: actions/upload-artifact@v7
         with:
           name: raylink-linux-${{ matrix.arch }}
@@ -121,5 +126,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             release-assets/* \
             --verify-tag \
-            --generate-notes \
+            --notes-file "docs/release/${GITHUB_REF_NAME}.md" \
             --title "RayLink $GITHUB_REF_NAME"

@@ -981,6 +981,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
   const nodeRoot = join(directory, "node");
   const fakeBin = join(directory, "bin");
   const serviceUnit = join(directory, "raylink.service");
+  const runtimeServiceUnit = join(directory, "sing-box-raylink.service");
   const environmentFile = join(directory, "raylink.env");
   const orderLog = join(directory, "order.log");
   const cronetSource = join(directory, "raylink-libcronet.so");
@@ -1000,8 +1001,10 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
   `);
   durableDatabase.close();
   const previousServiceUnit = "[Service]\nExecStart=/opt/raylink/server/old-index.js\n";
+  const previousRuntimeServiceUnit = "[Service]\nProtectSystem=strict\n";
   const previousEnvironment = "RAYLINK_PROXY_HOST=node.example.com\n";
   await writeFile(serviceUnit, previousServiceUnit);
+  await writeFile(runtimeServiceUnit, previousRuntimeServiceUnit);
   await writeFile(environmentFile, previousEnvironment, { mode: 0o600 });
   const cronetArtifact = Buffer.from("approved-cronet-runtime");
   const cronetChecksum = createHash("sha256").update(cronetArtifact).digest("hex");
@@ -1099,6 +1102,8 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
     operations,
     previousEnvironment,
     previousServiceUnit,
+    previousRuntimeServiceUnit,
+    runtimeServiceUnit,
     serviceUnit
   };
 }
@@ -1122,6 +1127,17 @@ test("the control-plane upgrader backfills the local Host dial IP", async (t) =>
       ""
     ].join("\n")
   );
+});
+
+test("the control-plane upgrader installs writable ACME storage without interrupting the Runtime", async (t) => {
+  const { error, operations, runtimeServiceUnit } = await runControlPlaneUpgradeHarness(t);
+  assert.equal(error, null);
+  const unit = await readFile(runtimeServiceUnit, "utf8");
+  assert.match(unit, /^StateDirectory=raylink\/acme$/m);
+  assert.match(unit, /^StateDirectoryMode=0700$/m);
+  assert.match(unit, /^ReadWritePaths=\/var\/lib\/raylink\/acme$/m);
+  assert.match(unit, /^ReadOnlyPaths=\/var\/lib\/raylink\/sing-box\/config\.json$/m);
+  assert.ok(!operations.some((entry) => /^systemctl (start|stop|restart).*sing-box/.test(entry)));
 });
 
 test("the control-plane upgrader stops writers before backing up durable data", async (t) => {
@@ -1161,6 +1177,8 @@ test("a failed control-plane health check restores application, data and service
     operations,
     previousEnvironment,
     previousServiceUnit,
+    previousRuntimeServiceUnit,
+    runtimeServiceUnit,
     serviceUnit
   } = await runControlPlaneUpgradeHarness(t, { healthFails: true });
 
@@ -1182,6 +1200,7 @@ test("a failed control-plane health check restores application, data and service
     restoredDatabase.close();
   }
   assert.equal(await readFile(serviceUnit, "utf8"), previousServiceUnit);
+  assert.equal(await readFile(runtimeServiceUnit, "utf8"), previousRuntimeServiceUnit);
   assert.equal(await readFile(environmentFile, "utf8"), previousEnvironment);
   await assert.rejects(readFile(cronetInstallPath), (readError) => readError.code === "ENOENT");
   assert.equal(
@@ -1205,6 +1224,7 @@ test("one-command bootstrap verifies and prepares the matching release package",
   const armBinDirectory = join(directory, "arm-bin");
   await mkdir(releaseDirectory, { recursive: true });
   await mkdir(packageDeployDirectory, { recursive: true });
+  await cp(new URL("../deploy/initial-install-state.sh", import.meta.url), join(packageDeployDirectory, "initial-install-state.sh"));
   await mkdir(fakeBinDirectory, { recursive: true });
   await mkdir(armBinDirectory, { recursive: true });
   await writeFile(
@@ -1333,6 +1353,17 @@ test("one-command bootstrap verifies and prepares the matching release package",
     await readFile(upgradeRecordPath, "utf8"),
     `${existingInstallRoot}|203.0.113.10`
   );
+
+  const partialConfigRoot = join(directory, "partial-config");
+  const pending = join(partialConfigRoot, "install-pending");
+  const resumeRecord = join(directory, "resume-record.txt");
+  await mkdir(pending, { recursive: true, mode: 0o700 });
+  await writeFile(join(pending, "owner"), "RAYLINK_INITIAL_INSTALL_V1\n", { mode: 0o600 });
+  await execFile("bash", installerArguments, {
+    env: { ...installerEnvironment, RAYLINK_INSTALL_ROOT: existingInstallRoot,
+      RAYLINK_CONFIG_ROOT: partialConfigRoot, INSTALL_RECORD_PATH: resumeRecord }
+  });
+  assert.equal(await readFile(resumeRecord, "utf8"), "203.0.113.10", "owned partial applications resume installation rather than invoking the running-service upgrader");
 
   await assert.rejects(
     () => execFile("bash", installerArguments, {

@@ -1,6 +1,12 @@
 # RayLink Changelog
 
-## 0.2.33 (unreleased)
+## 0.2.33 - 2026-10-02
+
+- Fix whole-client startup on sing-box 1.14.2 by removing the empty direct DNS detour; embed complete routing rules for IP self-signed deployments without weakening TLS verification.
+- Allow ACME writes in a dedicated systemd state directory while retaining read-only Runtime configuration.
+- Resume interrupted first installations with private ownership/state checks and preserved credentials, certificates and encryption keys.
+- Reject IP changes on domain-bound Hosts before mutation to prevent stale DNS and subscription endpoints.
+- Gate releases on native Linux installation, HTTPS, actual Shadowsocks traffic/metering/revocation, MCP, kernel BBR telemetry and application upgrade/rollback checks on both architectures.
 
 - Complete unattended first installation with generated administrator credentials, default Shadowsocks, publication and runtime/listener checks; retain an optional interactive setup.
 - Add automatic Linux BBR configuration and fresh kernel telemetry in host lists/details; show unsupported, failed, stale and offline states explicitly.
@@ -26,7 +32,7 @@
 - Add native smart-routing and failover simulations with a negative control for AI exit stability.
 - Upgrade the approved metered sing-box Runtime to 1.14.2 and the builder to Go 1.26.8.
 - Migrate ACME per Host version and enable bounded optimistic DNS caching in 1.14+ client configurations.
-- Add Node 0.8.0 program-only updates, preserve the Runtime/Cronet pair during application upgrades, and gate Runtime upgrades on the Node version.
+- Add Node 0.9.0 program-only updates, preserve the Runtime/Cronet pair during application upgrades, and gate Runtime upgrades on the Node version.
 - Add real protocol traffic, User metering/revocation, DNS outage and Node update rollback checks.
 - Preserve successful User saves during refresh failures and correct mobile fallback and DNS routing behavior.
 

@@ -30,7 +30,7 @@ EOF
 
 version="${RAYLINK_VERSION:-0.2.33}"
 public_ip="${RAYLINK_PUBLIC_IP:-}"
-default_release_base_url="https://github.com/ZaneClaw/RayLink/releases/download"
+default_release_base_url="https://github.com/ChengzeXiao/RayLink/releases/download"
 release_base_url="${RAYLINK_RELEASE_BASE_URL:-$default_release_base_url}"
 dry_run=false
 
@@ -166,7 +166,11 @@ read_archive \
 installer="${temporary_root}/${expected_root}/deploy/install-control-plane.sh"
 upgrade_installer="${temporary_root}/${expected_root}/deploy/upgrade-control-plane.sh"
 install_root="${RAYLINK_INSTALL_ROOT:-/opt/raylink}"
-if [ -f "$install_root/package.json" ]; then
+pending_install="${RAYLINK_CONFIG_ROOT:-/etc/raylink}/install-pending"
+if [ -f "$install_root/package.json" ] \
+  && ! { [ -f "${temporary_root}/${expected_root}/deploy/initial-install-state.sh" ] \
+    && bash "${temporary_root}/${expected_root}/deploy/initial-install-state.sh" pending "$pending_install" \
+      "${RAYLINK_DATA_ROOT:-/var/lib/raylink}" "${RAYLINK_NODE_ROOT:-/opt/raylink-nodejs}"; }; then
   action=upgrade
   installer="$upgrade_installer"
   [ -f "$installer" ] || fail "发布包缺少控制面升级器"

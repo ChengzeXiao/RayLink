@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { RayLinkStore } from "../server/database.js";
 import { NodeDomains } from "../server/node-domains.js";
+import { buildUserClientConfig } from "../server/singbox/client-config.js";
 
 async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-domains-"));
@@ -55,6 +56,42 @@ test("automatic DNS creates one unproxied record, reuses it after a lost respons
   assert.equal(f.records[0].type, "A");
   assert.equal(f.records[0].content, "203.0.113.12");
   assert.doesNotMatch(JSON.stringify(first), /test-CF-token/);
+});
+
+test("editing a domain-bound Host cannot silently retarget its address or subscription", async (t) => {
+  for (const input of [{ domainMode: "auto" }, { domainMode: "existing", endpointDomain: "vps.example.com" }]) {
+    const f = await fixture(t);
+    f.domains.updateSettings(settings);
+    const binding = await f.domains.configure(f.host, input);
+    f.store.updateHostProtocolConfig(f.host.id, "shadowsocks", { enabled: true });
+    const user = f.store.createUser({ name: "Domain user", email: "domain@example.com", quotaGb: 1, nodeScope: ["all"], expiresAt: "2028-01-01", portalStatus: "active" });
+    const currentHost = () => f.store.getHost(f.host.id);
+    const subscription = () => buildUserClientConfig({ credential: f.store.clientCredential(user.id), hosts: [currentHost()] });
+    const previous = currentHost();
+    const previousSubscription = subscription();
+    const previousRecords = structuredClone(f.records);
+    assert.throws(() => f.store.updateHost(f.host.id, { address: "203.0.113.99", name: "Attempted move", region: "tokyo" }), {
+      code: "HOST_DOMAIN_MIGRATION_REQUIRED", statusCode: 409
+    });
+    assert.deepEqual(currentHost(), previous);
+    assert.deepEqual(subscription(), previousSubscription);
+    assert.deepEqual(await f.domains.configure(currentHost(), input), binding, "the original DNS binding remains reusable");
+    assert.deepEqual(f.records, previousRecords);
+
+    const renamed = f.store.updateHost(f.host.id, { address: previous.address, name: "Renamed", region: "tokyo" });
+    assert.equal(renamed.name, "Renamed");
+    assert.equal(renamed.region, "tokyo");
+    assert.equal(renamed.address, previous.address);
+    assert.equal(renamed.endpointDomain, binding.endpointDomain);
+  }
+});
+
+test("an unbound Host can still change its connection IP", async (t) => {
+  const f = await fixture(t);
+  const updated = f.store.updateHost(f.host.id, { address: "203.0.113.99" });
+  assert.equal(updated.address, "203.0.113.99");
+  assert.equal(updated.endpointDomain, null);
+  assert.equal(f.calls.length, 0);
 });
 
 test("DNS automation never overwrites an existing unowned record or accepts mixed public answers", async (t) => {

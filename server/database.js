@@ -2017,7 +2017,15 @@ export class RayLinkStore {
   normalizeHostUpdate(id, input) {
     const current = this.getHost(id);
     if (!current) throw domainError("HOST_NOT_FOUND", "主机不存在", 404);
-    return normalizedHostInput(input, current);
+    const next = normalizedHostInput(input, current);
+    if (current.endpointDomain && current.address !== next.address) {
+      throw domainError(
+        "HOST_DOMAIN_MIGRATION_REQUIRED",
+        "此主机已绑定业务域名，不能直接修改 IP；请先规划节点与 DNS 绑定迁移。原地址和订阅保持不变",
+        409
+      );
+    }
+    return next;
   }
 
   updateLocalRuntimeCapabilities(runtime = {}) {

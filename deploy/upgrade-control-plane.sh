@@ -18,6 +18,7 @@ data_root="${RAYLINK_DATA_ROOT:-/var/lib/raylink}"
 backup_root="${RAYLINK_BACKUP_ROOT:-/var/backups/raylink}"
 node_root="${RAYLINK_NODE_ROOT:-/opt/raylink-nodejs}"
 service_unit="${RAYLINK_SERVICE_UNIT:-/etc/systemd/system/raylink.service}"
+runtime_service_unit="${RAYLINK_RUNTIME_SERVICE_UNIT:-${service_unit%/*}/sing-box-raylink.service}"
 environment_file_input="${RAYLINK_ENV_FILE:-/etc/raylink/raylink.env}"
 source_root="${RAYLINK_SOURCE_DIR:-}"
 health_port="${RAYLINK_PORT:-}"
@@ -69,6 +70,7 @@ fi
 [ -f "$source_root/server/index.js" ] || fail "升级包缺少 server/index.js"
 [ -f "$source_root/web/index.html" ] || fail "升级包缺少 web/index.html"
 [ -f "$source_root/deploy/raylink.service" ] || fail "升级包缺少 raylink.service"
+[ -f "$source_root/deploy/sing-box-raylink.service" ] || fail "升级包缺少 sing-box-raylink.service"
 cronet_source="${RAYLINK_CRONET_SOURCE:-$source_root/web/node/runtime/raylink-libcronet-${runtime_version}-linux-${runtime_arch}.so}"
 cronet_checksum="${cronet_source}.sha256"
 [ -f "$cronet_source" ] && [ -f "$cronet_checksum" ] \
@@ -138,6 +140,8 @@ upgrade_succeeded=false
 data_backup_ready=false
 data_migration_started=false
 service_backup_ready=false
+runtime_service_backup_ready=false
+runtime_service_changed=false
 environment_backup_ready=false
 environment_changed=false
 environment_candidate_path="${environment_file}.candidate.$$"
@@ -163,6 +167,13 @@ rollback() {
     if [ "$service_backup_ready" = true ]; then
       cp -a "$backup_directory/raylink.service" "$service_unit"
     fi
+    if [ "$runtime_service_changed" = true ]; then
+      if [ "$runtime_service_backup_ready" = true ]; then
+        cp -a "$backup_directory/sing-box-raylink.service" "$runtime_service_unit"
+      else
+        rm -f "$runtime_service_unit"
+      fi
+    fi
     if [ "$environment_backup_ready" = true ] && [ "$environment_changed" = true ]; then
       cp -a "$backup_directory/raylink.env" "$environment_file"
     fi
@@ -182,6 +193,10 @@ fi
 if [ -f "$service_unit" ]; then
   cp -a "$service_unit" "$backup_directory/raylink.service"
   service_backup_ready=true
+fi
+if [ -f "$runtime_service_unit" ]; then
+  cp -a "$runtime_service_unit" "$backup_directory/sing-box-raylink.service"
+  runtime_service_backup_ready=true
 fi
 if [ "$backfill_local_host_dial_address" = true ]; then
   cp -a "$environment_file" "$backup_directory/raylink.env"
@@ -208,6 +223,8 @@ mv "$install_root" "$previous_root"
 switch_started=true
 mv "$candidate_root" "$install_root"
 install -m 0644 "$install_root/deploy/raylink.service" "$service_unit"
+runtime_service_changed=true
+install -m 0644 "$install_root/deploy/sing-box-raylink.service" "$runtime_service_unit"
 # Runtime and Cronet form one versioned pair. Only the transactional Runtime
 # upgrader may replace them; an application-only upgrade leaves both running.
 systemctl daemon-reload

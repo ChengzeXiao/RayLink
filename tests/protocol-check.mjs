@@ -360,6 +360,24 @@ try {
     }
   });
 
+  // Start the complete generated DNS and routing graph as a cold client. Config
+  // validation alone misses service-start errors (including invalid DNS detours).
+  // Loopback endpoints and disabled listeners keep this check off the host network.
+  const coldClientConfig = buildProtocolClientConfig({
+    profiles: [shadowsocksProfile],
+    credential: {
+      email: user.email,
+      runtimeUuid: user.runtimeUuid,
+      runtimePassword: user.runtimePassword,
+      serverPassword: masterPassword
+    },
+    server: "127.0.0.1",
+    probeUrl: "http://127.0.0.1:1/probe"
+  });
+  coldClientConfig.inbounds = [];
+  coldClientConfig.experimental.cache_file.path = join(temporaryDirectory, "cold-client.db");
+  await checkConfigStarts("client-full-cold-start", coldClientConfig);
+
   assert.equal(checkedProtocols.length, protocolCatalog.length);
   console.log(JSON.stringify({
     singBoxVersion: singBoxVersionLine,
@@ -367,7 +385,8 @@ try {
     clientProtocolsChecked: clientConfig.outbounds.filter((outbound) => outbound.server_port).map((outbound) => outbound.type),
     realityProtocolsChecked: checkedRealityProtocols,
     acmeProtocolsChecked: checkedAcmeProtocols,
-    protocolProbesChecked: checkedProtocolProbes
+    protocolProbesChecked: checkedProtocolProbes,
+    completeClientColdStart: true
   }));
 } finally {
   await rm(temporaryDirectory, { recursive: true, force: true });

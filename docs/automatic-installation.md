@@ -1,6 +1,6 @@
 # 自动安装与维护
 
-本功能随当前源码候选版交付，必须发布新安装包或安装这份源码才会生效。当前支持 Debian/Ubuntu、Linux systemd、AMD64/ARM64；本机 macOS 的 `npm run local` 为开发模式，不能配置 Linux BBR 或运行 Linux systemd 服务。
+本功能从 v0.2.33 起提供，已有安装需升级后生效。当前支持 Debian/Ubuntu、Linux systemd、AMD64/ARM64；本机 macOS 的 `npm run local` 为开发模式，不能配置 Linux BBR 或运行 Linux systemd 服务。
 
 ## 首台主控
 
@@ -34,4 +34,4 @@ BBR 是 TCP 拥塞控制，不代表 UDP/QUIC 加速，也不保证某个移动�
 
 ## 验证边界
 
-自动化覆盖真实本地 HTTP/HTTPS、证书校验、SSH 加密连接、Node 注册及任务回执、配置/订阅、更新 worker 子进程及浏览器逻辑。Linux 内核/systemd、软件源下载和实际 VPS 环境的一部分使用隔离替身，不能代替真实服务器验收。上线后检查服务、端口、安全组、实际 BBR 读数、订阅和目标移动网络流量。
+自动化覆盖真实本地 HTTP/HTTPS、证书校验、SSH 加密连接、Node 注册及任务回执、配置/订阅、更新 worker 子进程及浏览器逻辑。发布流水线还在全新 AMD64/ARM64 Linux runner 上执行实际安装、systemd 沙箱、BBR 读数、代理传输及更新回滚。云安全组、公网 CA 和手机运营商网络仍需真实服务器验收。上线后检查服务、端口、安全组、实际 BBR 读数、订阅和目标移动网络流量。

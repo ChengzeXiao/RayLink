@@ -9,15 +9,14 @@ fail() {
 [ "$(id -u)" -eq 0 ] || fail "请以 root 运行"
 [ "$(uname -s)" = "Linux" ] || fail "当前一键安装仅支持 Linux"
 command -v systemctl >/dev/null 2>&1 || fail "当前系统未使用 systemd"
-if command -v caddy >/dev/null 2>&1 || [ -e /etc/caddy/Caddyfile ]; then
-  fail "检测到已有 Caddy；为避免覆盖现有站点，请使用全新 VPS 或先迁移现有 Caddy 配置"
-fi
 
 install_root=/opt/raylink
 data_root=/var/lib/raylink
 config_root=/etc/raylink
 managed_root="$data_root/managed"
 node_root=/opt/raylink-nodejs
+script_directory="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+install_state_helper="$script_directory/initial-install-state.sh"
 node_version="${RAYLINK_NODE_VERSION:-22.23.1}"
 package_url="${RAYLINK_PACKAGE_URL:-}"
 package_sha256="${RAYLINK_PACKAGE_SHA256:-}"
@@ -41,10 +40,6 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-
-if [ -e "$install_root/package.json" ]; then
-  fail "$install_root 已存在；升级请使用控制台在线升级，不要覆盖安装"
-fi
 
 public_ip="${RAYLINK_PUBLIC_IP:-}"
 public_ip_was_detected=false
@@ -70,6 +65,19 @@ case "$public_ip" in
   *) public_host="$public_ip" ;;
 esac
 public_origin="https://${public_host}"
+installation_mode="$(bash "$install_state_helper" begin "$install_root" "$data_root" "$config_root" "$node_root" /etc/caddy "$public_ip")"
+if ! command -v flock >/dev/null 2>&1; then
+  command -v apt-get >/dev/null 2>&1 || fail "无法自动安装安装锁依赖 util-linux"
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux
+fi
+exec 9>"$config_root/install-pending/lock"
+flock -n 9 || fail "另一个首次安装任务正在运行，请等待该任务完成"
+if [ "$installation_mode" = resume ]; then
+  printf '正在恢复本次未完成的安装；保留已有身份、证书与加密配置。\n'
+  systemctl stop raylink >/dev/null 2>&1 || true
+  systemctl stop sing-box-raylink >/dev/null 2>&1 || true
+fi
 
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
@@ -202,11 +210,16 @@ else
     /usr/local/bin/raylink-sing-box
 fi
 
-openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
-  -subj "/CN=${public_ip}" \
-  -addext "subjectAltName=IP:${public_ip}" \
-  -keyout /etc/caddy/raylink/control-plane.key \
-  -out /etc/caddy/raylink/control-plane.crt
+if [ "$installation_mode" = resume ] && [ -f /etc/caddy/raylink/control-plane.key ] && [ -f /etc/caddy/raylink/control-plane.crt ]; then
+  openssl x509 -in /etc/caddy/raylink/control-plane.crt -noout -checkip "$public_ip" >/dev/null \
+    || fail "已有 IP 证书与恢复地址不匹配，拒绝替换"
+else
+  openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
+    -subj "/CN=${public_ip}" \
+    -addext "subjectAltName=IP:${public_ip}" \
+    -keyout /etc/caddy/raylink/control-plane.key \
+    -out /etc/caddy/raylink/control-plane.crt
+fi
 chown root:caddy \
   /etc/caddy/raylink/control-plane.key \
   /etc/caddy/raylink/control-plane.crt
@@ -230,6 +243,15 @@ bootstrap_password="$(openssl rand -base64 36 | tr -d '\n')"
 subscription_encryption_key="$(openssl rand -base64 36 | tr -d '\n')"
 
 umask 077
+if [ "$installation_mode" = resume ] && [ -f "$managed_root/raylink.env" ]; then
+  # Retry only replaces the expired one-time setup challenge. Existing account
+  # bootstrap and subscription encryption secrets must survive a failed setup.
+  awk '!/^RAYLINK_SETUP_TOKEN_HASH=/ && !/^RAYLINK_SETUP_TOKEN_EXPIRES_AT=/' \
+    "$managed_root/raylink.env" > "$temporary_root/raylink.env"
+  printf 'RAYLINK_SETUP_TOKEN_HASH=%s\nRAYLINK_SETUP_TOKEN_EXPIRES_AT=%s\n' \
+    "$setup_token_hash" "$setup_expires_at" >> "$temporary_root/raylink.env"
+  install -m 0600 "$temporary_root/raylink.env" "$managed_root/raylink.env"
+else
 {
   printf '%s\n' \
     'NODE_ENV=production' \
@@ -261,7 +283,9 @@ umask 077
     'RAYLINK_CONTROL_KEY=/etc/caddy/raylink/control-plane.key' \
     'SING_BOX_BIN=/usr/local/bin/raylink-sing-box' \
     'SING_BOX_SYSTEMD_UNIT=sing-box-raylink.service'
-} > "$managed_root/raylink.env"
+} > "$temporary_root/raylink.env"
+install -m 0600 "$temporary_root/raylink.env" "$managed_root/raylink.env"
+fi
 chmod 0600 "$managed_root/raylink.env"
 ln -sfn "$managed_root/raylink.env" "$config_root/raylink.env"
 install -m 0644 /dev/null "$managed_root/99-raylink-bbr.conf"
@@ -314,6 +338,7 @@ else
   printf '\nRayLink 已完成安装与配置；请使用上方自动初始化输出的控制台地址。\n'
   printf '初始账号密码已保存至 %s/initial-login.json（仅 root 可读）。\n' "$config_root"
 fi
+rm -rf "$config_root/install-pending"
 printf 'IP HTTPS 恢复入口使用自签名证书；核对指纹后继续，域名模式请优先使用可信域名：\n'
 openssl x509 \
   -in /etc/caddy/raylink/control-plane.crt \

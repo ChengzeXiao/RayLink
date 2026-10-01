@@ -3,7 +3,7 @@
   <h1>RayLink</h1>
   <p><strong>把多用户、多 Host sing-box 服务变成一套可安装、可配置、可发布、可计量的控制面。</strong></p>
   <p>
-    <a href="https://github.com/ZaneClaw/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/ZaneClaw/RayLink?display_name=tag&style=flat-square"></a>
+    <a href="https://github.com/ChengzeXiao/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/ChengzeXiao/RayLink?display_name=tag&style=flat-square"></a>
     <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-%E2%89%A522.5-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white">
     <img alt="sing-box 1.14.x" src="https://img.shields.io/badge/sing--box-1.14.x-7BE495?style=flat-square">
     <img alt="Linux AMD64 and ARM64" src="https://img.shields.io/badge/Release-Linux%20AMD64%20%7C%20ARM64-2F3337?style=flat-square&logo=linux&logoColor=white">
@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ZaneClaw/RayLink/releases/download/v0.2.33/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ZaneClaw/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ZaneClaw/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -128,7 +128,7 @@ bash -o pipefail -c 'curl -fsSL https://github.com/ZaneClaw/RayLink/releases/dow
 
 安装完成后直接打开输出的 HTTPS 控制台地址。默认使用 IP；SSH 自动接入会将主控证书经受信任 SSH 通道传到节点并严格校验 HTTPS。浏览器、MCP 和订阅客户端仍需信任该自签名证书。已有域名时，设置 `RAYLINK_DOMAIN` 和 `RAYLINK_ACME_EMAIL`，即可自动检查解析并通过 Caddy 申请、续期公网可信证书。
 
-如需分别配置控制台、订阅和节点域名，可设置 `RAYLINK_INTERACTIVE_SETUP=true` 使用初始化向导。域名须事先解析到对应 VPS，初始化时关闭 CDN 代理。自动化流程、BBR 状态和更新边界见 [自动安装与维护](docs/automatic-installation.md)。这些改动随源码候选版交付，现有 Release 不会自动包含尚未发布的代码。
+如需分别配置控制台、订阅和节点域名，可设置 `RAYLINK_INTERACTIVE_SETUP=true` 使用初始化向导。域名须事先解析到对应 VPS，初始化时关闭 CDN 代理。自动化流程、BBR 状态和更新边界见 [自动安装与维护](docs/automatic-installation.md)。以上功能包含在 v0.2.33 中；已有安装需升级后生效。
 
 完整部署、Caddy、手动安装和令牌轮换说明见 [部署手册](deploy/README.md)。
 
@@ -204,7 +204,7 @@ docs/     架构决策、协议支持矩阵和生产落地资料
 要求 Node.js 22.5+。没有 sing-box 也可以使用 `dry-run` 查看和开发控制台；安装 sing-box 后可执行真实配置校验。
 
 ```bash
-git clone https://github.com/ZaneClaw/RayLink.git
+git clone https://github.com/ChengzeXiao/RayLink.git
 cd RayLink
 npm ci --ignore-scripts
 npm start

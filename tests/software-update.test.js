@@ -31,7 +31,7 @@ test("control-plane update runs independently and reports the same durable job a
   const descriptorPath = calls[0][1].at(-1);
   const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
   assert.equal(descriptor.targetVersion, "0.2.34");
-  assert.equal(descriptor.releaseBaseUrl, "https://github.com/ZaneClaw/RayLink/releases/download");
+  assert.equal(descriptor.releaseBaseUrl, "https://github.com/ChengzeXiao/RayLink/releases/download");
   assert.ok(descriptorPath.startsWith(join(dir, "system-updates")));
   assert.equal((await new SystemUpdateManager(options).status()).task.status, "queued");
   await assert.rejects(manager.upgrade(), { code: "SYSTEM_UPDATE_BUSY" });

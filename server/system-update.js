@@ -10,7 +10,7 @@ import { readSoftwareUpdateJob, scheduleSoftwareUpdate } from "../web/node/softw
 
 const execFile = promisify(execFileCallback);
 const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
-const repository = "ZaneClaw/RayLink";
+const repository = "ChengzeXiao/RayLink";
 const error = (code, message, statusCode = 409) => Object.assign(new Error(message), { code, statusCode });
 
 export class SystemUpdateManager {

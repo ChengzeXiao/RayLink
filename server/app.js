@@ -1010,7 +1010,9 @@ export async function createRayLinkApp(options) {
       hosts: eligibleHosts,
       probeUrl: options.protocolProbeUrl,
       routePolicy: store.routingPolicy(),
-      ruleSetBaseUrl: ruleSetCache.available()
+      // A client's rule-set downloader does not inherit the browser/Node CA
+      // trust. Carry the complete offline baseline for self-signed IP setup.
+      ruleSetBaseUrl: ruleSetCache.available() && store.certificateSettings().mode !== "ip-self-signed"
         ? new URL("/rule-sets/", currentSubscriptionOrigin()).toString()
         : null
     });

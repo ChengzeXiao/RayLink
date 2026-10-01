@@ -76,3 +76,26 @@ jobs:
       - name: Syntax, API, protocol and memory checks
         run: |
           SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:production
+
+  installation-check:
+    name: Native Linux installation and rollback
+    needs: runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: raylink-protocol-runtime-amd64
+          path: web/node/runtime
+      - name: Package the candidate and exercise installed services
+        run: |
+          chmod 0755 web/node/runtime/raylink-sing-box-1.14.2-linux-amd64
+          version="$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')"
+          package="${RUNNER_TEMP}/raylink-${version}-linux-amd64.tar.gz"
+          bash deploy/package-release.sh "$version" "$package"
+          sudo env RAYLINK_DISPOSABLE_SYSTEM=1 bash tests/linux-install-smoke.sh "$package" "$version"

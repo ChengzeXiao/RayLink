@@ -622,8 +622,7 @@ function clientConfigForOutbounds(
           type: "https",
           tag: "dns-domestic",
           server: "223.5.5.5",
-          path: "/dns-query",
-          detour: "direct"
+          path: "/dns-query"
         },
         {
           type: "tls",

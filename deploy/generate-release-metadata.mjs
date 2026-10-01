@@ -106,7 +106,7 @@ const sbom = {
   dataLicense: "CC0-1.0",
   SPDXID: documentId,
   name: `${assetPrefix}-sbom`,
-  documentNamespace: `https://github.com/Zanetach/RayLink/releases/download/v${version}/${assetPrefix}.spdx.json#${archiveSha256}`,
+  documentNamespace: `https://github.com/ChengzeXiao/RayLink/releases/download/v${version}/${assetPrefix}.spdx.json#${archiveSha256}`,
   creationInfo: {
     created: createdAt,
     creators: ["Tool: RayLink-release-metadata/1"]
@@ -117,7 +117,7 @@ const sbom = {
       SPDXID: rayLinkId,
       versionInfo: version,
       supplier: "NOASSERTION",
-      downloadLocation: `https://github.com/Zanetach/RayLink/releases/download/v${version}/${expectedArchiveName}`,
+      downloadLocation: `https://github.com/ChengzeXiao/RayLink/releases/download/v${version}/${expectedArchiveName}`,
       filesAnalyzed: false,
       licenseConcluded: "NOASSERTION",
       licenseDeclared: "NOASSERTION",
