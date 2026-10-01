@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
 import ssh2 from "ssh2";
 
@@ -16,8 +16,34 @@ function serverOrigin(value) {
   return url.origin;
 }
 
-function preflightScript(server) {
+function controlPlaneCertificate(value, server) {
+  if (value === undefined || value === null) return null;
+  try {
+    if (typeof value !== "string" || Buffer.byteLength(value) > 64 * 1024
+      || !/^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*$/.test(value)) throw new Error();
+    const certificate = new X509Certificate(value);
+    const host = new URL(server).hostname.replace(/^\[|\]$/g, "");
+    const matches = isIP(host) ? certificate.checkIP(host) : certificate.checkHost(host);
+    const now = Date.now();
+    if (!matches || Date.parse(certificate.validFrom) > now || Date.parse(certificate.validTo) <= now) throw new Error();
+    return certificate.toString();
+  } catch {
+    throw failure("SSH_CONTROL_CA_INVALID", "控制面公开证书格式、有效期或主机名不匹配，拒绝降低 HTTPS 校验", 422);
+  }
+}
+
+function certificateScript(certificate) {
+  return certificate ? `umask 077
+raylink_ca_directory="$(mktemp -d)"
+trap 'rm -rf "$raylink_ca_directory"' EXIT
+export RAYLINK_CONTROL_CA_FILE="$raylink_ca_directory/control-plane-ca.pem"
+printf '%s\\n' ${quote(certificate)} > "$RAYLINK_CONTROL_CA_FILE"
+` : "";
+}
+
+function preflightScript(server, certificate) {
   return `set -euo pipefail
+${certificateScript(certificate)}
 fail() { printf 'RAYLINK_SSH_ERROR=%s\\n' "$1"; exit 1; }
 [ "$(uname -s)" = Linux ] || fail UNSUPPORTED_OS
 printf 'RAYLINK_SSH_OS=linux\\n'
@@ -67,7 +93,7 @@ else
 fi
 if systemctl is-active --quiet sing-box.service || { [ "$has_existing" = no ] && { command -v sing-box >/dev/null 2>&1 || systemctl cat sing-box.service >/dev/null 2>&1; }; }; then fail UNMANAGED_RUNTIME; fi
 if [ "$has_existing" = no ] && command -v curl >/dev/null 2>&1; then
-  script="$(curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 -fsS ${quote(`${server}/node/install.sh`)})" || fail INSTALLER_UNAVAILABLE
+  script="$(curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 -fsS ${certificate ? '--cacert "$RAYLINK_CONTROL_CA_FILE"' : ""} ${quote(`${server}/node/install.sh`)})" || fail INSTALLER_UNAVAILABLE
   [ -n "$script" ] && printf '%s\\n' "$script" | bash -n || fail INSTALLER_UNAVAILABLE
   printf 'RAYLINK_SSH_SCRIPT=yes\\n'
 else
@@ -95,9 +121,10 @@ function parsePreflight(output, privilege) {
     missingDependencies: entries.MISSING ? entries.MISSING.split(",") : [], scriptVerified: entries.SCRIPT === "yes", existing };
 }
 
-function installScript({ server, hostId, enrollmentToken }) {
+function installScript({ server, hostId, enrollmentToken, controlPlaneCaCertificate }) {
   return `set -euo pipefail
 umask 077
+${certificateScript(controlPlaneCaCertificate)}
 if ! command -v curl >/dev/null || ! command -v tar >/dev/null || ! command -v xz >/dev/null; then
   printf 'RAYLINK_SSH_STAGE=dependencies\\n'
   if command -v apt-get >/dev/null; then
@@ -108,7 +135,7 @@ if ! command -v curl >/dev/null || ! command -v tar >/dev/null || ! command -v x
   else exit 1; fi
 fi
 printf 'RAYLINK_SSH_STAGE=download\\n'
-script="$(curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 1048576 -fsS ${quote(`${server}/node/install.sh`)})"
+script="$(curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 1048576 -fsS ${controlPlaneCaCertificate ? '--cacert "$RAYLINK_CONTROL_CA_FILE"' : ""} ${quote(`${server}/node/install.sh`)})"
 [ -n "$script" ]
 printf '%s\\n' "$script" | bash -n
 export RAYLINK_SERVER=${quote(server)}
@@ -232,34 +259,37 @@ export class SshBootstrap {
       const reader = `while IFS= read -r line; do [ "$line" = ${quote(marker)} ] && exec bash -s; done; exit 1`;
       return execute(`sudo -S -p '' -- bash -c ${quote(reader)}`, `${sudoPassword}\n${marker}\n${script}`, timeoutMs, onStage);
     };
-    const preflight = async ({ server }) => {
+    const preflight = async ({ server, controlPlaneCaCertificate }) => {
       const origin = serverOrigin(server);
-      return parsePreflight(await privileged(preflightScript(origin)), privilege);
+      const certificate = controlPlaneCertificate(controlPlaneCaCertificate, origin);
+      return parsePreflight(await privileged(preflightScript(origin, certificate)), privilege);
     };
-    const install = async ({ server, hostId, enrollmentToken, onStage = () => {} }) => {
+    const install = async ({ server, hostId, enrollmentToken, controlPlaneCaCertificate, onStage = () => {} }) => {
       const origin = serverOrigin(server);
+      const certificate = controlPlaneCertificate(controlPlaneCaCertificate, origin);
       if (typeof hostId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(hostId)
         || (enrollmentToken !== undefined && !/^[A-Za-z0-9_-]{20,256}$/.test(enrollmentToken)) || typeof onStage !== "function") {
         throw failure("SSH_INPUT_INVALID", "Host 标识或注册信息无效", 422);
       }
       try { onStage("preflight"); } catch { /* best-effort progress */ }
-      const checked = await preflight({ server: origin });
+      const checked = await preflight({ server: origin, controlPlaneCaCertificate: certificate });
       if (checked.existing) {
         if (checked.existing.hostId !== hostId || checked.existing.server !== origin) {
           throw failure("SSH_EXISTING_NODE_CONFLICT", "已有 RayLink Node 属于其他 Host 或控制面，拒绝覆盖", 409);
         }
-        if (checked.existing.enrolled) {
+        if (checked.existing.enrolled && !certificate) {
           await privileged("set -eu\nif ! systemctl is-active --quiet raylink-node.service; then\n  systemctl enable raylink-node.service\n  systemctl start raylink-node.service\nfi\n", this.commandTimeoutMs, () => {});
         } else {
           // The installer verifies the same binding again and repairs partial
           // installations using their original environment and enrollment token.
-          await privileged(installScript({ server: origin, hostId }), this.installTimeoutMs, onStage);
+          // Explicit trust also repairs an enrolled Node after certificate rotation.
+          await privileged(installScript({ server: origin, hostId, controlPlaneCaCertificate: certificate }), this.installTimeoutMs, onStage);
         }
         try { onStage("complete"); } catch { /* best-effort progress */ }
         return { status: "existing", hostId, server: origin };
       }
       if (!enrollmentToken) throw failure("SSH_INPUT_INVALID", "首次安装需要注册令牌", 422);
-      await privileged(installScript({ server: origin, hostId, enrollmentToken }), this.installTimeoutMs, onStage);
+      await privileged(installScript({ server: origin, hostId, enrollmentToken, controlPlaneCaCertificate: certificate }), this.installTimeoutMs, onStage);
       return { status: "installed", hostId, server: origin };
     };
     return { fingerprint, preflight, install, close };

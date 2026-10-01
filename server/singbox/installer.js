@@ -610,7 +610,7 @@ function normalizeVersion(value) {
   return match?.[1] || null;
 }
 
-function compareVersions(left, right) {
+export function compareVersions(left, right) {
   const leftParts = normalizeVersion(left)?.split(".").map(Number);
   const rightParts = normalizeVersion(right)?.split(".").map(Number);
   if (!leftParts || !rightParts) return 0;

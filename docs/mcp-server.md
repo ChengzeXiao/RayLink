@@ -37,6 +37,8 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 
 | 分类 | MCP 工具 |
 |---|---|
+| 系统及 Node 更新 | `system_update_check`, `system_upgrade`, `hosts_node_upgrade` |
+| BBR 配置 | `hosts_bbr_configure` |
 | 系统概况与诊断 | `system_overview`, `alerts_get`, `readiness_get` |
 | 用户与权益 | `users_list`, `users_get`, `users_create`, `users_update`, `users_reset_password` |
 | 客户端订阅 | `users_subscription_get`, `users_subscription_rotate`，返回所有现有客户端格式的专属 URL |
@@ -51,9 +53,11 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 | 备份 | `backups_list`, `backups_create`, `backups_verify` |
 | 管理员与审计 | `admins_list`, `admins_create`, `admins_update`, `audit_list` |
 
-共 48 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。SSH 接入只执行固定的安装流程，没有任意 HTTP 转发、Shell 命令、数据库 SQL 或文件读写工具。
+共 52 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。SSH 接入只执行固定的安装流程，没有任意 HTTP 转发、Shell 命令、数据库 SQL 或文件读写工具。
 
 `hosts_create` 返回手动接入的 Host、一次性 enrollment token 和 VPS 安装命令。使用 `hosts_provision_start` 可[通过 SSH 自动安装、配置协议并验证订阅](ssh-node-provisioning.md)，传入 IP、SSH 用户与密码或私钥即可。启动调用返回持久任务，随后使用 `hosts_provision_get` 检查结果；安装成功、心跳上线、协议探测通过、流量计量正常分别验证。没有有效用户时结果明确标为 `awaiting-users`。
+
+`runtime_install` 会完成 Runtime 安装、默认协议配置、BBR 尝试、发布及运行检查。BBR 支持情况、安装进度、系统和 Node 更新任务状态可从概况/主机查询中读取。更新任务在独立服务中执行，提交成功不代表更新完成；以重启后的任务结果和实际版本为准。
 
 ## 权限和输出
 
@@ -63,7 +67,7 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 - `users.manage`：创建/修改用户、服务权益和门户密码。
 - `runtime.manage`：Host、协议、分流、发布、Runtime 运维。
 - `hosts.provision`：SSH 自动接入和重试；同时需要 `runtime.manage`。此权限需单独勾选，不进入现有预设。
-- `system.manage`：证书、节点 DNS 自动化设置、备份创建与校验。
+- `system.manage`：证书、节点 DNS 自动化设置、备份创建与校验、系统及 Node 程序升级（Owner）。
 - `admins.manage`：管理员管理；具有此权限的 Owner Agent 可创建新的高权限管理员，应仅为此类任务授予。
 - `audit.read`：审计查询。
 - `secrets.read`：在对应业务权限基础上返回订阅地址、节点注册令牌、完整协议配置或 Reality 私钥。Auditor 不获得此能力。

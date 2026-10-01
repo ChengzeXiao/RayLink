@@ -84,6 +84,7 @@ if command -v apt-get >/dev/null 2>&1; then
     iproute2 \
     kmod \
     openssl \
+    procps \
     tar \
     xz-utils
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
@@ -291,12 +292,29 @@ systemctl enable --now caddy
 systemctl reload caddy
 systemctl enable sing-box-raylink
 systemctl enable --now raylink
+systemctl is-active --quiet caddy || fail "Caddy HTTPS 服务未正常运行"
+systemctl is-active --quiet raylink || fail "RayLink 控制面服务未正常运行"
 installation_succeeded=true
 
-printf '\nRayLink 已安装。\n'
-printf '首次初始化地址（令牌 30 分钟有效）：\n'
-printf '%s/setup#token=%s\n\n' "$public_origin" "$setup_token"
-printf '首次使用 IP 证书时浏览器会提示自签名证书；核对证书指纹后继续：\n'
+if [ "${RAYLINK_INTERACTIVE_SETUP:-false}" = true ]; then
+  printf '\nRayLink 已安装，等待首次初始化。\n'
+  printf '首次初始化地址（令牌 30 分钟有效）：\n'
+  printf '%s/setup#token=%s\n\n' "$public_origin" "$setup_token"
+else
+  printf '\n正在自动配置管理员、Shadowsocks、Runtime 与 BBR 网络加速。\n'
+  if ! RAYLINK_PUBLIC_ORIGIN="$public_origin" \
+    RAYLINK_ONCE_SETUP_TOKEN="$setup_token" \
+    RAYLINK_INITIAL_LOGIN_FILE="$config_root/initial-login.json" \
+    "$node_root/bin/node" "$install_root/deploy/complete-control-plane-setup.mjs"; then
+    printf '控制面服务已保留，可通过以下地址重试初始化（令牌 30 分钟有效）：\n' >&2
+    printf '%s/setup#token=%s\n' "$public_origin" "$setup_token" >&2
+    fail "自动初始化未完成；请按错误提示处理后重试，不要覆盖安装"
+  fi
+  systemctl is-active --quiet sing-box-raylink || fail "sing-box 服务未正常运行"
+  printf '\nRayLink 已完成安装与配置；请使用上方自动初始化输出的控制台地址。\n'
+  printf '初始账号密码已保存至 %s/initial-login.json（仅 root 可读）。\n' "$config_root"
+fi
+printf 'IP HTTPS 恢复入口使用自签名证书；核对指纹后继续，域名模式请优先使用可信域名：\n'
 openssl x509 \
   -in /etc/caddy/raylink/control-plane.crt \
   -noout \

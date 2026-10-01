@@ -14,6 +14,7 @@ test("BBR initialization persists fq and bbr before verifying the live kernel", 
   let applied = false;
   const manager = new BbrManager({
     mode: "systemd",
+    platform: "linux",
     configPath,
     async runCommand(command, args) {
       commands.push([command, ...args]);
@@ -65,6 +66,7 @@ test("BBR initialization rejects an unsupported kernel without writing configura
   const configPath = join(directory, "99-raylink-bbr.conf");
   const manager = new BbrManager({
     mode: "systemd",
+    platform: "linux",
     configPath,
     async runCommand(command, args) {
       if (command === "modprobe") throw new Error("module not found");
@@ -89,4 +91,30 @@ test("BBR initialization rejects an unsupported kernel without writing configura
       && /内核不支持 BBR/.test(error.message)
   );
   await assert.rejects(() => readFile(configPath, "utf8"), /ENOENT/);
+});
+
+test("BBR reports unsupported on non-Linux hosts without invoking privileged commands", async () => {
+  const manager = new BbrManager({
+    mode: "systemd", platform: "darwin",
+    runCommand() { throw new Error("must not execute a Linux command on macOS"); }
+  });
+  assert.equal((await manager.inspect()).status, "unsupported");
+  await assert.rejects(manager.configure(), { code: "BBR_UNAVAILABLE" });
+});
+
+test("BBR never reports enabled when applying kernel parameters is denied", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-bbr-denied-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const manager = new BbrManager({
+    mode: "systemd", platform: "linux", configPath: join(directory, "bbr.conf"),
+    async runCommand(command, args) {
+      if (command === "modprobe") return { stdout: "" };
+      if (args[0] === "-p") throw new Error("permission denied");
+      return { stdout: args[1].includes("available") ? "cubic bbr" : args[1].includes("qdisc") ? "fq_codel" : "cubic" };
+    }
+  });
+  await assert.rejects(manager.configure(), { code: "BBR_APPLY_FAILED" });
+  assert.deepEqual(await manager.inspect(), {
+    status: "failed", congestionControl: "cubic", qdisc: "fq_codel", error: "BBR 内核参数应用失败"
+  });
 });

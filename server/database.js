@@ -188,6 +188,18 @@ function normalizeTelemetry(input = {}) {
   };
 }
 
+function normalizeBbr(input, checkedAt) {
+  if (!input || typeof input !== "object") return null;
+  const statuses = ["enabled", "available", "unsupported", "unavailable", "failed", "development"];
+  let status = statuses.includes(input.status) ? input.status : "unavailable";
+  const parameter = (value) => typeof value === "string" && /^[a-z0-9_-]{1,40}$/i.test(value) ? value : null;
+  const congestionControl = parameter(input.congestionControl);
+  const qdisc = parameter(input.qdisc);
+  if (status === "enabled" && (congestionControl !== "bbr" || qdisc !== "fq")) status = "unavailable";
+  return { status, congestionControl, qdisc, checkedAt,
+    error: input.error ? String(input.error).replace(/[\r\n\t]+/g, " ").slice(0, 400) : null };
+}
+
 function hostFromRow(row) {
   const lastSeenAt = row.last_seen_at || null;
   const buildTags = parseJson(row.build_tags_json, []);
@@ -252,6 +264,7 @@ function hostFromRow(row) {
       networkRxBps: row.network_rx_bps ?? null,
       networkTxBps: row.network_tx_bps ?? null,
       serviceStatus: row.service_status || "unknown",
+      bbr: parseJson(row.bbr_json, null),
       updatedAt: row.metrics_updated_at || null
     },
     deploymentSync: {
@@ -682,6 +695,7 @@ export class RayLinkStore {
       ["network_rx_bps", "REAL"],
       ["network_tx_bps", "REAL"],
       ["service_status", "TEXT"],
+      ["bbr_json", "TEXT"],
       ["metrics_updated_at", "TEXT"]
     ];
     for (const [column, definition] of hostMigrations) {
@@ -1646,6 +1660,8 @@ export class RayLinkStore {
       const host = hostFromRow(row);
       return {
         ...host,
+        nodeUpgrade: this.hostTaskStatus(host.id, "upgrade-node"),
+        bbrTask: this.hostTaskStatus(host.id, "configure-bbr"),
         protocols: this.listHostProtocolConfigs(host.id),
         protocolActivations: this.listProtocolActivations(host.id)
       };
@@ -1886,9 +1902,21 @@ export class RayLinkStore {
     const host = hostFromRow(row);
     return {
       ...host,
+      nodeUpgrade: this.hostTaskStatus(id, "upgrade-node"),
+      bbrTask: this.hostTaskStatus(id, "configure-bbr"),
       protocols: this.listHostProtocolConfigs(id),
       protocolActivations: this.listProtocolActivations(id)
     };
+  }
+
+  hostTaskStatus(hostId, kind) {
+    const row = this.db.prepare("SELECT * FROM node_tasks WHERE host_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(hostId, kind);
+    const payload = parseJson(row?.payload_json, {});
+    const envelope = parseJson(row?.result_json, {});
+    const result = envelope?.result || {};
+    return { pending: ["pending", "claimed"].includes(row?.status), status: row?.status || "never",
+      targetVersion: payload.targetVersion || null, agentVersion: result.agentVersion || null,
+      error: result.error || null, finishedAt: row?.finished_at || null };
   }
 
   nodeEncryptionPublicKey(hostId) {
@@ -2118,6 +2146,7 @@ export class RayLinkStore {
             disk_used_bytes = ?, disk_total_bytes = ?,
             network_rx_bytes = ?, network_tx_bytes = ?,
             network_rx_bps = ?, network_tx_bps = ?, service_status = ?,
+            bbr_json = ?,
             metrics_updated_at = ?, updated_at = ?
         WHERE id = ?
       `).run(
@@ -2131,6 +2160,7 @@ export class RayLinkStore {
         telemetry.networkRxBps,
         telemetry.networkTxBps,
         telemetry.serviceStatus,
+        JSON.stringify(normalizeBbr(input.bbr, timestamp)),
         timestamp,
         timestamp,
         hostId
@@ -2262,11 +2292,11 @@ export class RayLinkStore {
           DELETE FROM node_tasks
           WHERE host_id = ? AND kind = 'publish-config' AND status = 'pending'
         `).run(hostId);
-      } else if (kind === "upgrade-runtime") {
+      } else if (["upgrade-runtime", "upgrade-node", "configure-bbr"].includes(kind)) {
         this.db.prepare(`
           DELETE FROM node_tasks
-          WHERE host_id = ? AND kind = 'upgrade-runtime' AND status = 'pending'
-        `).run(hostId);
+          WHERE host_id = ? AND kind = ? AND status = 'pending'
+        `).run(hostId, kind);
       }
       this.db.prepare(`
         INSERT INTO node_tasks (

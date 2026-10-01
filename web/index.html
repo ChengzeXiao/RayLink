@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.33&amp;rev=connection-recovery">
+  <link rel="stylesheet" href="./styles.css?v=0.2.33&amp;rev=runtime-automation-bbr-2">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -339,6 +339,10 @@
             <button data-system-tab="advanced" role="tab" aria-selected="false">高级</button>
           </div>
           <div data-system-panel="hosts">
+            <section class="resource-panel runtime-setup-card" aria-labelledby="runtime-setup-title">
+              <div class="resource-panel-heading"><div><p class="eyebrow">控制面本机</p><h2 id="runtime-setup-title">自动安装与配置</h2><p>安装组件、配置服务与默认协议、检查运行状态；BBR 单独展示实际内核结果。</p></div></div>
+              <div data-runtime-setup aria-live="polite"><p class="field-hint">正在读取安装状态…</p></div>
+            </section>
             <section class="resource-panel system-runtime-overview">
               <div class="resource-panel-heading">
                 <div><p class="eyebrow">控制面本机</p><h2>Runtime 状态</h2><p>集中展示本机 sing-box 进程、当前配置和 Deployment 应用状态。</p></div>
@@ -360,7 +364,7 @@
             <section class="table-panel host-table">
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>主机</th><th>状态</th><th>入口协议</th><th>类型</th><th>平台</th><th>最后心跳 / 版本</th><th><span class="sr-only">操作</span></th></tr></thead>
+                  <thead><tr><th>主机</th><th>状态</th><th>入口协议</th><th>类型</th><th>平台</th><th>BBR 加速</th><th>最后心跳 / 版本</th><th><span class="sr-only">操作</span></th></tr></thead>
                   <tbody id="host-table-body"></tbody>
                 </table>
               </div>
@@ -400,7 +404,9 @@
           </section>
           <div data-system-panel="maintenance" hidden>
             <section class="system-card-grid">
-              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">版本</p><h2 id="system-version">检测中</h2><p id="system-build">正在读取当前二进制构建。</p><p id="system-update-state">尚未检查稳定版更新。</p><div class="heading-actions"><button class="button secondary" data-check-runtime-update><svg><use href="#i-refresh"/></svg>检查更新</button><button class="button primary" id="upgrade-local-runtime" hidden><svg><use href="#i-arrow"/></svg>安全升级</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">RayLink 主控程序</p><h2 id="control-plane-update-title">RayLink 控制面</h2><p id="control-plane-version">正在读取版本…</p><p id="control-plane-update-state">主控、节点管理服务和 sing-box 分别更新。</p><span class="status-badge neutral" id="control-plane-update-badge">主控程序</span><div class="heading-actions"><button type="button" class="button secondary" data-check-system-update>检查主控更新</button><button type="button" class="button primary" data-upgrade-system hidden>更新 RayLink 主控</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">sing-box 代理 Runtime</p><h2 id="system-version">检测中</h2><p id="system-build">正在读取当前二进制构建。</p><p id="system-update-state">尚未检查稳定版更新。</p><div class="heading-actions"><button class="button secondary" data-check-runtime-update><svg><use href="#i-refresh"/></svg>检查 sing-box 更新</button><button class="button primary" id="upgrade-local-runtime" hidden><svg><use href="#i-arrow"/></svg>安全升级 sing-box</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-globe"/></svg></span><div><p class="eyebrow">RayLink Node 管理服务</p><h2>按主机更新 Node</h2><p>在主机详情查看 Node 版本、升级结果与 BBR 状态。节点管理服务更新不替换用户的 sing-box 配置。</p><button type="button" class="button secondary" data-system-tab="hosts">查看节点与更新</button></div></article>
               <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-rollback"/></svg></span><div><p class="eyebrow">数据库备份</p><h2 id="system-backup-title">尚无在线备份</h2><p id="system-backup-state">每天自动执行 SQLite 在线备份，并校验 SHA-256 与数据库完整性。</p><div class="heading-actions"><button class="button primary" data-create-backup><svg><use href="#i-rollback"/></svg>立即备份</button></div></div></article>
             </section>
 
@@ -538,6 +544,6 @@
   <script src="./subscription-client-url.js?v=0.2.33"></script>
   <script src="./subscription-quick.js?v=0.2.33"></script>
   <script src="./protocol-health.js?v=0.2.33"></script>
-  <script src="./app.js?v=0.2.33&amp;rev=connection-recovery"></script>
+  <script src="./app.js?v=0.2.33&amp;rev=runtime-automation-bbr-2"></script>
 </body>
 </html>

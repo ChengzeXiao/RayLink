@@ -26,6 +26,7 @@ const messages = {
   SSH_UNMANAGED_RUNTIME: "服务器已有非 RayLink 管理的 sing-box，请先处理服务冲突",
   SSH_EXISTING_IDENTITY_UNREADABLE: "无法读取服务器上已有 Node 的身份，未覆盖安装",
   SSH_INSTALLER_UNAVAILABLE: "服务器无法通过 HTTPS 获取控制面安装程序",
+  SSH_CONTROL_CA_INVALID: "控制面公开证书不可用或与访问地址不匹配，请检查 HTTPS 证书后重试",
   SSH_REMOTE_FAILED: "远程预检或安装失败，请检查权限、软件源及安装状态后重试",
   PROVISIONING_IDENTITY_CONFLICT: "服务器与现有节点身份不匹配，未覆盖原节点",
   PROVISIONING_ENROLLMENT_TIMEOUT: "等待 Node 注册超时，请检查服务器到控制面的 HTTPS 连接后重试",
@@ -88,8 +89,8 @@ function eligible(user, host) {
 }
 
 export class NodeProvisioning {
-  constructor({ store, sshBootstrap = new SshBootstrap(), publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, pollMs = 1000, waitMs = 5 * 60_000 }) {
-    Object.assign(this, { store, sshBootstrap, publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, pollMs, waitMs });
+  constructor({ store, sshBootstrap = new SshBootstrap(), publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, trustedControlPlaneCa = async () => null, pollMs = 1000, waitMs = 5 * 60_000 }) {
+    Object.assign(this, { store, sshBootstrap, publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, trustedControlPlaneCa, pollMs, waitMs });
     this.state = new ProvisioningState(store);
     this.state.interruptPending();
     this.running = new Map();
@@ -179,7 +180,11 @@ export class NodeProvisioning {
         session = await this.sshBootstrap.connect({ ...job.input, ...secret, sudoPassword: secret.sudoPassword || secret.password }, { ...(expectedFingerprint ? { expectedFingerprint } : {}), signal });
         this.state.pinFingerprint(job.input.host, job.input.port, session.fingerprint);
         update({ hostKeyFingerprint: session.fingerprint, stage: "preflight", progress: 10, message: "检查 Linux、systemd、权限和已有节点" });
-        const { existing } = await session.preflight({ server, hostId: host?.id });
+        let controlPlaneCaCertificate;
+        try { controlPlaneCaCertificate = await this.trustedControlPlaneCa(); }
+        catch { throw fail("SSH_CONTROL_CA_INVALID", messages.SSH_CONTROL_CA_INVALID); }
+        const trust = controlPlaneCaCertificate ? { controlPlaneCaCertificate } : {};
+        const { existing } = await session.preflight({ server, hostId: host?.id, ...trust });
         let enrollmentToken;
         if (existing) {
           const known = this.store.getHost(existing.hostId);
@@ -200,7 +205,7 @@ export class NodeProvisioning {
           } catch (error) { this.store.db.exec("ROLLBACK TO bind_provision_host; RELEASE bind_provision_host"); throw error; }
         }
         update({ stage: "installing", progress: 20, message: "安装并启动 Node 和计量 Runtime" });
-        await session.install({ server, enrollmentToken, hostId: host.id, onStage: (stage) => {
+        await session.install({ server, enrollmentToken, hostId: host.id, ...trust, onStage: (stage) => {
           const stages = { dependencies: [25, "自动安装系统依赖"], download: [30, "下载并校验安装程序"], install: [40, "安装 Node 与 sing-box"], complete: [50, "安装结束，等待节点注册"] };
           if (stages[stage]) update({ stage: "installing", progress: stages[stage][0], message: stages[stage][1] });
         } });

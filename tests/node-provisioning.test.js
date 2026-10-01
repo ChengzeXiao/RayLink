@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { createRayLinkApp } from "../server/app.js";
-import { RayLinkNode } from "../web/node/raylink-node.mjs";
+import { AGENT_VERSION, RayLinkNode } from "../web/node/raylink-node.mjs";
 
 async function fixture(t, overrides = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "raylink-provision-"));
@@ -20,7 +20,7 @@ async function fixture(t, overrides = {}) {
         installations.push(input);
         node = new RayLinkNode({ serverUrl: base, enrollmentToken: input.enrollmentToken,
           statePath: join(dataDir, "test-node.json"),
-          metadataProvider: async () => ({ hostname: "test-vps", platform: "linux", architecture: "x64", agentVersion: "0.7.0",
+          metadataProvider: async () => ({ hostname: "test-vps", platform: "linux", architecture: "x64", agentVersion: AGENT_VERSION,
             runtimeVersion: "1.14.2", buildTags: overrides.buildTags || ["with_v2ray_api"], runtimeState: published ? "running" : "stopped",
             telemetry: { serviceStatus: published ? "running" : "stopped" } }),
           usageCollector: { async collect() { return { sampleId: randomUUID(), runtimeInstanceId: "test-runtime", observedAt: new Date().toISOString(), users: [] }; } },

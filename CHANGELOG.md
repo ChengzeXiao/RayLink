@@ -2,12 +2,17 @@
 
 ## 0.2.33 (unreleased)
 
+- Complete unattended first installation with generated administrator credentials, default Shadowsocks, publication and runtime/listener checks; retain an optional interactive setup.
+- Add automatic Linux BBR configuration and fresh kernel telemetry in host lists/details; show unsupported, failed, stale and offline states explicitly.
+- Add durable independent control-plane and Node 0.9.0 update workers, post-restart version checks, maintenance permissions and MCP tools.
+- Pin the IP control-plane certificate over verified SSH for strict Node HTTPS, and support automatic Caddy domain setup from installer environment settings.
+
 - Add a persistent localhost control-plane entry without simulated users or nodes; surface the HTTPS prerequisite before accepting SSH credentials.
 - Show disconnected control-plane status, back off read polling and reconnect without replaying writes or clearing SSH onboarding forms; require fresh reads after login and successful writes.
 - Initialize the first administrator only when the database has no administrators, preventing renamed credentials from being recreated on restart.
 
 - Add SSH onboarding with durable jobs, pinned host keys, password/key authentication, resumable installation, automatic protocol publication, metering and subscription verification.
-- Add MCP Server management over Streamable HTTP with 48 scoped tools and an Owner Bearer Token console; SSH onboarding requires a separately granted hosts.provision scope.
+- Add MCP Server management over Streamable HTTP with 52 scoped tools and an Owner Bearer Token console; SSH onboarding requires a separately granted hosts.provision scope.
 - Add current-password-verified administrator username/password changes, session revocation and MCP token revocation on password reset; prevent stale concurrent logins from restoring access.
 - Automate Cloudflare node subdomains, retain separate SSH IPs, inherit enabled public protocols and verify existing subscriptions; preserve working Shadowsocks when domain setup needs retry.
 - Share remote ACME providers on sing-box 1.14, use the Node writable certificate directory and HTTP-01 TCP80, and activate QUIC transports over UDP.

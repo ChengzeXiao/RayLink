@@ -8,12 +8,14 @@ RAYLINK_NODE_CONFIG_ROOT="${RAYLINK_NODE_CONFIG_ROOT:-/etc/raylink-node}"
 RAYLINK_NODE_DATA_ROOT="${RAYLINK_NODE_DATA_ROOT:-/var/lib/raylink-node/sing-box}"
 RAYLINK_SYSTEMD_ROOT="${RAYLINK_SYSTEMD_ROOT:-/etc/systemd/system}"
 RAYLINK_TMPFILES_ROOT="${RAYLINK_TMPFILES_ROOT:-/etc/tmpfiles.d}"
+RAYLINK_SYSCTL_ROOT="${RAYLINK_SYSCTL_ROOT:-/etc/sysctl.d}"
 RAYLINK_RUNTIME_BIN_DIR="${RAYLINK_RUNTIME_BIN_DIR:-/usr/local/bin}"
 RAYLINK_EXPECT_HOST_ID="${RAYLINK_EXPECT_HOST_ID:-}"
 RAYLINK_NODE_VERSION="${RAYLINK_NODE_VERSION:-22}"
 RAYLINK_PROTOCOL_PROBE_URL="${RAYLINK_PROTOCOL_PROBE_URL:-https://www.gstatic.com/generate_204}"
 SING_BOX_VERSION="${SING_BOX_VERSION:-1.14.2}"
 RAYLINK_ENABLE_USER_METERING="${RAYLINK_ENABLE_USER_METERING:-true}"
+RAYLINK_CONTROL_CA_FILE="${RAYLINK_CONTROL_CA_FILE:-}"
 
 fail() {
   printf 'RayLink Node 安装失败：%s\n' "$1" >&2
@@ -29,7 +31,7 @@ if ! printf '%s' "$RAYLINK_SERVER" | grep -Eq '^https://([A-Za-z0-9._-]+|\[[0-9A
     fail "RAYLINK_SERVER 生产环境必须是 HTTPS 根地址"
   fi
 fi
-for managed_path in "$RAYLINK_NODE_ROOT" "$RAYLINK_NODE_CONFIG_ROOT" "$RAYLINK_NODE_DATA_ROOT" "$RAYLINK_SYSTEMD_ROOT" "$RAYLINK_TMPFILES_ROOT" "$RAYLINK_RUNTIME_BIN_DIR"; do
+for managed_path in "$RAYLINK_NODE_ROOT" "$RAYLINK_NODE_CONFIG_ROOT" "$RAYLINK_NODE_DATA_ROOT" "$RAYLINK_SYSTEMD_ROOT" "$RAYLINK_TMPFILES_ROOT" "$RAYLINK_SYSCTL_ROOT" "$RAYLINK_RUNTIME_BIN_DIR"; do
   printf '%s' "$managed_path" | grep -Eq '^/[A-Za-z0-9_./-]+$' || fail "受管目录必须为不含空白的绝对路径"
 done
 if [ -n "$RAYLINK_EXPECT_HOST_ID" ]; then
@@ -43,6 +45,29 @@ read_environment_value() {
   # Never execute an existing environment file as shell code.
   awk -v key="$1" 'index($0, key "=") == 1 { count++; value=substr($0, length(key)+2) }
     END { if (count != 1) exit 1; print value }' "$node_environment"
+}
+control_plane_trust_changed=false
+repair_control_plane_trust() {
+  [ -n "$RAYLINK_CONTROL_CA_FILE" ] || return 0
+  [ -f "$RAYLINK_CONTROL_CA_FILE" ] && [ -r "$RAYLINK_CONTROL_CA_FILE" ] && [ -s "$RAYLINK_CONTROL_CA_FILE" ] \
+    || fail "控制面 CA 文件不可读取"
+  local persisted_ca="$RAYLINK_NODE_CONFIG_ROOT/control-plane-ca.pem"
+  if cmp -s "$RAYLINK_CONTROL_CA_FILE" "$persisted_ca" \
+    && [ "$(read_environment_value NODE_EXTRA_CA_CERTS || true)" = "$persisted_ca" ] \
+    && [ "$(read_environment_value RAYLINK_CONTROL_CA_FILE || true)" = "$persisted_ca" ]; then return 0; fi
+  local ca_candidate="${persisted_ca}.install-$$"
+  local environment_candidate="${node_environment}.install-$$"
+  install -m 0644 "$RAYLINK_CONTROL_CA_FILE" "$ca_candidate"
+  install -m 0600 /dev/null "$environment_candidate"
+  awk '!/^(NODE_EXTRA_CA_CERTS|RAYLINK_CONTROL_CA_FILE)=/' "$node_environment" > "$environment_candidate"
+  {
+    printf 'NODE_EXTRA_CA_CERTS=%s\n' "$persisted_ca"
+    printf 'RAYLINK_CONTROL_CA_FILE=%s\n' "$persisted_ca"
+  } >> "$environment_candidate"
+  chmod 0600 "$environment_candidate"
+  mv -f "$ca_candidate" "$persisted_ca"
+  mv -f "$environment_candidate" "$node_environment"
+  control_plane_trust_changed=true
 }
 command -v systemctl >/dev/null 2>&1 || fail "需要 systemd"
 if [ -e "$node_environment" ] || [ -e "$node_state" ]; then
@@ -62,7 +87,11 @@ if [ -e "$node_environment" ] || [ -e "$node_state" ]; then
     ' "$node_state" 2>/dev/null)" || fail "现有节点身份无法确认，拒绝覆盖"
     [ -z "$RAYLINK_EXPECT_HOST_ID" ] || [ "$existing_host" = "$RAYLINK_EXPECT_HOST_ID" ] \
       || fail "现有节点主机编号与预期不符，拒绝覆盖"
-    if ! systemctl is-active --quiet raylink-node.service; then
+    repair_control_plane_trust
+    if [ "$control_plane_trust_changed" = true ]; then
+      systemctl enable raylink-node.service
+      systemctl restart raylink-node.service
+    elif ! systemctl is-active --quiet raylink-node.service; then
       systemctl enable raylink-node.service
       systemctl start raylink-node.service
     fi
@@ -76,11 +105,15 @@ if [ -e "$node_environment" ] || [ -e "$node_state" ]; then
   if systemctl is-active --quiet raylink-sing-box.service; then
     fail "Runtime 正在运行但节点身份缺失，拒绝接管"
   fi
+  repair_control_plane_trust
   if [ -x "$RAYLINK_NODE_ROOT/node/bin/node" ] && [ -f "$RAYLINK_NODE_ROOT/raylink-node.mjs" ] \
     && [ -f "$RAYLINK_SYSTEMD_ROOT/raylink-node.service" ] \
-    && [ -f "$RAYLINK_SYSTEMD_ROOT/raylink-sing-box.service" ] && [ -x "$sing_box_bin" ]; then
+    && [ -f "$RAYLINK_SYSTEMD_ROOT/raylink-sing-box.service" ] && [ -x "$sing_box_bin" ] \
+    && "$RAYLINK_NODE_ROOT/node/bin/node" --input-type=module -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.argv[1]).href);' \
+      "$RAYLINK_NODE_ROOT/raylink-node.mjs" 2>/dev/null; then
     systemctl enable raylink-node.service
-    if ! systemctl is-active --quiet raylink-node.service; then systemctl start raylink-node.service; fi
+    if [ "$control_plane_trust_changed" = true ]; then systemctl restart raylink-node.service
+    elif ! systemctl is-active --quiet raylink-node.service; then systemctl start raylink-node.service; fi
     printf 'RayLink Node 已安装，继续等待原接入请求；保留原令牌和 Runtime。\n'
     exit 0
   fi
@@ -94,6 +127,16 @@ else
   fi
 fi
 [ -n "$RAYLINK_ENROLL_TOKEN" ] || [ "$has_existing_environment" = true ] || fail "缺少 RAYLINK_ENROLL_TOKEN"
+if [ -z "$RAYLINK_CONTROL_CA_FILE" ] && [ -f "$node_environment" ]; then
+  RAYLINK_CONTROL_CA_FILE="$(read_environment_value RAYLINK_CONTROL_CA_FILE || true)"
+fi
+if [ -z "$RAYLINK_CONTROL_CA_FILE" ] && [ -s "$RAYLINK_NODE_CONFIG_ROOT/control-plane-ca.pem" ]; then
+  RAYLINK_CONTROL_CA_FILE="$RAYLINK_NODE_CONFIG_ROOT/control-plane-ca.pem"
+fi
+if [ -n "$RAYLINK_CONTROL_CA_FILE" ]; then
+  [ -f "$RAYLINK_CONTROL_CA_FILE" ] && [ -r "$RAYLINK_CONTROL_CA_FILE" ] && [ -s "$RAYLINK_CONTROL_CA_FILE" ] \
+    || fail "控制面 CA 文件不可读取"
+fi
 if [ "$has_existing_environment" = true ]; then
   RAYLINK_ENROLL_TOKEN="$(read_environment_value RAYLINK_ENROLL_TOKEN)" || fail "待接入安装缺少原接入令牌"
 fi
@@ -105,10 +148,26 @@ printf '%s' "$RAYLINK_PROTOCOL_PROBE_URL" | grep -Eq '^https://[^[:space:]]+$' \
 [ "$RAYLINK_ENABLE_USER_METERING" = true ] || fail "正式版 RayLink Node 必须启用真实用户计量"
 printf '%s' "$SING_BOX_VERSION" | grep -Eq '^1\.[0-9]+\.[0-9]+$' || fail "Runtime 版本格式无效"
 printf '%s' "$RAYLINK_NODE_VERSION" | grep -Eq '^[0-9]+$' || fail "Node.js 主版本格式无效"
-command -v curl >/dev/null 2>&1 || fail "需要 curl"
-command -v tar >/dev/null 2>&1 || fail "需要 tar"
-command -v sha256sum >/dev/null 2>&1 || fail "需要 sha256sum"
-command -v systemd-tmpfiles >/dev/null 2>&1 || fail "需要 systemd-tmpfiles"
+missing_dependencies=false
+for dependency in curl tar xz sha256sum sysctl modprobe ss systemd-tmpfiles; do
+  command -v "$dependency" >/dev/null 2>&1 || missing_dependencies=true
+done
+if [ "$missing_dependencies" = true ]; then
+  printf '自动安装下载、校验、网络探测及 BBR 所需系统组件。\n'
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar xz-utils coreutils procps kmod iproute2 systemd
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates curl tar xz coreutils procps-ng kmod iproute systemd
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates curl tar xz coreutils procps-ng kmod iproute systemd
+  else
+    fail "系统缺少安装依赖，且没有受支持的软件包管理器"
+  fi
+fi
+for dependency in curl tar xz sha256sum sysctl ss systemd-tmpfiles; do
+  command -v "$dependency" >/dev/null 2>&1 || fail "系统组件安装后仍缺少 $dependency"
+done
 if systemctl list-unit-files sing-box.service >/dev/null 2>&1 \
   && { systemctl is-active --quiet sing-box.service || systemctl is-enabled --quiet sing-box.service; }; then
   fail "检测到现有 sing-box.service 正在运行或已启用；请先迁移并停止、禁用现有服务后重试"
@@ -125,16 +184,24 @@ temporary_root="$(mktemp -d)"
 trap 'rm -rf "$temporary_root"' EXIT
 download() {
   local allowed_protocols='=https'
+  local ca_arguments=(--tlsv1.2)
+  case "$1" in
+    "$RAYLINK_SERVER"/node/*)
+      if [ -n "$RAYLINK_CONTROL_CA_FILE" ]; then ca_arguments+=(--cacert "$RAYLINK_CONTROL_CA_FILE"); fi
+      ;;
+  esac
   if [ "${RAYLINK_ALLOW_INSECURE_HTTP:-false}" = true ] \
     && printf '%s' "$1" | grep -Eq '^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?/'; then
     allowed_protocols='=http,https'
   fi
   curl -fsSL "$1" --proto "$allowed_protocols" --proto-redir '=https' --connect-timeout 10 --max-time 180 \
-    --retry 2 --retry-delay 1 --retry-max-time 360 -o "$2"
+    --retry 2 --retry-delay 1 --retry-max-time 360 "${ca_arguments[@]}" -o "$2"
 }
 # Finish downloads and validation before changing an installed program or unit.
 download "$RAYLINK_SERVER/node/raylink-ufw.tmpfiles.conf" "$temporary_root/raylink-node-ufw.conf"
 download "$RAYLINK_SERVER/node/raylink-node.mjs" "$temporary_root/raylink-node.mjs"
+download "$RAYLINK_SERVER/node/network-tuning.mjs" "$temporary_root/network-tuning.mjs"
+download "$RAYLINK_SERVER/node/software-update.mjs" "$temporary_root/software-update.mjs"
 node_binary="$RAYLINK_NODE_ROOT/node/bin/node"
 staged_node=false
 if [ ! -x "$node_binary" ]; then
@@ -153,6 +220,10 @@ if [ ! -x "$node_binary" ]; then
   staged_node=true
 fi
 "$node_binary" --check "$temporary_root/raylink-node.mjs" || fail "下载的 Node 程序语法校验失败"
+"$node_binary" --check "$temporary_root/network-tuning.mjs" || fail "下载的 BBR 模块语法校验失败"
+"$node_binary" --check "$temporary_root/software-update.mjs" || fail "下载的更新模块语法校验失败"
+"$node_binary" --input-type=module -e 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.argv[1]).href);' \
+  "$temporary_root/raylink-node.mjs" || fail "下载的 Node 程序依赖校验失败"
 
 runtime_name="raylink-sing-box-${SING_BOX_VERSION}-linux-${runtime_arch}"
 runtime_url="$RAYLINK_SERVER/node/runtime/$runtime_name"
@@ -198,19 +269,6 @@ for required_runtime_tag in $required_runtime_tags; do
     || fail "候选 Runtime 缺少 ${required_runtime_tag}"
 done
 
-if ! command -v ss >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y iproute
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y iproute
-  else
-    fail "端口探测需要 iproute2（ss），当前系统无法自动安装"
-  fi
-fi
-
 # Recheck services immediately before committing staged artifacts.
 [ ! -e "$node_state" ] || fail "节点已在下载期间接入，请重新执行以确认身份"
 if systemctl is-active --quiet raylink-node.service; then
@@ -220,7 +278,7 @@ if systemctl is-active --quiet sing-box.service || systemctl is-enabled --quiet 
   || systemctl is-active --quiet raylink-sing-box.service; then
   fail "检测到正在运行的 Runtime，拒绝覆盖二进制或服务配置"
 fi
-install -d -m 0755 "$RAYLINK_NODE_ROOT" "$RAYLINK_SYSTEMD_ROOT" "$RAYLINK_TMPFILES_ROOT" "$RAYLINK_RUNTIME_BIN_DIR"
+install -d -m 0755 "$RAYLINK_NODE_ROOT" "$RAYLINK_SYSTEMD_ROOT" "$RAYLINK_TMPFILES_ROOT" "$RAYLINK_SYSCTL_ROOT" "$RAYLINK_RUNTIME_BIN_DIR"
 install -d -m 0700 "$RAYLINK_NODE_CONFIG_ROOT"
 install -d -m 0750 "$RAYLINK_NODE_DATA_ROOT"
 atomic_install() {
@@ -239,11 +297,23 @@ if [ "$has_existing_environment" = false ]; then
     printf 'RAYLINK_NODE_STATE=%s\n' "$node_state"
     printf 'RAYLINK_NODE_DATA=%s\n' "$RAYLINK_NODE_DATA_ROOT"
     printf 'RAYLINK_RUNTIME_MODE=systemd\n'
+    printf 'RAYLINK_BBR_CONFIG=%s/99-raylink-bbr.conf\n' "$RAYLINK_NODE_CONFIG_ROOT"
     printf 'RAYLINK_PROTOCOL_PROBE_URL=%s\n' "$RAYLINK_PROTOCOL_PROBE_URL"
     printf 'RAYLINK_ENABLE_USER_METERING=%s\n' "$RAYLINK_ENABLE_USER_METERING"
     printf 'SING_BOX_BIN=%s\n' "$sing_box_bin"
     printf 'SING_BOX_SYSTEMD_UNIT=raylink-sing-box.service\n'
   } > "$temporary_root/node.env"
+elif [ -n "$RAYLINK_CONTROL_CA_FILE" ]; then
+  awk '!/^(NODE_EXTRA_CA_CERTS|RAYLINK_CONTROL_CA_FILE)=/' "$node_environment" > "$temporary_root/node.env"
+fi
+if [ -n "$RAYLINK_CONTROL_CA_FILE" ]; then
+  atomic_install 0644 "$RAYLINK_CONTROL_CA_FILE" "$RAYLINK_NODE_CONFIG_ROOT/control-plane-ca.pem"
+  {
+    printf 'NODE_EXTRA_CA_CERTS=%s/control-plane-ca.pem\n' "$RAYLINK_NODE_CONFIG_ROOT"
+    printf 'RAYLINK_CONTROL_CA_FILE=%s/control-plane-ca.pem\n' "$RAYLINK_NODE_CONFIG_ROOT"
+  } >> "$temporary_root/node.env"
+fi
+if [ -f "$temporary_root/node.env" ]; then
   atomic_install 0600 "$temporary_root/node.env" "$node_environment"
 fi
 if [ "$staged_node" = true ]; then
@@ -253,6 +323,11 @@ if [ "$staged_node" = true ]; then
   mv "$node_candidate" "$RAYLINK_NODE_ROOT/node"
 fi
 atomic_install 0755 "$temporary_root/raylink-node.mjs" "$RAYLINK_NODE_ROOT/raylink-node.mjs"
+atomic_install 0644 "$temporary_root/network-tuning.mjs" "$RAYLINK_NODE_ROOT/network-tuning.mjs"
+atomic_install 0644 "$temporary_root/software-update.mjs" "$RAYLINK_NODE_ROOT/software-update.mjs"
+# The Node's existing writable configuration directory remains the only place
+# it writes; systemd-sysctl follows this link during future boots.
+ln -sfn "$RAYLINK_NODE_CONFIG_ROOT/99-raylink-bbr.conf" "$RAYLINK_SYSCTL_ROOT/99-raylink-node-bbr.conf"
 if [ "$staged_builder" = true ]; then
   atomic_install 0755 "$temporary_root/build-metered-runtime.sh" "$RAYLINK_NODE_ROOT/build-metered-runtime.sh"
 fi

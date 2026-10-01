@@ -1113,16 +1113,81 @@ test("a failed entitlement publication is reported as pending and remains retrya
   assert.doesNotMatch(publications.at(-1).configText, /priya@vantage-bioworks\.in/);
 });
 
-test("admin detects sing-box, enables a protocol profile and triggers one-click installation", async (t) => {
+test("BBR configuration remains pending until a capable Node executes and reports real kernel state", async (t) => {
+  const f = await startTestApp({ seedDemoData: false }); t.after(() => f.close());
+  const cookie = await login(f.baseUrl);
+  const created = await (await api(f.baseUrl, cookie, "/api/hosts", { method: "POST", body: JSON.stringify({ name: "BBR Host", address: "bbr.example.com", region: "test" }) })).json();
+  const enrolled = await fetch(`${f.baseUrl}/api/node/enroll`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: created.enrollmentToken, agentVersion: "0.9.0", platform: "linux", runtimeVersion: "1.14.2" }) });
+  assert.equal(enrolled.status, 201);
+  const credential = await enrolled.json();
+  const nodeHeaders = { authorization: `Bearer ${credential.nodeSecret}`, "x-raylink-host-id": credential.hostId, "content-type": "application/json" };
+  const path = `/api/hosts/${credential.hostId}/bbr`;
+  assert.equal((await api(f.baseUrl, cookie, path, { method: "POST" })).status, 202);
+  assert.equal((await api(f.baseUrl, cookie, path, { method: "POST" })).status, 409);
+  let bootstrap = await (await api(f.baseUrl, cookie, "/api/bootstrap")).json();
+  assert.equal(bootstrap.hosts.find(h => h.id === credential.hostId).bbrTask.pending, true);
+  assert.equal(bootstrap.hosts.find(h => h.id === credential.hostId).telemetry.bbr, null);
+  const task = await (await fetch(`${f.baseUrl}/api/node/tasks/next`, { headers: nodeHeaders })).json();
+  assert.equal(task.kind, "configure-bbr");
+  const completed = await fetch(`${f.baseUrl}/api/node/tasks/${task.id}/complete`, { method: "POST", headers: nodeHeaders, body: JSON.stringify({ attempt: task.attempt, status: "succeeded", result: {} }) });
+  assert.equal(completed.status, 200);
+  assert.equal((await fetch(`${f.baseUrl}/api/node/heartbeat`, { method: "POST", headers: nodeHeaders, body: JSON.stringify({ agentVersion: "0.9.0", telemetry: { bbr: { status: "enabled", congestionControl: "bbr", qdisc: "fq" } } }) })).status, 200);
+  bootstrap = await (await api(f.baseUrl, cookie, "/api/bootstrap")).json();
+  const host = bootstrap.hosts.find(h => h.id === credential.hostId);
+  assert.equal(host.bbrTask.status, "succeeded");
+  assert.equal(host.telemetry.bbr.status, "enabled");
+  assert.ok(host.telemetry.bbr.checkedAt);
+  assert.equal(bootstrap.runtimeSetup.status, "development");
+  assert.equal(bootstrap.systemUpdate.supported, false);
+  assert.equal((await api(f.baseUrl, cookie, "/api/hosts/local/bbr", { method: "POST" })).status, 422);
+  assert.equal((await api(f.baseUrl, cookie, "/api/system/upgrade", { method: "POST" })).status, 422);
+});
+
+test("old Nodes and non-owner administrators cannot be queued for unsupported software updates", async (t) => {
+  const f = await startTestApp({ seedDemoData: false }); t.after(() => f.close());
+  const cookie = await login(f.baseUrl);
+  const created = await (await api(f.baseUrl, cookie, "/api/hosts", { method: "POST", body: JSON.stringify({ name: "Legacy Node", address: "legacy.example.com", region: "test" }) })).json();
+  const credential = await (await fetch(`${f.baseUrl}/api/node/enroll`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: created.enrollmentToken, agentVersion: "0.8.0", platform: "linux" }) })).json();
+  for (const operation of ["bbr", "node-upgrade"]) {
+    const response = await api(f.baseUrl, cookie, `/api/hosts/${credential.hostId}/${operation}`, { method: "POST" });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, "NODE_UPGRADE_REQUIRED");
+  }
+  const operator = { username: "maintenance-operator", password: "test-maintenance-operator-password", role: "operator" };
+  assert.equal((await api(f.baseUrl, cookie, "/api/admins", { method: "POST", body: JSON.stringify(operator) })).status, 201);
+  const response = await fetch(`${f.baseUrl}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(operator) });
+  const operatorCookie = response.headers.getSetCookie()[0].split(";")[0];
+  for (const path of ["/api/system/upgrade", `/api/hosts/${credential.hostId}/node-upgrade`]) {
+    assert.equal((await api(f.baseUrl, operatorCookie, path, { method: "POST" })).status, 403);
+  }
+});
+
+test("a durable system update blocks Runtime changes after the request that scheduled it has finished", async (t) => {
+  const f = await startTestApp({
+    seedDemoData: false,
+    systemUpdateManager: { status: async () => ({ task: { status: "running" } }) }
+  });
+  t.after(() => f.close());
+  const cookie = await login(f.baseUrl);
+  for (const path of ["/api/runtime/install", "/api/deployments"]) {
+    const response = await api(f.baseUrl, cookie, path, { method: "POST" });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, "SYSTEM_UPDATE_BUSY");
+  }
+  assert.equal(f.app.store.listDeployments().length, 0);
+});
+
+test("admin can edit development profiles but cannot mistake a binary install for a running Linux service", async (t) => {
   let installCalls = 0;
+  let installed = false;
   const installer = {
     async status() {
       return {
-        installed: installCalls > 0,
-        version: installCalls > 0 ? "1.13.12" : null,
+        installed: installed,
+        version: installed ? "1.13.12" : null,
         platform: "darwin",
         architecture: "arm64",
-        tags: installCalls > 0 ? ["with_quic", "with_utls"] : [],
+        tags: installed ? ["with_quic", "with_utls"] : [],
         binaryPath: "sing-box"
       };
     },
@@ -1145,8 +1210,11 @@ test("admin detects sing-box, enables a protocol profile and triggers one-click 
   assert.ok(initial.protocolCatalog.some((protocol) => protocol.type === "hysteria2"));
 
   const installResponse = await api(testApp.baseUrl, cookie, "/api/runtime/install", { method: "POST" });
-  assert.equal(installResponse.status, 200);
-  assert.equal((await installResponse.json()).version, "1.13.12");
+  assert.equal(installResponse.status, 422);
+  assert.equal((await installResponse.json()).error.code, "RUNTIME_AUTOMATION_UNSUPPORTED");
+  assert.equal(installCalls, 0);
+  // A pre-existing binary can still be inspected/configured in the development fixture.
+  installed = true;
 
   const updateResponse = await api(testApp.baseUrl, cookie, "/api/hosts/local/protocols/vless", {
     method: "PATCH",
@@ -2314,6 +2382,7 @@ test("admin creates a remote host and RayLink Node enrolls with a one-time token
     networkRxBps: 12_500_000,
     networkTxBps: 2_500_000,
     serviceStatus: "running",
+    bbr: null,
     updatedAt: undefined
   });
   assert.ok(onlineHost.telemetry.updatedAt);
@@ -3271,7 +3340,7 @@ test("control plane serves the RayLink web application on the same origin", asyn
   assert.match(nodeRuntimeResponse.headers.get("content-type"), /javascript/);
   const nodeRuntime = await nodeRuntimeResponse.text();
   assert.match(nodeRuntime, /class RayLinkNode/);
-  assert.match(nodeRuntime, /AGENT_VERSION = "0\.8\.0"/);
+  assert.match(nodeRuntime, /AGENT_VERSION = "0\.9\.0"/);
   assert.match(nodeRuntime, /upgrade-runtime/);
 
   const portalResponse = await fetch(`${testApp.baseUrl}/portal/`);

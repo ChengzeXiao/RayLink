@@ -7,7 +7,7 @@ let bootstrapRefreshInFlight = false;
 let bootstrapRefreshPromise = null;
 let bootstrapReadPromise = null;
 const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
-const requiredNodeAgentVersion = "0.8.0";
+const requiredNodeAgentVersion = "0.9.0";
 
 const clientCatalog = {
   mihomo: { name: "Clash / Mihomo", platforms: "Windows / macOS / Android", action: "导入订阅" },
@@ -38,6 +38,9 @@ const controlPlane = {
   runtime: null,
   runtimePreview: null,
   installation: null,
+  runtimeSetup: null,
+  bbr: null,
+  systemUpdate: null,
   runtimeUpdate: null,
   protocolCatalog: [],
   deployments: [],
@@ -57,6 +60,8 @@ const controlPlane = {
 
 const mcpAccess = { tokens: [], scopes: [], endpoint: "", issued: null, loading: false, creating: false, generation: 0 };
 const provisioning = { jobs: [], loading: false, timer: null, drawerJobId: null, generation: 0 };
+const runtimeSetupRequest = { running: false, error: "" };
+const systemUpdateRequest = { checking: false, upgrading: false, error: "" };
 
 const scopeLabels = {
   all: "全部节点",
@@ -207,6 +212,10 @@ function versionIsOlder(currentVersion, targetVersion) {
   return false;
 }
 
+function nodeVersionSupports(version, minimumVersion) {
+  return /^\d+\.\d+\.\d+$/.test(String(version || "")) && !versionIsOlder(version, minimumVersion);
+}
+
 function applyBootstrap(data) {
   const previousAdminId = controlPlane.currentAdmin?.id;
   users.splice(0, users.length, ...data.users.map((user) => ({
@@ -232,6 +241,11 @@ function applyBootstrap(data) {
   controlPlane.runtime = data.runtime;
   controlPlane.runtimePreview = data.runtimePreview;
   controlPlane.installation = data.installation;
+  controlPlane.runtimeSetup = data.runtimeSetup || null;
+  if (["running", "succeeded"].includes(controlPlane.runtimeSetup?.status)) runtimeSetupRequest.error = "";
+  controlPlane.bbr = data.bbr || null;
+  controlPlane.systemUpdate = data.systemUpdate || null;
+  if (["queued", "running", "succeeded"].includes(controlPlane.systemUpdate?.task?.status)) systemUpdateRequest.error = "";
   controlPlane.runtimeUpdate = data.runtimeUpdate;
   controlPlane.protocolCatalog = data.protocolCatalog;
   controlPlane.deployments = data.deployments;
@@ -279,6 +293,8 @@ function applyBootstrap(data) {
   renderUsers();
   renderRuntime();
   renderRoutingPolicy();
+  renderRuntimeSetup();
+  renderSystemUpdate();
 }
 
 async function loadBootstrap({ share = false } = {}) {
@@ -313,8 +329,8 @@ function renderRuntime() {
   const railStatus = document.querySelector(".rail-status");
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const deploymentVersion = activeDeployment?.version || "尚未发布";
-  const healthy = runtime.state === "running";
-  railStatus.querySelector("strong").textContent = healthy
+  const healthy = runtime.mode === "systemd" && runtime.state === "running";
+  railStatus.querySelector("strong").textContent = runtime.mode !== "systemd" ? "本地测试模式" : healthy
     ? "Runtime 运行中"
     : runtime.state === "staged"
       ? "Runtime 已暂存"
@@ -499,7 +515,7 @@ function renderDashboard() {
   const host = hosts.find((candidate) => candidate.id === "local") || hosts[0];
   const latestAttempt = controlPlane.deployments[0];
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
-  const ready = runtime.state === "running";
+  const ready = runtime.mode === "systemd" && runtime.state === "running";
   const readyHosts = hosts.filter((candidate) => {
     if (candidate.id === "local") return ready;
     return candidate.status === "online"
@@ -629,6 +645,7 @@ function formatBitRate(value) {
 
 function hostStatusView(host, runtime, localReady) {
   if (host.id === "local") {
+    if (runtime.mode !== "systemd") return { label: "本地测试", className: "neutral" };
     return localReady
       ? { label: "运行中", className: "good" }
       : runtime.state === "staged"
@@ -643,7 +660,7 @@ function hostStatusView(host, runtime, localReady) {
   }
   if (host.status === "offline") return { label: "离线", className: "danger" };
   if (host.status === "pending") return { label: "等待接入", className: "neutral" };
-  if (host.agentVersion !== requiredNodeAgentVersion) {
+  if (!nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)) {
     return { label: "Node 待升级", className: "warning" };
   }
   if (!host.telemetry?.updatedAt || Date.now() - new Date(host.telemetry.updatedAt).getTime() > 30_000) {
@@ -903,16 +920,51 @@ function renderHostTopology(hosts, runtime) {
   status.innerHTML = `<i></i>${healthyCount}/${hosts.length} 个 Host 在线`;
 }
 
+function hostBbrPresentation(host) {
+  const remote = host.kind === "remote";
+  const bbr = remote ? host.telemetry?.bbr : controlPlane.bbr;
+  if (!remote && controlPlane.runtime?.mode !== "systemd") {
+    return { label: "本地测试模式", className: "neutral", detail: "当前环境不配置 Linux BBR，也不提供真实网络加速。", canConfigure: false };
+  }
+  const fresh = value => {
+    const age = Date.now() - new Date(value || "").getTime();
+    return Number.isFinite(age) && age >= -5_000 && age <= 60_000;
+  };
+  const timestamp = bbr?.checkedAt || host.telemetry?.updatedAt;
+  const current = fresh(timestamp) && (!remote || (host.status === "online" && fresh(host.lastSeenAt)));
+  const canConfigure = (!remote || (host.status === "online" && nodeVersionSupports(host.agentVersion, "0.9.0")))
+    && ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+  if (host.bbrTask?.pending) return { label: "BBR 配置中", className: "warning", detail: "配置任务已下发，等待节点执行与新心跳确认。", canConfigure: false };
+  if (host.bbrTask?.status === "failed") return { label: "BBR 配置失败", className: "danger", detail: host.bbrTask.error?.message || host.bbrTask.error || "节点配置任务失败，请查看系统权限及内核支持后重试。", canConfigure };
+  if (!bbr) return { label: "BBR 待上报", className: "neutral", detail: remote ? "等待节点上报内核拥塞控制状态；旧版 Node 需先升级。" : "尚无内核状态检测结果。", canConfigure };
+  const kernel = `拥塞控制 ${bbr.congestionControl || "未知"} · 队列 ${bbr.qdisc || "未知"}`;
+  if (!current) return { label: "BBR 状态过期", className: "warning", detail: `${kernel}。此为历史记录，待主机恢复心跳或重新检测后确认。`, canConfigure };
+  const labels = {
+    enabled: ["BBR 已启用", "good"], available: ["BBR 未启用", "warning"],
+    unsupported: ["内核不支持 BBR", "neutral"], unavailable: ["BBR 无法检测", "warning"],
+    failed: ["BBR 配置失败", "danger"], development: ["本地测试模式", "neutral"]
+  };
+  const [label, className] = labels[bbr.status] || ["BBR 待确认", "neutral"];
+  return { label, className, detail: `${kernel}${bbr.error ? ` · ${bbr.error}` : ""}。BBR 优化 TCP 拥塞控制，不代表移动网络或 UDP 协议已通过实测。`, canConfigure: canConfigure && !["enabled", "unsupported", "development"].includes(bbr.status) };
+}
+
+function hostBbrMarkup(host) {
+  const bbr = hostBbrPresentation(host);
+  return `<div class="switch-row host-bbr-state"><div><strong>TCP 网络加速</strong><small>${escapeHtml(bbr.detail)}</small></div><span class="status-badge ${bbr.className}">${escapeHtml(bbr.label)}</span></div>
+    ${bbr.canConfigure ? `<button type="button" class="button secondary" data-configure-bbr="${escapeHtml(host.id)}">${icon("refresh")}启用 / 重试 BBR 配置</button>` : ""}`;
+}
+
 function renderHosts() {
   if (!elements.hostBody) return;
   const hosts = controlPlane.hosts;
   const runtime = controlPlane.runtime || { state: "unknown", mode: "dry-run" };
   renderHostTopology(hosts, runtime);
   if (!hosts.length) {
-    elements.hostBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">尚未配置 Runtime 主机</div></td></tr>';
+    elements.hostBody.innerHTML = '<tr><td colspan="8"><div class="empty-state">尚未配置 Runtime 主机</div></td></tr>';
     return;
   }
   elements.hostBody.innerHTML = hosts.map((host) => {
+    const bbr = hostBbrPresentation(host);
     const protocolLabels = (host.protocols || [])
       .filter((profile) => profile.enabled)
       .map((profile) => {
@@ -924,12 +976,12 @@ function renderHosts() {
       });
     const isLocal = host.kind !== "remote";
     const healthy = isLocal
-      ? runtime.state === "running"
+      ? runtime.mode === "systemd" && runtime.state === "running"
       : host.status === "online"
-        && host.agentVersion === requiredNodeAgentVersion
+        && nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)
         && host.telemetry?.serviceStatus === "running";
     const status = isLocal
-      ? (healthy ? "运行中" : runtime.state === "staged" ? "已暂存" : "待配置")
+      ? (runtime.mode !== "systemd" ? "本地测试" : healthy ? "运行中" : runtime.state === "staged" ? "已暂存" : "待配置")
       : host.deploymentSync?.status === "revocation-pending"
         ? "撤权待应用"
         : host.runtimeUpgrade?.pending
@@ -940,7 +992,7 @@ function renderHosts() {
             : "升级失败·需检查"
         : host.deploymentSync?.status === "pending"
           ? "配置待应用"
-      : host.agentVersion && host.agentVersion !== requiredNodeAgentVersion
+      : host.agentVersion && !nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)
         ? "Node 待升级"
         : ({ pending: "等待接入", online: "在线", degraded: "发布失败" }[host.status] || "离线");
     const statusClass = host.deploymentSync?.status === "revocation-pending"
@@ -971,6 +1023,7 @@ function renderHosts() {
         : '<span class="tag">尚未启用</span>'}</td>
       <td>${isLocal ? "控制面本机" : "RayLink Node"}</td>
       <td>${escapeHtml(isLocal ? runtime.platform || "local" : [host.platform, host.architecture].filter(Boolean).join(" / ") || "等待上报")}</td>
+      <td><span class="status-badge ${bbr.className}" title="${escapeHtml(bbr.detail)}">${escapeHtml(bbr.label)}</span></td>
       <td><strong>${escapeHtml(isLocal ? runtime.runtimeVersion || runtime.mode : lastSeen)}</strong><small>${escapeHtml(isLocal ? runtime.state : host.runtimeVersion || host.agentVersion || "等待注册")}</small></td>
       <td><button class="icon-button small" aria-label="编辑${escapeHtml(host.name)}" data-open-host="${escapeHtml(host.id)}">${icon("more")}</button></td>
     </tr>`;
@@ -1008,12 +1061,39 @@ function renderConfigPreview() {
   if (systemPreview) systemPreview.textContent = preview.textContent;
 }
 
+function runtimeSetupPresentation() {
+  const setup = controlPlane.runtimeSetup || {};
+  const development = controlPlane.runtime?.mode !== "systemd" || setup.status === "development" || (controlPlane.runtime?.platform && controlPlane.runtime.platform !== "linux");
+  const running = runtimeSetupRequest.running || setup.status === "running";
+  const failed = runtimeSetupRequest.error || setup.status === "failed";
+  if (running) return { title: "正在安装与配置 Runtime", className: "warning", message: setup.message || "正在安装组件、准备服务、配置默认协议并检查运行状态。", button: "正在配置…", busy: true };
+  if (development) return { title: "本地测试模式", className: "neutral", message: "此环境不运行 Linux 代理服务，也不启用 BBR 加速。已下载二进制不代表服务可用；自动安装与配置请在 Linux 正式部署上执行。", button: "仅支持 Linux 正式部署", busy: false, blocked: true };
+  if (failed) return { title: "安装配置未完成", className: "danger", message: runtimeSetupRequest.error || setup.error?.message || setup.error || setup.message || "请查看失败步骤，修复后重试。", button: "重试完整配置", busy: false };
+  if (setup.status === "succeeded" && controlPlane.runtime?.state === "running") return { title: "安装与配置完成", className: "good", message: setup.message || "Runtime 服务与默认协议已配置，运行检查通过。BBR 结果请以独立内核状态为准。", button: "重新检查与配置", busy: false };
+  return { title: setup.status === "succeeded" ? "配置已完成，等待运行确认" : "一键安装与配置", className: "neutral", message: setup.message || "自动安装组件、配置系统服务与 Shadowsocks、发布配置并确认运行；内核支持时配置 BBR。", button: "一键安装与配置", busy: false };
+}
+
+function runtimeSetupMarkup() {
+  const presentation = runtimeSetupPresentation();
+  const setup = controlPlane.runtimeSetup || {};
+  const canManage = ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+  const statusLabels = { pending: "等待", running: "进行中", succeeded: "完成", completed: "完成", failed: "失败", warning: "需注意", skipped: "跳过", development: "本地测试" };
+  const steps = Array.isArray(setup.steps) ? setup.steps : [];
+  return `<div class="runtime-setup-heading"><div><strong>${escapeHtml(presentation.title)}</strong><p>${escapeHtml(presentation.message)}</p></div><span class="status-badge ${presentation.className}">${presentation.busy ? "执行中" : presentation.className === "good" ? "已验证" : presentation.className === "danger" ? "可重试" : "待检查"}</span></div>
+    ${steps.length ? `<ol class="runtime-setup-steps">${steps.map(step => `<li class="${step.status === "failed" ? "failed" : ["succeeded", "completed"].includes(step.status) ? "complete" : "pending"}"><span><strong>${escapeHtml(step.label || step.id || "配置步骤")}</strong><small>${escapeHtml(step.message || "")}</small></span><em>${escapeHtml(statusLabels[step.status] || step.status || "等待")}</em></li>`).join("")}</ol>` : ""}
+    ${canManage ? `<button type="button" class="button primary" data-install-runtime ${presentation.busy || presentation.blocked ? "disabled" : ""}>${icon(presentation.busy ? "refresh" : "terminal")}${escapeHtml(presentation.button)}</button>` : '<p class="field-hint">仅 Owner 或运维管理员可安装与配置。</p>'}`;
+}
+
+function renderRuntimeSetup() {
+  document.querySelectorAll("[data-runtime-setup]").forEach(target => { target.innerHTML = runtimeSetupMarkup(); });
+}
+
 function renderSystemRuntime() {
   const runtime = controlPlane.runtime || { state: "unknown", mode: "dry-run" };
   const installation = controlPlane.installation || { installed: false, version: null };
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const latestDeployment = controlPlane.deployments[0];
-  setText("#system-runtime-state", runtime.state === "running" ? "运行中"
+  setText("#system-runtime-state", runtime.mode !== "systemd" ? "本地测试 · 未提供代理服务" : runtime.state === "running" ? "运行中"
     : runtime.state === "staged" ? "已暂存 · 未运行" : "未确认运行");
   setText("#system-config-state", activeDeployment?.version || "尚未发布");
   setText(
@@ -1067,6 +1147,59 @@ function renderSystemRuntime() {
   }
 }
 
+function systemUpdatePresentation() {
+  const update = controlPlane.systemUpdate || {};
+  const task = update.task || {};
+  const development = controlPlane.runtime?.mode !== "systemd";
+  const pending = systemUpdateRequest.upgrading || ["queued", "running"].includes(task.status);
+  const blockedReason = development ? "本地测试模式不执行主控系统更新，请在 Linux 正式部署上更新。" : update.blockedReason;
+  const failed = task.status === "failed" || update.status === "error";
+  return {
+    pending,
+    canUpgrade: !blockedReason && update.supported !== false && !pending && update.updateAvailable === true && controlPlane.currentAdmin?.role === "owner",
+    title: pending ? "主控更新进行中" : failed ? "主控更新未完成" : task.status === "succeeded" ? "最近主控更新已完成" : "RayLink 控制面",
+    className: pending ? "warning" : failed ? "danger" : "neutral",
+    message: systemUpdateRequest.error || blockedReason || task.error || task.message || update.error
+      || (update.updateAvailable ? `可更新到 ${update.latestVersion}。` : update.status === "ready" ? "当前没有可用的主控更新。" : "检查 RayLink 主控程序更新；sing-box 与节点服务独立管理。")
+  };
+}
+
+function renderSystemUpdate() {
+  const update = controlPlane.systemUpdate || {};
+  const state = systemUpdatePresentation();
+  setText("#control-plane-update-title", state.title);
+  setText("#control-plane-version", `当前 ${update.currentVersion || "待读取"}${update.latestVersion ? ` · 可用版本 ${update.latestVersion}` : ""}`);
+  setText("#control-plane-update-state", state.message);
+  const badge = document.querySelector("#control-plane-update-badge");
+  if (badge) { badge.className = `status-badge ${state.className}`; badge.textContent = state.pending ? "执行中" : state.className === "danger" ? "需检查" : "主控程序"; }
+  const check = document.querySelector("[data-check-system-update]");
+  if (check) { check.disabled = systemUpdateRequest.checking || state.pending; check.textContent = systemUpdateRequest.checking ? "正在检查…" : "检查主控更新"; }
+  const upgrade = document.querySelector("[data-upgrade-system]");
+  if (upgrade) { upgrade.hidden = !state.canUpgrade && !state.pending; upgrade.disabled = !state.canUpgrade; upgrade.textContent = state.pending ? "正在更新…" : update.task?.status === "failed" ? "重试主控更新" : "更新 RayLink 主控"; }
+  document.querySelectorAll("[data-node-update-state]").forEach(target => {
+    const host = controlPlane.hosts.find(item => item.id === target.dataset.nodeUpdateState);
+    if (host) target.innerHTML = nodeUpdateMarkup(host);
+  });
+  document.querySelectorAll("[data-host-bbr-state]").forEach(target => {
+    const host = controlPlane.hosts.find(item => item.id === target.dataset.hostBbrState);
+    if (host) target.innerHTML = hostBbrMarkup(host);
+  });
+}
+
+function nodeUpdateMarkup(host) {
+  const upgrade = host.nodeUpgrade || {};
+  const pending = upgrade.pending || ["queued", "running"].includes(upgrade.status);
+  const targetVersion = upgrade.availableVersion || upgrade.targetVersion || requiredNodeAgentVersion;
+  const needed = !nodeVersionSupports(host.agentVersion, targetVersion);
+  const canManage = controlPlane.currentAdmin?.role === "owner";
+  const blocked = upgrade.blockedReason || (host.status !== "online" ? "节点离线，恢复心跳后再更新。" : "");
+  const canUpgrade = needed && !pending && nodeVersionSupports(host.agentVersion, "0.9.0") && upgrade.supported !== false && !blocked && canManage;
+  const label = pending ? "Node 更新中" : upgrade.status === "failed" ? "Node 更新失败" : needed ? "Node 可更新" : "Node 已匹配";
+  const message = upgrade.error || upgrade.message || blocked || (needed ? `当前 ${host.agentVersion || "未知版本"}，目标 ${targetVersion}。更新节点管理服务后可采集和配置 BBR；0.8 节点仍可升级 sing-box。` : `当前 ${host.agentVersion}。Node 服务负责心跳、配置应用与 BBR 状态采集。`);
+  return `<div class="switch-row"><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div><span class="status-badge ${upgrade.status === "failed" ? "danger" : pending || needed ? "warning" : "neutral"}">${escapeHtml(host.agentVersion || "未上报")}</span></div>
+    ${canUpgrade ? `<button type="button" class="button primary" data-upgrade-node="${escapeHtml(host.id)}">${icon("arrow")}${upgrade.status === "failed" ? "重试 Node 更新" : "更新 Node 服务"}</button>` : ""}`;
+}
+
 function renderSystem() {
   const installation = controlPlane.installation || { installed: false, version: null, platform: "unknown", architecture: null };
   const update = controlPlane.runtimeUpdate;
@@ -1094,7 +1227,7 @@ function renderSystem() {
             : "尚未检查稳定版更新。";
   }
   if (upgradeButton) {
-    upgradeButton.hidden = update?.updateAvailable !== true || installation.platform !== "linux";
+    upgradeButton.hidden = update?.updateAvailable !== true || installation.platform !== "linux" || controlPlane.runtime?.mode !== "systemd";
     upgradeButton.textContent = update?.latestVersion
       ? `安全升级到 ${update.latestVersion}`
       : "安全升级";
@@ -1664,6 +1797,11 @@ function setProfileMenu(open) {
 
 function showAdminLogin() {
   stopControlPlaneRefresh();
+  runtimeSetupRequest.running = false;
+  runtimeSetupRequest.error = "";
+  systemUpdateRequest.checking = false;
+  systemUpdateRequest.upgrading = false;
+  systemUpdateRequest.error = "";
   clearProvisioning();
   clearMcpAccess();
   setProfileMenu(false);
@@ -2015,6 +2153,14 @@ const protocolStatePresentation = {
 
 function protocolState(host, profile, applied) {
   const activation = host.protocolActivations?.find((item) => item.type === profile.type);
+  const verifiedActivation = ["port-listening", "public-ready"].includes(activation?.state);
+  if (profile.enabled && host.kind !== "remote" && (!activation || verifiedActivation)
+    && controlPlane.runtime?.mode !== "systemd") {
+    return { label: "本地测试配置", className: "neutral", activation: null };
+  }
+  if (verifiedActivation && host.kind !== "remote" && controlPlane.runtime?.state !== "running") {
+    return { label: "服务未运行", className: "warning", activation: null };
+  }
   if (activation && protocolStatePresentation[activation.state]) {
     const [label, className] = protocolStatePresentation[activation.state];
     return { label, className, activation };
@@ -2023,8 +2169,8 @@ function protocolState(host, profile, applied) {
     ? JSON.stringify(profile) !== JSON.stringify(applied)
     : profile.enabled;
   return {
-    label: pending ? "待发布" : profile.enabled ? "端口已监听" : "未启用",
-    className: pending ? "warning" : profile.enabled ? "good" : "neutral",
+    label: pending ? "待发布" : profile.enabled ? "已配置，待验证" : "未启用",
+    className: pending || profile.enabled ? "warning" : "neutral",
     activation: null
   };
 }
@@ -2034,10 +2180,10 @@ function hostDrawerMarkup(hostId) {
   const isRemote = host.kind === "remote";
   const nodeNeedsUpgrade = isRemote
     && host.enrolledAt
-    && host.agentVersion !== requiredNodeAgentVersion;
+    && !nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion);
   const runtimeUpdate = controlPlane.runtimeUpdate;
   const runtimeCanUpgrade = isRemote
-    && !nodeNeedsUpgrade
+    && nodeVersionSupports(host.agentVersion, "0.8.0")
     && runtimeUpdate?.compatible !== false
     && runtimeUpdate?.latestVersion
     && host.runtimeUpgrade?.pending !== true
@@ -2105,7 +2251,7 @@ function hostDrawerMarkup(hostId) {
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const runtimeHealthy = isRemote
     ? host.telemetry?.serviceStatus === "running"
-    : ["running", "staged"].includes(controlPlane.runtime?.state);
+    : controlPlane.runtime?.mode === "systemd" && controlPlane.runtime?.state === "running";
   const hostDiagnostics = [
     {
       name: isRemote ? "Node 连接" : "sing-box 安装",
@@ -2155,6 +2301,7 @@ function hostDrawerMarkup(hostId) {
       <label class="field"><span>区域标识</span><input name="region" value="${escapeHtml(host.region)}" pattern="[A-Za-z0-9-]{2,32}" placeholder="tokyo" required></label>
       <p class="drawer-section-label">主机诊断</p>
       <div class="diagnostic-grid host-diagnostic-grid">${diagnosticMarkup}</div>
+      <div data-host-bbr-state="${escapeHtml(host.id)}">${hostBbrMarkup(host)}</div>
       <button type="button" class="button secondary" data-refresh-host-diagnostics="${escapeHtml(host.id)}">${icon("refresh")}刷新主机诊断</button>
       <p class="drawer-section-label">入口协议</p>
       <p class="field-hint">协议属于当前主机。一键启用会完成配置、校验、发布、端口检查，并在成功后自动进入用户订阅。</p>
@@ -2162,8 +2309,8 @@ function hostDrawerMarkup(hostId) {
       <button type="button" class="button secondary" data-measure-host-latency="${escapeHtml(host.id)}">${icon("refresh")}测试全部协议连接</button>
       <p class="field-hint">每个公网协议执行 5 次完整握手与外部访问，显示中位连接耗时和抖动；连续 3 轮失败后才标记超时。本机及高级系统协议标记为不适用。</p>
       <div class="switch-row"><div><strong>${isRemote ? "RayLink Node" : "Runtime 模式"}</strong><small>${escapeHtml(runtimeCopy)}</small></div><span class="status-badge neutral"><i></i>${escapeHtml(isRemote ? host.status : controlPlane.runtime?.state || "unknown")}</span></div>
-      ${!isRemote && !controlPlane.installation?.installed
-        ? `<button type="button" class="button primary" id="install-sing-box">${icon("terminal")}一键安装 sing-box</button><p class="field-hint">安装完成后即可在当前主机启用入口协议。</p>`
+      ${!isRemote
+        ? `<section class="runtime-setup-card" data-runtime-setup aria-live="polite">${runtimeSetupMarkup()}</section>`
         : ""}
       <div class="switch-row"><div><strong>用户流量计量</strong><small>${usageMeteringDescription(host.usageMetering)}</small></div><span class="status-badge ${host.usageMetering?.status === "healthy" ? "good" : host.usageMetering?.status === "error" ? "danger" : "warning"}"><i></i>${usageMeteringLabel(host.usageMetering)}</span></div>
       ${isRemote ? `<div class="switch-row"><div><strong>TLS 资产安全通道</strong><small>${host.assetEncryptionReady ? "节点 X25519 公钥已登记；证书私钥将以节点专属密封包下发。" : "请升级并重启 RayLink Node，使其生成并上报资产加密公钥。"}</small></div><span class="status-badge ${host.assetEncryptionReady ? "good" : "warning"}"><i></i>${host.assetEncryptionReady ? "已就绪" : "待升级"}</span></div>` : ""}
@@ -2171,8 +2318,9 @@ function hostDrawerMarkup(hostId) {
       ${isRemote && !host.enrolledAt
         ? `<button type="button" class="button secondary" data-reissue-host="${escapeHtml(host.id)}">${icon("refresh")}重新生成接入命令</button><p class="field-hint">新的接入令牌会立即替换之前的令牌。</p>`
         : ""}
+      ${isRemote && host.enrolledAt ? `<p class="drawer-section-label">Node 管理服务</p><div data-node-update-state="${escapeHtml(host.id)}">${nodeUpdateMarkup(host)}</div>` : ""}
       ${nodeNeedsUpgrade
-        ? `<p class="drawer-section-label">Node 升级</p><p class="field-hint">当前 ${escapeHtml(host.agentVersion || "旧版")} 需要更新到 0.8.0 后才能升级 Runtime。0.7 节点仍可接收配置发布；更新只替换 Node 程序和构建器，保留身份与当前 Runtime。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button>`
+        ? `<details class="node-manual-upgrade"><summary>无法在线更新时，使用服务器命令</summary><p class="field-hint">更新只替换 Node 程序与构建器，保留身份及当前 Runtime。完成后等待心跳确认版本。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button></details>`
         : ""}
       ${runtimeCanUpgrade
         ? `<p class="drawer-section-label">Runtime 升级</p><p class="field-hint">${host.runtimeVersion === runtimeUpdate.latestVersion ? `当前版本缺少真实计量能力，将按审批构建重新安装 ${escapeHtml(runtimeUpdate.latestVersion)}。` : `可从 ${escapeHtml(host.runtimeVersion || "未知版本")} 升级到审批版 ${escapeHtml(runtimeUpdate.latestVersion)}。`}节点会备份当前二进制、校验现有配置并在失败时自动回滚。</p><button type="button" class="button primary" data-upgrade-host="${escapeHtml(host.id)}">${icon("arrow")}升级 sing-box</button>`
@@ -3142,20 +3290,142 @@ async function rollbackConfig() {
   }
 }
 
-async function installSingBox() {
-  const button = document.querySelector("#install-sing-box");
-  if (!button || button.disabled) return;
-  button.disabled = true;
-  button.innerHTML = `${icon("refresh")} 正在安装`;
+function maintenanceSessionIsCurrent(generation, adminId) {
+  return generation === controlPlaneConnection.generation && adminId === controlPlane.currentAdmin?.id;
+}
+
+async function checkSystemUpdate() {
+  if (systemUpdateRequest.checking) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  systemUpdateRequest.checking = true;
+  systemUpdateRequest.error = "";
+  renderSystemUpdate();
   try {
-    const installation = await api("/api/runtime/install", { method: "POST" });
-    await loadBootstrap();
-    if (elements.drawer.classList.contains("open")) openHost("local");
-    showToast("sing-box 已安装", `当前版本 ${installation.version}，可以开始配置协议。`);
+    const result = await api("/api/system/update", { signal: AbortSignal.timeout(30_000) });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    controlPlane.systemUpdate = result.systemUpdate || result;
   } catch (error) {
-    showToast("安装失败", error.message);
-    button.disabled = false;
-    button.innerHTML = `${icon("terminal")} 重试安装`;
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    systemUpdateRequest.error = `检查失败：${error.message}`;
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    systemUpdateRequest.checking = false;
+    renderSystemUpdate();
+  }
+}
+
+async function upgradeSystem() {
+  if (!systemUpdatePresentation().canUpgrade) return;
+  if (!window.confirm("更新 RayLink 主控会短暂重启管理服务。现有节点继续运行；页面恢复连接后请核对更新结果。确认继续？")) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  systemUpdateRequest.upgrading = true;
+  systemUpdateRequest.error = "";
+  renderSystemUpdate();
+  try {
+    const result = await api("/api/system/upgrade", { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    controlPlane.systemUpdate = { ...controlPlane.systemUpdate, ...(result.systemUpdate || result) };
+    showToast("主控更新已接受", "等待后台更新与重启完成，页面会自动恢复连接并读取最终结果。");
+    try { await loadBootstrap(); } catch { /* Restart can temporarily interrupt the read. */ }
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    systemUpdateRequest.error = !error.status ? "请求中断，更新是否已接受尚未确认。请重连后查看后台任务状态，再决定是否重试。" : error.message;
+    showToast("主控更新结果待确认", systemUpdateRequest.error);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    systemUpdateRequest.upgrading = false;
+    renderSystemUpdate();
+  }
+}
+
+async function upgradeNode(hostId, button) {
+  const host = controlPlane.hosts.find(item => item.id === hostId);
+  if (!host || button?.disabled || controlPlane.currentAdmin?.role !== "owner"
+    || !nodeVersionSupports(host.agentVersion, "0.9.0") || host.nodeUpgrade?.supported === false || host.nodeUpgrade?.pending || host.status !== "online") return;
+  if (!window.confirm("更新该主机的 RayLink Node 管理服务，现有 sing-box 连接继续运行。确认继续？")) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  if (button) { button.disabled = true; button.textContent = "正在下发更新…"; }
+  try {
+    await api(`/api/hosts/${encodeURIComponent(hostId)}/node-upgrade`, { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    host.nodeUpgrade = { ...host.nodeUpgrade, pending: true, status: "queued", message: "更新任务已下发，等待节点执行并以心跳确认版本。" };
+    renderSystemUpdate();
+    showToast("Node 更新任务已下发", "等待节点执行；最终结果以版本心跳和任务状态为准。");
+    try { await loadBootstrap(); } catch { /* Preserve the accepted task state. */ }
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    showToast("Node 更新未完成", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (button) { button.disabled = false; button.textContent = "重试 Node 更新"; }
+    renderSystemUpdate();
+  }
+}
+
+async function configureHostBbr(hostId, button) {
+  if (button?.disabled) return;
+  const host = controlPlane.hosts.find(item => item.id === hostId);
+  if (!host || !hostBbrPresentation(host).canConfigure) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  const previous = button?.innerHTML;
+  if (button) { button.disabled = true; button.innerHTML = `${icon("refresh")}正在配置 BBR`; }
+  try {
+    const result = await api(`/api/hosts/${encodeURIComponent(hostId)}/bbr`, { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (host.kind !== "remote") controlPlane.bbr = result.bbr || result;
+    else host.bbrTask = { pending: true, status: "pending" };
+    let refreshWarning = "";
+    try { await loadBootstrap(); } catch { refreshWarning = "状态刷新暂时失败，请稍后刷新主机诊断。"; }
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (host.kind === "remote") {
+      showToast("BBR 配置任务已下发", `等待节点执行与心跳确认。${refreshWarning}`);
+    } else {
+      const state = result.bbr || result;
+      showToast(state.status === "enabled" ? "BBR 已启用" : "BBR 尚未启用", `${state.error || (state.status === "enabled" ? "已读取内核状态确认 TCP 拥塞控制。" : "请检查内核能力和系统权限后重试。")}${refreshWarning}`);
+    }
+    if (!refreshWarning && elements.drawer?.classList.contains("open")) openHost(hostId);
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    showToast("BBR 配置失败", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (button) { button.disabled = false; button.innerHTML = previous; }
+    renderSystemUpdate();
+  }
+}
+
+async function installSingBox() {
+  if (runtimeSetupRequest.running || controlPlane.runtimeSetup?.status === "running"
+    || runtimeSetupPresentation().blocked || !["owner", "operator"].includes(controlPlane.currentAdmin?.role)) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  runtimeSetupRequest.running = true;
+  runtimeSetupRequest.error = "";
+  renderRuntimeSetup();
+  try {
+    const result = await api("/api/runtime/install", { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (result.runtimeSetup) controlPlane.runtimeSetup = result.runtimeSetup;
+    else if (result.setup) controlPlane.runtimeSetup = result.setup;
+    else if (result.status) controlPlane.runtimeSetup = result;
+    let refreshWarning = "";
+    try { await loadBootstrap(); } catch { refreshWarning = " 最新运行状态暂时无法读取，请稍后刷新确认。"; }
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    runtimeSetupRequest.running = false;
+    const presentation = runtimeSetupPresentation();
+    showToast(presentation.title, `${presentation.message}${refreshWarning}`);
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    runtimeSetupRequest.error = error.message;
+    showToast("安装配置未完成", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    runtimeSetupRequest.running = false;
+    renderRuntimeSetup();
   }
 }
 
@@ -3188,7 +3458,7 @@ async function checkRuntimeUpdate() {
 
 async function upgradeLocalRuntime() {
   const button = document.querySelector("#upgrade-local-runtime");
-  if (!button || button.hidden || button.disabled) return;
+  if (!button || button.hidden || button.disabled || controlPlane.runtime?.mode !== "systemd") return;
   if (!window.confirm(
     "升级会重启本机 sing-box。RayLink 控制面、用户和订阅不会中断，但连接到这台 Runtime 的现有会话可能短暂重连。确认继续？"
   )) return;
@@ -3528,6 +3798,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest("[data-check-system-update]")) { await checkSystemUpdate(); return; }
+  if (event.target.closest("[data-upgrade-system]")) { await upgradeSystem(); return; }
+  const nodeUpgradeButton = event.target.closest("[data-upgrade-node]");
+  if (nodeUpgradeButton) { await upgradeNode(nodeUpgradeButton.dataset.upgradeNode, nodeUpgradeButton); return; }
+
   if (event.target.closest("[data-create-backup]")) {
     await createDatabaseBackup();
     return;
@@ -3544,13 +3819,19 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const bbrButton = event.target.closest("[data-configure-bbr]");
+  if (bbrButton) {
+    await configureHostBbr(bbrButton.dataset.configureBbr, bbrButton);
+    return;
+  }
+
   const saveAdminButton = event.target.closest("[data-save-admin]");
   if (saveAdminButton) {
     await saveAdministrator(saveAdminButton.dataset.saveAdmin);
     return;
   }
 
-  if (event.target.closest("#install-sing-box")) {
+  if (event.target.closest("#install-sing-box, [data-install-runtime]")) {
     await installSingBox();
     return;
   }

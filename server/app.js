@@ -8,6 +8,8 @@ import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BbrManager } from "./bbr.js";
+import { RuntimeSetupManager } from "./runtime-setup.js";
+import { SystemUpdateManager } from "./system-update.js";
 import { BackupManager } from "./backup.js";
 import { evaluateOperationalAlerts } from "./alerts.js";
 import { buildReadinessReport } from "./readiness.js";
@@ -63,6 +65,9 @@ const SESSION_COOKIE = "raylink_session";
 const PORTAL_SESSION_COOKIE = "raylink_portal_session";
 const REQUIRED_NODE_AGENT_VERSION = "0.7.0";
 const RUNTIME_UPGRADE_NODE_VERSION = "0.8.0";
+const CURRENT_NODE_VERSION = "0.9.0";
+const SUPPORTED_NODE_VERSIONS = [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION, CURRENT_NODE_VERSION];
+const supportsNodeMaintenance = (version) => /^\d+\.\d+\.\d+$/.test(version || "") && !versionIsOlder(version, "0.9.0");
 const defaultWebDir = fileURLToPath(new URL("../web", import.meta.url));
 const rolePermissions = new Map([
   ["owner", new Set(["read", "users.manage", "runtime.manage", "system.manage", "admins.manage", "audit.read"])],
@@ -90,6 +95,7 @@ function adminPermissionForRequest(method, pathname) {
   }
   if (pathname === "/api/audit") return "audit.read";
   if (["GET", "HEAD"].includes(method)) return "read";
+  if (/^\/api\/hosts\/[^/]+\/node-upgrade$/.test(pathname)) return "system.manage";
   if (pathname === "/api/users" || pathname.startsWith("/api/users/")) {
     return "users.manage";
   }
@@ -752,6 +758,9 @@ export async function createRayLinkApp(options) {
     }
     localRuntimeOperation = operation;
     try {
+      if (operation !== "系统更新" && ["queued", "running"].includes((await systemUpdateManager.status()).task?.status)) {
+        throw httpError("SYSTEM_UPDATE_BUSY", "系统更新仍在执行，请等待服务恢复后再修改 Runtime", 409);
+      }
       return await callback();
     } finally {
       localRuntimeOperation = null;
@@ -762,7 +771,7 @@ export async function createRayLinkApp(options) {
     telemetrySamplePromise = (async () => {
       try {
         const runtime = await runtimeManager.status();
-        store.recordHostTelemetry("local", await telemetryProvider(runtime));
+        store.recordHostTelemetry("local", { ...await telemetryProvider(runtime), bbr: await bbrManager.inspect() });
       } catch (error) {
         console.warn(`[RayLink] Local telemetry sample failed: ${error.message}`);
       }
@@ -857,6 +866,18 @@ export async function createRayLinkApp(options) {
     mode: options.runtimeMode || "dry-run",
     configPath: options.bbrConfigPath
   });
+  const runtimeSetupManager = options.runtimeSetupManager || new RuntimeSetupManager({
+    store, installer, runtimeManager, runtimeAdapter, bbrManager,
+    runtimeMode: options.runtimeMode || "dry-run",
+    statePath: join(options.dataDir || "./data", "runtime-setup.json"),
+    ...(options.runtimePlatform ? { platform: options.runtimePlatform } : {}),
+    ...(options.portManager ? { portManager: options.portManager } : {}),
+    ...(options.firewallManager ? { firewallManager: options.firewallManager } : {})
+  });
+  const systemUpdateManager = options.systemUpdateManager || new SystemUpdateManager({
+    dataDir: options.dataDir || "./data", runtimeMode: options.runtimeMode || "dry-run",
+    ...(options.systemReleaseFetch ? { fetchImpl: options.systemReleaseFetch } : {})
+  });
   const preserveAutomaticRecoveryOrigin = (input) => {
     if (
       input.certificate.mode === "caddy-auto"
@@ -886,31 +907,7 @@ export async function createRayLinkApp(options) {
       ? await setupAccessManager.preflight(input)
       : {};
     const bbr = await bbrManager.inspect();
-    if (
-      options.runtimeMode === "systemd"
-      && !["available", "enabled"].includes(bbr.status)
-    ) {
-      throw httpError(
-        "BBR_UNAVAILABLE",
-        bbr.status === "unsupported"
-          ? "当前 Linux 内核不支持 BBR，请升级内核后重试初始化"
-          : "无法检测 Linux BBR 网络加速能力",
-        409
-      );
-    }
     const installation = await installer.status();
-    if (options.runtimeMode === "systemd") {
-      if (!installation.installed) {
-        throw httpError("RUNTIME_NOT_INSTALLED", "未检测到 sing-box Runtime", 409);
-      }
-      if (!installation.tags.includes("with_v2ray_api")) {
-        throw httpError(
-          "METERING_BUILD_MISSING",
-          "sing-box Runtime 缺少 with_v2ray_api，不能用于正式用户计量",
-          409
-        );
-      }
-    }
     return {
       checks: {
         setupToken: "passed",
@@ -920,7 +917,7 @@ export async function createRayLinkApp(options) {
           : new URL(input.access.canonicalOrigin).protocol === "https:"
             ? "passed"
             : "development",
-        runtime: options.runtimeMode === "systemd" ? "passed" : "development",
+        runtime: options.runtimeMode === "systemd" ? installation.installed ? "installed" : "automatic-install" : "development",
         bbr: bbr.status,
         ...accessChecks
       }
@@ -1025,7 +1022,9 @@ export async function createRayLinkApp(options) {
     store, sshBootstrap: options.sshBootstrap, publicOrigin: () => currentPublicOrigin().origin,
     nodeDomains,
     pollMs: options.provisioningPollMs, waitMs: options.provisioningWaitMs,
-    acceptedNodeVersions: [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION],
+    acceptedNodeVersions: SUPPORTED_NODE_VERSIONS,
+    trustedControlPlaneCa: async () => store.certificateSettings().mode === "ip-self-signed"
+      ? readFile(options.controlPlaneCertificatePath || "/etc/caddy/raylink/control-plane.crt", "utf8") : null,
     buildClientConfig: buildClientConfigForUser,
     measure: (input) => protocolActivationManager.measureHost(input),
     activate: ({ preferredPort, template, ...input }) => runLocalRuntimeOperation("节点自动接入", async () => {
@@ -1259,6 +1258,9 @@ export async function createRayLinkApp(options) {
     if (request.method === "GET" && url.pathname === "/api/bootstrap") {
       const installation = await refreshLocalRuntimeCapabilities();
       const runtime = await runtimeManager.status();
+      const bbr = { ...await bbrManager.inspect(), checkedAt: new Date().toISOString() };
+      const runtimeSetup = await runtimeSetupManager.status();
+      if (runtimeSetup.ready && runtime.state !== "running") { runtimeSetup.ready = false; runtimeSetup.message = "曾完成安装，当前服务未运行，请重新配置或检查服务"; }
       const bootstrap = store.bootstrap(admin);
       const deployments = store.listDeployments();
       const backups = await backupManager.list();
@@ -1274,6 +1276,8 @@ export async function createRayLinkApp(options) {
             };
         return {
           ...host,
+          nodeUpgrade: { ...host.nodeUpgrade, availableVersion: CURRENT_NODE_VERSION, supported: host.kind === "remote" && supportsNodeMaintenance(host.agentVersion),
+            blockedReason: !supportsNodeMaintenance(host.agentVersion) ? "旧 Node 需先执行一次升级命令以启用自动更新" : null },
           protocolCatalog: protocolCatalog.map(
             (protocol) => ({
               ...protocolAvailability(protocol, capabilities),
@@ -1299,6 +1303,7 @@ export async function createRayLinkApp(options) {
         routingRuleSets,
         telemetry: store.telemetryOverview(),
         runtime,
+        bbr, runtimeSetup, systemUpdate: await systemUpdateManager.status(),
         runtimePreview: runtimeManager.preview(),
         deployments,
         backups,
@@ -1364,6 +1369,45 @@ export async function createRayLinkApp(options) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/system/update") {
+      sendJson(response, 200, await systemUpdateManager.check());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/system/upgrade") {
+      sendJson(response, 202, await runLocalRuntimeOperation("系统更新", () => systemUpdateManager.upgrade()));
+      return;
+    }
+    const bbrMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/bbr$/);
+    if (request.method === "POST" && bbrMatch) {
+      const host = store.getHost(decodeURIComponent(bbrMatch[1]));
+      if (!host) throw httpError("HOST_NOT_FOUND", "主机不存在", 404);
+      if (host.kind === "local") {
+        if (options.runtimeMode !== "systemd") throw httpError("BBR_UNSUPPORTED", "本机测试模式不能配置 Linux BBR", 422);
+        const bbr = await runLocalRuntimeOperation("BBR 配置", () => bbrManager.configure());
+        store.recordHostTelemetry(host.id, { ...host.telemetry, bbr });
+        sendJson(response, 200, { bbr: store.getHost(host.id).telemetry.bbr });
+      } else {
+        if (!host.enrolledAt) throw httpError("NODE_NOT_ENROLLED", "节点尚未接入", 409);
+        if (!supportsNodeMaintenance(host.agentVersion)) throw httpError("NODE_UPGRADE_REQUIRED", "请先升级 Node 至 0.9.0，以支持 BBR 远程配置", 409);
+        if (store.hostTaskStatus(host.id, "configure-bbr").pending) throw httpError("BBR_TASK_PENDING", "BBR 配置任务正在等待节点执行", 409);
+        const taskId = store.queueNodeTask(host.id, "configure-bbr", {}, { maxAttempts: 1 });
+        sendJson(response, 202, { taskId, status: "queued" });
+      }
+      return;
+    }
+    const nodeUpgradeMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/node-upgrade$/);
+    if (request.method === "POST" && nodeUpgradeMatch) {
+      const host = store.getHost(decodeURIComponent(nodeUpgradeMatch[1]));
+      if (!host || host.kind !== "remote") throw httpError("REMOTE_HOST_NOT_FOUND", "远程主机不存在", 404);
+      if (!host.enrolledAt) throw httpError("NODE_NOT_ENROLLED", "节点尚未接入", 409);
+      if (!supportsNodeMaintenance(host.agentVersion)) throw httpError("NODE_UPGRADE_REQUIRED", "旧 Node 不支持自更新，请先执行一次升级命令", 409);
+      if (host.nodeUpgrade.pending) throw httpError("NODE_UPDATE_BUSY", "Node 更新正在执行", 409);
+      if (!versionIsOlder(host.agentVersion, CURRENT_NODE_VERSION)) throw httpError("NODE_ALREADY_CURRENT", "Node 已是当前控制面提供的最新版本", 409);
+      const scriptSha256 = createHash("sha256").update(await readFile(join(webDir, "node/upgrade.sh"))).digest("hex");
+      const taskId = store.queueNodeTask(host.id, "upgrade-node", { targetVersion: CURRENT_NODE_VERSION, scriptSha256 }, { maxAttempts: 1 });
+      sendJson(response, 202, { taskId, status: "queued", targetVersion: CURRENT_NODE_VERSION });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/runtime/status") {
       sendJson(response, 200, await runtimeManager.status());
       return;
@@ -1378,7 +1422,7 @@ export async function createRayLinkApp(options) {
       sendJson(
         response,
         200,
-        await runLocalRuntimeOperation("安装", () => installer.install())
+        await runLocalRuntimeOperation("自动安装与配置", async () => ({ ...await runtimeSetupManager.configure({ publisherAdminId: admin.id }), runtimeSetup: await runtimeSetupManager.status() }))
       );
       return;
     }
@@ -1619,7 +1663,7 @@ export async function createRayLinkApp(options) {
       if (!host.enrolledAt) {
         throw httpError("NODE_NOT_ENROLLED", "远程主机尚未完成 RayLink Node 接入", 409);
       }
-      if (host.agentVersion !== RUNTIME_UPGRADE_NODE_VERSION) {
+      if (![RUNTIME_UPGRADE_NODE_VERSION, CURRENT_NODE_VERSION].includes(host.agentVersion)) {
         throw httpError(
           "NODE_UPGRADE_REQUIRED",
           `请先通过 /node/upgrade.sh 将 RayLink Node 升级到 ${RUNTIME_UPGRADE_NODE_VERSION}，再升级 Runtime`,
@@ -1791,28 +1835,15 @@ export async function createRayLinkApp(options) {
         await preflightSetup(request, input);
         store.beginSetupInitialization();
         let accessActivation = null;
+        const originalHost = store.getHost("local");
         try {
-          store.updateSetupProgress({
-            stage: "network",
-            current: 1,
-            total: 4,
-            message: "正在配置 fq 队列与 BBR 网络加速"
-          });
-          const bbr = await bbrManager.configure();
-          store.updateSetupProgress({
-            stage: "runtime",
-            current: 2,
-            total: 4,
-            message: options.runtimeMode === "systemd"
-              ? "正在发布本机 sing-box Runtime"
-              : "正在准备本机 sing-box Runtime"
-          });
+          store.updateSetupProgress({ stage: "runtime", current: 1, total: 4, message: "正在自动安装 Runtime、配置协议与 BBR，并验证服务" });
+          store.updateHost("local", input.runtime);
+          let bbr;
           if (options.runtimeMode === "systemd") {
-            await runLocalRuntimeOperation(
-              "首次配置发布",
-              () => runtimeManager.publish(null)
-            );
-          }
+            const configured = await runLocalRuntimeOperation("首次自动安装", () => runtimeSetupManager.configure());
+            bbr = configured.bbr;
+          } else bbr = await bbrManager.configure();
           store.updateSetupProgress({
             stage: "access",
             current: 3,
@@ -1857,6 +1888,7 @@ export async function createRayLinkApp(options) {
               console.error(`[RayLink] Caddy rollback failed: ${rollbackError.message}`);
             }
           }
+          store.updateHost("local", { name: originalHost.name, address: originalHost.address, region: originalHost.region });
           store.failSetupInitialization();
           throw error;
         }
@@ -2167,7 +2199,7 @@ export async function createRayLinkApp(options) {
           return;
         }
         if (request.method === "GET" && url.pathname === "/api/node/tasks/next") {
-          if (![REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION].includes(node.agentVersion)) {
+          if (!SUPPORTED_NODE_VERSIONS.includes(node.agentVersion)) {
             sendJson(response, 426, {
               error: {
                 code: "NODE_UPGRADE_REQUIRED",
@@ -2277,6 +2309,8 @@ export async function createRayLinkApp(options) {
     store,
     runtimeManager,
     protocolActivationManager,
+    runtimeSetupManager,
+    systemUpdateManager,
     nodeProvisioning,
     async listen({ host, port }) {
       await new Promise((resolve, reject) => {

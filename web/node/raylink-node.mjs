@@ -30,11 +30,13 @@ import { connect as connectHttp2 } from "node:http2";
 import { connect as connectTcp } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { BbrManager } from "./network-tuning.mjs";
+import { NodeSoftwareUpdater } from "./software-update.mjs";
 
 const execFile = promisify(execFileCallback);
-export const AGENT_VERSION = "0.8.0";
+export const AGENT_VERSION = "0.9.0";
 const SECRET_ENVELOPE_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm";
 const SECRET_ENVELOPE_CONTEXT = Buffer.from("raylink-node-secret-v1", "utf8");
 const PROTOCOL_PROBE_TYPES = new Set([
@@ -534,6 +536,8 @@ export class NodeTelemetryCollector {
     this.sampleProvider = options.sampleProvider || systemSample;
     this.serviceProvider = options.serviceProvider
       || (() => serviceState(options.systemdUnit || "raylink-sing-box.service"));
+    this.bbrProvider = options.bbrProvider
+      || (() => new BbrManager({ mode: "systemd" }).inspect());
     this.clock = options.clock || Date.now;
     this.previous = null;
   }
@@ -568,7 +572,8 @@ export class NodeTelemetryCollector {
       networkTxBytes: sample.networkTxBytes,
       networkRxBps: byteRate(sample.networkRxBytes, this.previous?.sample.networkRxBytes),
       networkTxBps: byteRate(sample.networkTxBytes, this.previous?.sample.networkTxBytes),
-      serviceStatus: await this.serviceProvider()
+      serviceStatus: await this.serviceProvider(),
+      bbr: await this.bbrProvider()
     };
     this.previous = { sample, timestamp };
     return telemetry;
@@ -1291,6 +1296,16 @@ export class RayLinkNode {
     }
     this.enrollmentToken = options.enrollmentToken || "";
     this.statePath = options.statePath || "/etc/raylink-node/node.json";
+    this.bbrManager = options.bbrManager || new BbrManager({
+      mode: options.runtimeMode || "systemd",
+      configPath: options.bbrConfigPath || join(dirname(this.statePath), "99-raylink-bbr.conf")
+    });
+    this.enableBbr = options.enableBbr ?? options.runtimeMode === "systemd";
+    this.bbrInitialization = null;
+    this.selfUpdater = options.selfUpdater || new NodeSoftwareUpdater({
+      server: this.serverUrl, dataDir: dirname(this.statePath),
+      root: options.nodeRoot || dirname(fileURLToPath(import.meta.url))
+    });
     this.fetchFn = options.fetchFn || globalThis.fetch;
     this.runtimeAdapter = options.runtimeAdapter || new NodeRuntimeAdapter({
       ...options,
@@ -1300,7 +1315,8 @@ export class RayLinkNode {
       preferMeteredRuntime: options.preferMeteredRuntime !== false
     });
     this.telemetryCollector = options.telemetryCollector || new NodeTelemetryCollector({
-      systemdUnit: this.runtimeAdapter.systemdUnit
+      systemdUnit: this.runtimeAdapter.systemdUnit,
+      bbrProvider: () => this.bbrManager.inspect()
     });
     this.usageCollector = options.usageCollector || new NodeUsageCollector({
       systemdUnit: this.runtimeAdapter.systemdUnit,
@@ -1378,6 +1394,14 @@ export class RayLinkNode {
   }
 
   async ensureEnrolled() {
+    if (this.enableBbr) {
+      this.bbrInitialization ||= this.bbrManager.configure().catch((error) => {
+        // BBR is an optional TCP optimization. Report failures while keeping
+        // enrollment and configuration delivery available on limited kernels.
+        console.error(`[RayLink Node] BBR 自动配置未完成：${error.message}`);
+      });
+      await this.bbrInitialization;
+    }
     const existing = await this.loadState();
     if (existing) return this.ensureEncryptionState(existing);
     if (!this.serverUrl) throw new Error("缺少 RAYLINK_SERVER");
@@ -1461,15 +1485,41 @@ export class RayLinkNode {
         });
       }
     }
+    if (state.pendingNodeUpgrade) {
+      const outcome = await this.selfUpdater.result(state.pendingNodeUpgrade.taskId);
+      if (!outcome) return false;
+      const next = { ...state, pendingTaskReceipt: {
+        taskId: state.pendingNodeUpgrade.taskId,
+        attempt: state.pendingNodeUpgrade.attempt,
+        status: outcome.status,
+        result: outcome.result
+      } };
+      delete next.pendingNodeUpgrade;
+      await this.persistState(next);
+      await this.flushTaskReceipt();
+      return true;
+    }
     const task = await this.authenticatedRequest("/api/node/tasks/next");
     if (!task) return false;
     let receipt;
     try {
+      if (task.kind === "upgrade-node") {
+        await this.persistState({ ...state, pendingNodeUpgrade: { taskId: task.id, attempt: task.attempt } });
+        try {
+          await this.selfUpdater.schedule(task);
+        } catch (error) {
+          await this.persistState(state);
+          throw error;
+        }
+        return true;
+      }
       const result = task.kind === "publish-config"
         ? await this.runtimeAdapter.publish(task.payload, state.encryptionPrivateKey)
         : task.kind === "upgrade-runtime"
           ? await this.runtimeAdapter.upgrade(task.payload)
-          : (() => { throw new Error(`不支持的节点任务：${task.kind}`); })();
+          : task.kind === "configure-bbr"
+            ? await this.bbrManager.configure()
+            : (() => { throw new Error(`不支持的节点任务：${task.kind}`); })();
       receipt = { taskId: task.id, attempt: task.attempt, status: "succeeded", result };
     } catch (error) {
       receipt = { taskId: task.id, attempt: task.attempt, status: "failed", result: {
@@ -1516,7 +1566,10 @@ async function main() {
     systemdUnit: process.env.SING_BOX_SYSTEMD_UNIT,
     runtimeMode: process.env.RAYLINK_RUNTIME_MODE,
     protocolProbeUrl: process.env.RAYLINK_PROTOCOL_PROBE_URL,
-    preferMeteredRuntime: process.env.RAYLINK_ENABLE_USER_METERING !== "false"
+    preferMeteredRuntime: process.env.RAYLINK_ENABLE_USER_METERING !== "false",
+    enableBbr: true,
+    bbrConfigPath: process.env.RAYLINK_BBR_CONFIG,
+    nodeRoot: process.env.RAYLINK_NODE_ROOT
   });
   await node.run();
 }

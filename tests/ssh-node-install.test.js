@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -28,6 +29,8 @@ async function fixture(t, { enrolled = true } = {}) {
     id: '#!/bin/sh\nprintf "0\\n"\n',
     uname: '#!/bin/sh\nif [ "$1" = -s ]; then printf "Linux\\n"; else printf "x86_64\\n"; fi\n',
     ss: '#!/bin/sh\nexit 0\n',
+    sysctl: '#!/bin/sh\nexit 0\n',
+    modprobe: '#!/bin/sh\nexit 0\n',
     systemctl: `#!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$INSTALL_TEST_LOG"
 if [ "$1" = list-unit-files ]; then [ "\${INSTALL_TEST_OFFICIAL_ENABLED:-false}" = true ]; exit $?; fi
@@ -51,7 +54,7 @@ fi
     [join(config, "node.env")]: `RAYLINK_SERVER=https://panel.example.com\nRAYLINK_ENROLL_TOKEN=${enrollmentToken}\nRAYLINK_NODE_STATE=${config}/node.json\nRAYLINK_NODE_DATA=${data}\n`,
     [join(data, "config.json")]: '{"existing":"runtime"}',
     [join(runtime, "raylink-sing-box")]: "existing-runtime",
-    [join(root, "raylink-node.mjs")]: "existing-node-program",
+    [join(root, "raylink-node.mjs")]: "export const AGENT_VERSION = '0.8.0';\n",
     [join(units, "raylink-node.service")]: "existing-node-unit",
     [join(units, "raylink-sing-box.service")]: "existing-runtime-unit"
   };
@@ -62,6 +65,7 @@ fi
     ...process.env, PATH: `${bin}:${process.env.PATH}`, RAYLINK_NODE_ROOT: root,
     RAYLINK_NODE_CONFIG_ROOT: config, RAYLINK_NODE_DATA_ROOT: data,
     RAYLINK_SYSTEMD_ROOT: units, RAYLINK_TMPFILES_ROOT: tmpfiles, RAYLINK_RUNTIME_BIN_DIR: runtime,
+    RAYLINK_SYSCTL_ROOT: join(directory, "sysctl.d"),
     RAYLINK_SERVER: "https://panel.example.com", RAYLINK_ENROLL_TOKEN: "", RAYLINK_EXPECT_HOST_ID: "existing-host",
     INSTALL_TEST_LOG: log, INSTALL_TEST_NODE_ACTIVE: "false", INSTALL_TEST_RUNTIME_ACTIVE: "false"
   };
@@ -95,6 +99,27 @@ test("retrying an enrolled inactive Node starts only its agent and preserves its
   assert.match(commands, /start raylink-node.service/);
   assert.doesNotMatch(commands, /curl|restart|stop|(?:enable|start) raylink-sing-box/);
   await f.assertPreserved();
+});
+
+test("retrying a matching enrolled Node repairs only CA trust and restarts Node only when trust changes", async (t) => {
+  const f = await fixture(t);
+  const ca = join(f.directory, "renewed-public-ca.pem");
+  await writeFile(ca, "renewed-public-certificate\n");
+  const overrides = { RAYLINK_CONTROL_CA_FILE: ca, INSTALL_TEST_NODE_ACTIVE: "true", INSTALL_TEST_RUNTIME_ACTIVE: "true" };
+  const first = await f.run(overrides);
+  assert.ok(!(first.result instanceof Error), first.result.stderr || first.result.message);
+  assert.match(first.commands, /restart raylink-node.service/);
+  assert.doesNotMatch(first.commands, /curl|(?:start|restart|stop) raylink-sing-box/);
+  for (const [path, original] of Object.entries(f.original)) {
+    if (path !== join(f.config, "node.env")) assert.equal(await readFile(path, "utf8"), original);
+  }
+  const environment = await readFile(join(f.config, "node.env"), "utf8");
+  assert.ok(environment.includes(`NODE_EXTRA_CA_CERTS=${f.config}/control-plane-ca.pem\n`));
+  await writeFile(join(f.directory, "commands.log"), "");
+  const second = await f.run(overrides);
+  assert.ok(!(second.result instanceof Error), second.result.stderr || second.result.message);
+  assert.doesNotMatch(second.commands, /curl|restart|start|stop/);
+  assert.equal(await readFile(join(f.config, "node.env"), "utf8"), environment);
 });
 
 test("matching IPv6 HTTPS control-plane origins remain valid during installer retries", async (t) => {
@@ -170,6 +195,8 @@ async function freshFixture(t, { failAsset = "" } = {}) {
   const runtime = '#!/bin/sh\nprintf "sing-box version 1.14.2\\nTags: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_naive_outbound,with_v2ray_api,with_purego,badlinkname,tfogo_checklinkname0\\n"\n';
   const contents = {
     "raylink-node.mjs": 'export const AGENT_VERSION = "test";\n',
+    "network-tuning.mjs": 'export class BbrManager {}\n',
+    "software-update.mjs": 'export class NodeSoftwareUpdater {}\n',
     "raylink-ufw.tmpfiles.conf": "f /run/ufw.lock 0644 root root -\n",
     [runtimeName]: runtime,
     [cronetName]: "fixture-cronet"
@@ -232,6 +259,79 @@ test("fresh staged install persists Host binding and a same-Host retry leaves ev
   assert.deepEqual(after, before);
 });
 
+test("fresh Node installation stages BBR support and persists its boot-time kernel configuration link", async (t) => {
+  const f = await freshFixture(t);
+  const { result } = await f.run();
+  assert.ok(!(result instanceof Error), result.stderr || result.message);
+  assert.match(await readFile(join(f.root, "network-tuning.mjs"), "utf8"), /BbrManager/);
+  assert.equal(await readlink(join(f.env.RAYLINK_SYSCTL_ROOT, "99-raylink-node-bbr.conf")), join(f.config, "99-raylink-bbr.conf"));
+  assert.match(await readFile(join(f.config, "node.env"), "utf8"), /RAYLINK_BBR_CONFIG=/);
+});
+
+test("a provisioned control-plane CA is used for asset downloads and retained for Node HTTPS heartbeats", async (t) => {
+  const f = await freshFixture(t);
+  const source = join(f.directory, "bootstrap-ca.pem");
+  const pem = "-----BEGIN CERTIFICATE-----\nfixture-public-certificate\n-----END CERTIFICATE-----\n";
+  await writeFile(source, pem, { mode: 0o600 });
+  const { result, commands } = await f.run({ RAYLINK_CONTROL_CA_FILE: source });
+  assert.ok(!(result instanceof Error), result.stderr || result.message);
+  const downloaded = commands.split("\n").filter((line) => line.startsWith("curl "));
+  assert.ok(downloaded.length >= 4);
+  assert.ok(downloaded.every((line) => line.includes(`--cacert ${source}`)));
+  assert.doesNotMatch(commands, /(?:^|\s)(?:-k|--insecure)(?:\s|$)/);
+  const destination = join(f.config, "control-plane-ca.pem");
+  assert.equal(await readFile(destination, "utf8"), pem);
+  assert.equal((await stat(destination)).mode & 0o777, 0o644);
+  const environment = await readFile(join(f.config, "node.env"), "utf8");
+  assert.ok(environment.includes(`NODE_EXTRA_CA_CERTS=${destination}\n`));
+  assert.ok(environment.includes(`RAYLINK_CONTROL_CA_FILE=${destination}\n`));
+  assert.doesNotMatch(environment, /NODE_TLS_REJECT_UNAUTHORIZED/);
+});
+
+test("the provisioned certificate permits real HTTPS installation and Node requests while retaining hostname verification", async (t) => {
+  const f = await freshFixture(t);
+  const certificate = join(f.directory, "control-plane.crt");
+  const privateKey = join(f.directory, "control-plane.key");
+  await exec("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+    "-keyout", privateKey, "-out", certificate, "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], { timeout: 10_000 });
+  const server = createHttpsServer({ cert: await readFile(certificate), key: await readFile(privateKey) }, async (request, response) => {
+    try { response.end(await readFile(join(f.env.INSTALL_TEST_ASSETS, basename(request.url)))); }
+    catch { response.writeHead(404); response.end(); }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  const realCurl = (await exec("sh", ["-c", "command -v curl"])).stdout.trim();
+  await writeFile(join(f.bin, "curl"), '#!/bin/sh\nexec "$INSTALL_REAL_CURL" "$@"\n', { mode: 0o755 });
+  const origin = `https://127.0.0.1:${server.address().port}`;
+  const { result } = await f.run({ RAYLINK_SERVER: origin, RAYLINK_CONTROL_CA_FILE: certificate,
+    INSTALL_REAL_CURL: realCurl, NO_PROXY: "*", no_proxy: "*" });
+  assert.ok(!(result instanceof Error), result.stderr || result.message);
+  const ca = join(f.config, "control-plane-ca.pem");
+  const fetchScript = 'const response = await fetch(process.argv[1]); if (!response.ok) process.exit(2); process.stdout.write("verified");';
+  const env = { ...process.env, NODE_EXTRA_CA_CERTS: ca, NODE_USE_ENV_PROXY: "0" };
+  const verified = await exec(process.execPath, ["--input-type=module", "-e", fetchScript, `${origin}/node/raylink-node.mjs`], { env, timeout: 10_000 });
+  assert.equal(verified.stdout, "verified");
+  await assert.rejects(exec(process.execPath, ["--input-type=module", "-e", fetchScript,
+    `${origin.replace("127.0.0.1", "localhost")}/node/raylink-node.mjs`], { env, timeout: 10_000 }),
+    (error) => /ALTNAME|does not match|IP does not match/i.test(error.stderr));
+  await assert.rejects(exec(realCurl, ["--noproxy", "*", "-fsS", `${origin}/node/raylink-node.mjs`], { timeout: 10_000 }),
+    (error) => error.code === 60);
+});
+
+test("the control-plane trust anchor is not sent to the Node.js distribution download", async (t) => {
+  const f = await freshFixture(t);
+  const ca = join(f.directory, "bootstrap-ca.pem");
+  await writeFile(ca, "fixture-public-control-plane-certificate\n");
+  await rm(join(f.root, "node", "bin", "node"));
+  const { result, commands } = await f.run({ RAYLINK_CONTROL_CA_FILE: ca });
+  assert.ok(result instanceof Error, "fixture deliberately omits the external Node.js archive");
+  const downloads = commands.split("\n").filter((line) => line.startsWith("curl "));
+  assert.ok(downloads.find((line) => line.includes("panel.example.com/node/")).includes("--cacert"));
+  const externalDownload = downloads.find((line) => line.includes("nodejs.org/"));
+  assert.ok(externalDownload);
+  assert.doesNotMatch(externalDownload, /--cacert|--insecure|(?:^|\s)-k(?:\s|$)/);
+});
+
 test("fresh installation refuses an enabled foreign Runtime even when it is currently stopped", async (t) => {
   const f = await freshFixture(t);
   const { result, commands } = await f.run({ INSTALL_TEST_OFFICIAL_ENABLED: "true" });
@@ -252,4 +352,17 @@ test("retry repairs an interrupted pending installation while preserving its ori
   assert.match(await readFile(join(f.units, "raylink-node.service"), "utf8"), /Description=RayLink Node/);
   assert.match(commands, /systemctl start raylink-node.service/);
   assert.doesNotMatch(commands, /enable --now|(?:start|restart) raylink-sing-box/);
+});
+
+test("retry repairs a Node program whose dependency was interrupted during installation", async (t) => {
+  const f = await freshFixture(t);
+  const { result: installed } = await f.run();
+  assert.ok(!(installed instanceof Error), installed.stderr || installed.message);
+  const environment = await readFile(join(f.config, "node.env"), "utf8");
+  await writeFile(join(f.root, "raylink-node.mjs"), 'import "./network-tuning.mjs";\n');
+  await rm(join(f.root, "network-tuning.mjs"));
+  const { result } = await f.run({ RAYLINK_ENROLL_TOKEN: "" });
+  assert.ok(!(result instanceof Error), result.stderr || result.message);
+  assert.match(await readFile(join(f.root, "network-tuning.mjs"), "utf8"), /BbrManager/);
+  assert.equal(await readFile(join(f.config, "node.env"), "utf8"), environment);
 });

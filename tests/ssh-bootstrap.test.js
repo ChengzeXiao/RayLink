@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +15,49 @@ const hostFingerprint = `SHA256:${createHash("sha256").update(ssh2.utils.parseKe
 const userKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const userPrivateKey = userKeys.privateKey.export({ type: "pkcs1", format: "pem" });
 const userPublicKey = ssh2.utils.parseKey(userPrivateKey);
+
+test("SSH bootstrap trusts only the supplied control-plane certificate while downloading over real TLS", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-ssh-ca-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await promisify(execFile)("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+    "-keyout", join(directory, "key.pem"), "-out", join(directory, "cert.pem")]);
+  const certificate = await readFile(join(directory, "cert.pem"), "utf8");
+  let downloads = 0;
+  let existing = null;
+  const server = createHttpsServer({ key: await readFile(join(directory, "key.pem")), cert: certificate }, (_request, response) => {
+    downloads += 1;
+    response.end('set -eu\n[ -s "$RAYLINK_CONTROL_CA_FILE" ]\n[ -n "${RAYLINK_ENROLL_TOKEN:-${RAYLINK_EXPECT_HOST_ID:-}}" ]\n');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `https://127.0.0.1:${server.address().port}`;
+  const f = await fixture(t, { execute({ command, input, stream }) {
+    if (command === "id -u") { stream.write("0\n"); stream.exit(0); stream.end(); return; }
+    const preflight = input.includes("uname -s");
+    const child = spawn("bash", preflight ? ["-n"] : ["-s"]);
+    child.stdout.on("data", (chunk) => stream.write(chunk));
+    child.stderr.on("data", (chunk) => stream.stderr.write(chunk));
+    child.on("close", (code) => {
+      if (preflight && code === 0) stream.write(`RAYLINK_SSH_OS=linux\nRAYLINK_SSH_ARCH=x86_64\nRAYLINK_SSH_SYSTEMD=yes\nRAYLINK_SSH_MISSING=\nRAYLINK_SSH_SCRIPT=yes\nRAYLINK_SSH_STATE=${JSON.stringify(existing)}\n`);
+      stream.exit(code); stream.end();
+    });
+    child.stdin.end(input);
+  } });
+  const session = await new SshBootstrap().connect(f);
+  t.after(() => session.close());
+  const input = { server: origin, hostId: "ca-host", enrollmentToken: "test_enrollment_".repeat(3), controlPlaneCaCertificate: certificate };
+  assert.equal((await session.install(input)).status, "installed");
+  existing = { server: origin, hostId: "ca-host", enrolled: true };
+  assert.equal((await session.install({ ...input, enrollmentToken: undefined })).status, "existing");
+  assert.equal(downloads, 2, "enrolled Nodes still run the installer to repair explicitly supplied CA trust");
+  existing = null;
+  await assert.rejects(session.install({ ...input, controlPlaneCaCertificate: null }), { code: "SSH_REMOTE_FAILED" });
+  await assert.rejects(session.install({ ...input, server: "https://192.0.2.5" }), { code: "SSH_CONTROL_CA_INVALID" });
+  await assert.rejects(session.preflight({ server: origin, controlPlaneCaCertificate: userPrivateKey }), { code: "SSH_CONTROL_CA_INVALID" });
+  assert.doesNotMatch(f.commands.join("\n"), /BEGIN CERTIFICATE|test_enrollment/);
+  assert.doesNotMatch(f.inputs.join("\n"), /--insecure|curl -k\b|NODE_TLS_REJECT_UNAUTHORIZED/);
+});
 
 async function fixture(t, { execute, authenticate = true } = {}) {
   const connections = new Set();

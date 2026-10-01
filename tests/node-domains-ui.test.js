@@ -20,7 +20,7 @@ test("SSH onboarding retains bootstrap's disabled inheritance when refreshing DN
     controlPlane: {}, users: [], accountSummary: {},
     document: { querySelector: () => ({ ...element }), querySelectorAll: () => [], body: { dataset: {} } },
     canProvision: () => true, clearProvisioning() {}, clearMcpAccess() {}, selectWorkspaceTab() {},
-    renderUsers() {}, renderRuntime() {}, renderRoutingPolicy() {},
+    renderUsers() {}, renderRuntime() {}, renderRoutingPolicy() {}, renderRuntimeSetup() {}, renderSystemUpdate() {},
     escapeHtml: value => value, icon: () => "", setText() {}, AbortSignal,
     api: async () => { throw new Error("DNS settings temporarily unavailable"); }
   };

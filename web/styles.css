@@ -68,6 +68,19 @@ body {
 .connection-notice p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
 .connection-notice .button { flex-shrink: 0; }
 
+.runtime-setup-card { margin-bottom: 20px; }
+.runtime-setup-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.runtime-setup-heading p { margin: 6px 0 0; color: var(--text-soft); font-size: 13px; }
+.runtime-setup-heading .status-badge { flex-shrink: 0; }
+.runtime-setup-steps { list-style: none; padding: 0; margin: 0 0 18px; display: grid; gap: 8px; }
+.runtime-setup-steps li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--r-sm); }
+.runtime-setup-steps small { display: block; margin-top: 4px; color: var(--text-soft); overflow-wrap: anywhere; }
+.runtime-setup-steps em { flex-shrink: 0; color: var(--muted); font-size: 12px; font-style: normal; }
+.runtime-setup-steps .complete em { color: var(--accent); }
+.runtime-setup-steps .failed em { color: var(--danger); }
+.host-bbr-state > div { min-width: 0; }
+.host-bbr-state small { overflow-wrap: anywhere; }
+
 .auth-screen {
   min-height: 100vh;
   display: grid;
@@ -2032,9 +2045,10 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
   .system-card { min-height: 190px; padding: 18px 14px; }
   .host-table td:nth-child(2)::before { content: "状态"; }
   .host-table td:nth-child(3)::before { content: "入口协议"; }
-  .host-table td:nth-child(4)::before { content: "CPU"; }
-  .host-table td:nth-child(5)::before { content: "吞吐"; }
-  .host-table td:nth-child(6)::before { content: "最后同步"; }
+  .host-table td:nth-child(4)::before { content: "类型"; }
+  .host-table td:nth-child(5)::before { content: "平台"; }
+  .host-table td:nth-child(6)::before { content: "BBR 加速"; }
+  .host-table td:nth-child(7)::before { content: "最后心跳 / 版本"; }
   .deploy-trail.full { margin: 16px 0; padding: 14px 4px; }
   .deploy-trail.full li > span { width: 28px; height: 28px; }
   .deploy-trail.full li:not(:last-child)::after { top: 14px; left: calc(50% + 14px); width: calc(100% - 28px); }

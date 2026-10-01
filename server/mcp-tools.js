@@ -9,7 +9,7 @@ const runtimeView = (value) => pick(value, ["state", "mode", "runtimeVersion", "
 const previewView = (value) => pick(value, ["checksum", "eligibleUsers", "inboundCount", "listenPort", "protocols"]);
 const profileView = (value) => pick(value, ["type", "enabled", "listen", "port", "tls", "transport"]);
 const hostView = (value) => ({
-  ...pick(value, ["id", "name", "address", "endpointDomain", "region", "status", "kind", "hostname", "platform", "architecture", "agentVersion", "runtimeVersion", "buildTags", "assetEncryptionReady", "usageMetering", "lastSeenAt", "enrolledAt", "telemetry", "deploymentSync", "runtimeUpgrade", "protocolActivations", "protocolCatalog"]),
+  ...pick(value, ["id", "name", "address", "endpointDomain", "region", "status", "kind", "hostname", "platform", "architecture", "agentVersion", "runtimeVersion", "buildTags", "assetEncryptionReady", "usageMetering", "lastSeenAt", "enrolledAt", "telemetry", "deploymentSync", "runtimeUpgrade", "nodeUpgrade", "bbrTask", "protocolActivations", "protocolCatalog"]),
   ...(value?.protocols ? { protocols: value.protocols.map(profileView) } : {}),
   ...(value?.appliedProtocols ? { appliedProtocols: value.appliedProtocols.map(profileView) } : {})
 });
@@ -123,6 +123,10 @@ const routingFields = {
 };
 
 export const mcpTools = [
+  defineTool({ name: "system_update_check", description: "Check the official RayLink control-plane release and installation capability; never installs packages.", path: "/api/system/update" }),
+  defineTool({ name: "system_upgrade", description: "Start a durable RayLink control-plane update with archive checksum verification, backup and rollback. The control plane restarts; inspect system_overview afterward.", permission: "system.manage", mutating: true, method: "POST", path: "/api/system/upgrade" }),
+  defineTool({ name: "hosts_bbr_configure", description: "Enable Linux BBR and fq on a local Host or queue the operation on Node 0.9+. Inspect Host telemetry and bbrTask; queued does not mean enabled. Does not upgrade the kernel or reboot.", permission: "runtime.manage", mutating: true, fields: { hostId: id }, method: "POST", path: (args) => `${hostPath(args)}/bbr` }),
+  defineTool({ name: "hosts_node_upgrade", description: "Queue a Node program update from the current control plane, preserving identity and Runtime. Old Nodes lacking the self-update capability need the one-time migration command.", permission: "system.manage", mutating: true, fields: { hostId: id }, method: "POST", path: (args) => `${hostPath(args)}/node-upgrade` }),
   defineTool({ name: "hosts_provision_start", description: "Automatically install a Linux/systemd Node over SSH, enroll it, activate Shadowsocks, publish configuration and verify eligible subscriptions. Requires a reachable HTTPS control plane and root/sudo on the supplied IP. Returns a durable job; poll hosts_provision_get until succeeded. SSH credentials are not stored. Reuse requestId for transport retries.",
     permission: "runtime.manage", additionalScopes: ["hosts.provision"], mutating: true, preserveRequestId: true,
     fields: { host: z.union([z.ipv4(), z.ipv6()]), port: port.optional(), username: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/).optional(),
@@ -137,7 +141,7 @@ export const mcpTools = [
   defineTool({ name: "system_overview", description: "Read a curated control-plane overview; excludes user records, administrator lists, audit records and credentials.", path: "/api/bootstrap",
     select: (payload) => ({ currentAdmin: pick(payload.currentAdmin, ["id", "username", "role"]), userCount: payload.users?.length || 0,
       hostCount: payload.hosts?.length || 0, runtime: runtimeView(payload.runtime), runtimePreview: previewView(payload.runtimePreview),
-      installation: runtimeView(payload.installation), routingRuleSets: payload.routingRuleSets }) }),
+      installation: runtimeView(payload.installation), bbr: payload.bbr, runtimeSetup: payload.runtimeSetup, systemUpdate: payload.systemUpdate, routingRuleSets: payload.routingRuleSets }) }),
   defineTool({ name: "users_list", description: "List users and their independent entitlements without subscription credentials.", path: "/api/bootstrap", select: (payload) => ({ users: payload.users.map(userView) }) }),
   defineTool({ name: "users_get", description: "Read one user's entitlement and state without subscription credentials.", fields: { userId: id }, path: "/api/bootstrap", select: (payload, args) => userView(findResource(payload.users, args.userId, "用户")) }),
   defineTool({ name: "hosts_list", description: "List Hosts, applied protocol summaries and operational evidence without private keys or advanced configuration JSON.", path: "/api/bootstrap", select: (payload) => ({ hosts: payload.hosts.map(hostView) }) }),
@@ -188,8 +192,8 @@ export const mcpTools = [
   defineTool({ name: "runtime_status", description: "Inspect the local managed Runtime service. Staged configuration does not mean the service is running.", path: "/api/runtime/status", select: runtimeView }),
   defineTool({ name: "runtime_installation", description: "Inspect local Runtime version, platform and build capabilities.", path: "/api/runtime/installation", select: runtimeView }),
   defineTool({ name: "runtime_update_check", description: "Check the control-plane-approved Runtime release and compatibility gates; does not install an update.", path: "/api/runtime/update" }),
-  defineTool({ name: "runtime_install", description: "Install the approved local Runtime using the existing installer. May download/build packages; preserves the installer's platform and conflict checks.",
-    permission: "runtime.manage", mutating: true, method: "POST", path: "/api/runtime/install", select: runtimeView }),
+  defineTool({ name: "runtime_install", description: "Install and configure the approved Linux Runtime, enable Shadowsocks, apply BBR when supported, publish and verify service health. Unsupported development mode is rejected.",
+    permission: "runtime.manage", mutating: true, method: "POST", path: "/api/runtime/install", select: (value) => ({ ...runtimeView(value), ready: value.ready, bbr: value.bbr, warnings: value.warnings, runtime: runtimeView(value.runtime), runtimeSetup: value.runtimeSetup }) }),
   defineTool({ name: "runtime_upgrade", description: "Upgrade the local Runtime to the approved available version, validate active configuration and restart with automatic rollback on failure. May interrupt connections.",
     permission: "runtime.manage", mutating: true, method: "POST", path: "/api/runtime/upgrade" }),
   defineTool({ name: "runtime_reality_keypair", description: "Generate a Reality public/private key pair and short ID. Treat the returned private key as a secret; generation alone does not configure a protocol.",
