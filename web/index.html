@@ -6,9 +6,13 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.33">
+  <link rel="stylesheet" href="./styles.css?v=0.2.33&amp;rev=connection-recovery">
 </head>
 <body>
+  <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
+    <div><strong id="connection-title">无法连接控制面服务</strong><p id="connection-copy"></p></div>
+    <button type="button" class="button secondary" data-reconnect-control-plane>立即重连</button>
+  </section>
   <section class="auth-screen" id="admin-auth" aria-labelledby="admin-auth-title">
     <form class="auth-card" id="admin-login-form">
       <span class="brand-mark auth-brand"><img src="/assets/brand/raylink-mark.svg?v=20260726" alt="" aria-hidden="true"></span>
@@ -534,6 +538,6 @@
   <script src="./subscription-client-url.js?v=0.2.33"></script>
   <script src="./subscription-quick.js?v=0.2.33"></script>
   <script src="./protocol-health.js?v=0.2.33"></script>
-  <script src="./app.js?v=0.2.33"></script>
+  <script src="./app.js?v=0.2.33&amp;rev=connection-recovery"></script>
 </body>
 </html>

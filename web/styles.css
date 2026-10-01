@@ -50,6 +50,24 @@ body {
   touch-action: manipulation;
 }
 
+.connection-notice {
+  position: sticky;
+  top: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  border-bottom: 1px solid var(--warning);
+  background: var(--surface-2);
+  padding: 14px 24px;
+}
+.connection-notice > div { flex: 1 1 250px; min-width: 0; }
+.connection-notice strong { color: var(--warning); }
+.connection-notice p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.connection-notice .button { flex-shrink: 0; }
+
 .auth-screen {
   min-height: 100vh;
   display: grid;

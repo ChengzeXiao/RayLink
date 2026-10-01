@@ -16,7 +16,7 @@ function form() {
 
 test("provisioning submission reuses its request ID after transport failure and clears credentials after acceptance", async () => {
   const requests = [];
-  const context = { AbortSignal, crypto: { randomUUID: () => "stable-request" }, clearProvisioningSecrets: (target) => {
+  const context = { controlPlane: {}, AbortSignal, crypto: { randomUUID: () => "stable-request" }, clearProvisioningSecrets: (target) => {
     for (const name of ["password", "privateKey", "passphrase", "sudoPassword"]) target.elements[name].value = "";
   }, api: async (path, options) => {
     requests.push({ path, body: JSON.parse(options.body) });
@@ -36,7 +36,7 @@ test("provisioning submission reuses its request ID after transport failure and 
 
 test("retry recovers an accepted attempt after a lost HTTP response without resubmitting SSH credentials", async () => {
   const requests = [];
-  const context = { AbortSignal, crypto: { randomUUID: () => "retry-request" }, clearProvisioningSecrets: (target) => { target.elements.password.value = ""; }, api: async (path, options = {}) => {
+  const context = { controlPlane: {}, AbortSignal, crypto: { randomUUID: () => "retry-request" }, clearProvisioningSecrets: (target) => { target.elements.password.value = ""; }, api: async (path, options = {}) => {
     requests.push({ path, method: options.method || "GET" });
     if (options.method === "POST") throw new Error("response lost");
     return { job: { id: "job-retry", status: "running" } };
@@ -50,7 +50,7 @@ test("retry recovers an accepted attempt after a lost HTTP response without resu
 
 test("an online-node continuation sends only retry identity without stale SSH credentials", async () => {
   let body;
-  const context = { AbortSignal, crypto: { randomUUID: () => "continue-online" }, clearProvisioningSecrets() {}, api: async (path, options) => {
+  const context = { controlPlane: {}, AbortSignal, crypto: { randomUUID: () => "continue-online" }, clearProvisioningSecrets() {}, api: async (path, options) => {
     body = JSON.parse(options.body); return { job: { id: "job-online", status: "queued" } };
   } };
   vm.runInNewContext(handler("submitProvisioningForm"), context);
@@ -61,7 +61,7 @@ test("an online-node continuation sends only retry identity without stale SSH cr
 
 test("provisioning an existing domain sends protocol inheritance and keeps SSH IP separate", async () => {
   let body;
-  const context = { AbortSignal, crypto: { randomUUID: () => "domain-request" }, clearProvisioningSecrets() {}, api: async (_path, options) => { body = JSON.parse(options.body); return { job: { id: "domain-job" } }; } };
+  const context = { controlPlane: {}, AbortSignal, crypto: { randomUUID: () => "domain-request" }, clearProvisioningSecrets() {}, api: async (_path, options) => { body = JSON.parse(options.body); return { job: { id: "domain-job" } }; } };
   vm.runInNewContext(handler("submitProvisioningForm"), context);
   const target = form();
   target.elements.domainMode = { value: "existing" };

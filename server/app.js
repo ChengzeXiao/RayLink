@@ -1294,6 +1294,7 @@ export async function createRayLinkApp(options) {
         access: store.setupStatus().access,
         certificate: store.certificateSettings(),
         nodeDomains: nodeDomains.settings(),
+        provisioning: nodeProvisioning.availability(),
         routingPolicy: store.routingPolicy(),
         routingRuleSets,
         telemetry: store.telemetryOverview(),

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "node --watch server/index.js",
+    "local": "node deploy/run-local.mjs",
     "start": "node server/index.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
     "check": "node --check server/index.js && node --check web/app.js && npm test",

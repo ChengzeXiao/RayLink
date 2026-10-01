@@ -131,6 +131,15 @@ export class NodeProvisioning {
     if (!job) throw fail("PROVISIONING_NOT_FOUND", "接入任务不存在", 404);
     return job;
   }
+  availability() {
+    const controlPlaneOrigin = this.publicOrigin();
+    try {
+      origin(controlPlaneOrigin);
+      return { canStart: true, controlPlaneOrigin, reason: null };
+    } catch (error) {
+      return { canStart: false, controlPlaneOrigin, reason: error.message };
+    }
+  }
   list() { return this.state.list(); }
   assertCapacity() {
     if (this.closed || this.running.size) throw fail("PROVISIONING_BUSY", "已有节点正在接入，请完成后再试", 409);

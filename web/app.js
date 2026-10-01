@@ -4,6 +4,9 @@ const subscriptionQuick = window.RayLinkSubscriptionQuick;
 const protocolHealth = window.RayLinkProtocolHealth;
 let bootstrapRefreshTimer = null;
 let bootstrapRefreshInFlight = false;
+let bootstrapRefreshPromise = null;
+let bootstrapReadPromise = null;
+const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
 const requiredNodeAgentVersion = "0.8.0";
 
 const clientCatalog = {
@@ -221,6 +224,7 @@ function applyBootstrap(data) {
   })));
   accountSummary.totalUsers = users.length;
   controlPlane.currentAdmin = data.currentAdmin;
+  controlPlane.provisioning = data.provisioning || null;
   if (!canProvision() || (previousAdminId && previousAdminId !== data.currentAdmin.id)) clearProvisioning();
   document.querySelector("#provisioning-history").hidden = !canProvision();
   document.querySelectorAll("[data-new-host]").forEach((button) => { button.hidden = !canProvision(); });
@@ -277,10 +281,30 @@ function applyBootstrap(data) {
   renderRoutingPolicy();
 }
 
-async function loadBootstrap() {
-  const data = await api("/api/bootstrap");
-  applyBootstrap(data);
-  return data;
+async function loadBootstrap({ share = false } = {}) {
+  const generation = controlPlaneConnection.generation;
+  const earlierRead = bootstrapReadPromise;
+  if (earlierRead) {
+    if (share) return earlierRead;
+    // A refresh after a committed write must not reuse a snapshot requested before that write.
+    await earlierRead.catch(() => {});
+    if (generation !== controlPlaneConnection.generation) {
+      throw Object.assign(new Error("登录状态已变化，请重新读取页面。"), { name: "AbortError" });
+    }
+    if (bootstrapReadPromise && bootstrapReadPromise !== earlierRead) return bootstrapReadPromise;
+  }
+  const controller = new AbortController();
+  controlPlaneConnection.controller = controller;
+  const request = api("/api/bootstrap", { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) }).then((data) => {
+    if (generation === controlPlaneConnection.generation) applyBootstrap(data);
+    return data;
+  });
+  bootstrapReadPromise = request;
+  try { return await request; }
+  finally {
+    if (bootstrapReadPromise === request) bootstrapReadPromise = null;
+    if (controlPlaneConnection.controller === controller) controlPlaneConnection.controller = null;
+  }
 }
 
 function renderRuntime() {
@@ -1639,12 +1663,9 @@ function setProfileMenu(open) {
 }
 
 function showAdminLogin() {
+  stopControlPlaneRefresh();
   clearProvisioning();
   clearMcpAccess();
-  if (bootstrapRefreshTimer) {
-    clearInterval(bootstrapRefreshTimer);
-    bootstrapRefreshTimer = null;
-  }
   setProfileMenu(false);
   closeDrawer({ restoreFocus: false, clearContent: true });
   document.documentElement.classList.remove("hide-root-scrollbar");
@@ -2245,9 +2266,10 @@ function provisioningFormMarkup(job = null) {
   const field = (label, name, type, attributes = "") => `<label class="field"><span>${label}</span><input name="${name}" type="${type}" ${attributes}><small class="field-error"></small></label>`;
   return `<form class="drawer-form" id="provision-host-form" autocomplete="off" ${job ? `data-job-id="${escapeHtml(job.id)}"` : ""}>
     <div class="drawer-profile"><span class="avatar">${icon("terminal")}</span><div><strong>${job ? "重试原接入任务" : "SSH 自动接入 VPS"}</strong><small>安装 → 心跳 → 协议启用 → 连通与订阅验证</small></div></div>
+    ${controlPlane.provisioning?.canStart === false ? `<div class="notice-card" role="alert"><div><strong>请先配置 VPS 可访问的 HTTPS 控制面</strong><p>当前控制面地址 ${escapeHtml(controlPlane.provisioning.controlPlaneOrigin || location.origin)} 尚不满足自动接入条件。本机入口可用于管理；请先在系统访问设置中配置公网 HTTPS 地址，再填写 SSH 登录凭据并接入。</p></div></div>` : ""}
     <p class="field-hint">需要 Linux、systemd 与 root 或 sudo 权限；VPS 必须能访问控制面的公网 HTTPS 地址。始终启用 Shadowsocks 稳定协议；有节点域名时可自动配置 TLS 协议。</p>
     ${job ? `<div class="notice-card"><div><strong>${escapeHtml(job.input.name)}</strong><p>${escapeHtml(job.input.username)}@${escapeHtml(job.input.host)}:${job.input.port} · 保留原任务和 Host；节点已在线时可只继续配置验证。</p></div></div>` : `
-      ${field("公网 IP", "host", "text", 'placeholder="203.0.113.10 或 IPv6" required spellcheck="false"')}
+      ${field("公网 IP", "host", "text", 'placeholder="填写服务器实际公网 IP 或 IPv6" required spellcheck="false"')}
       <div class="field-grid">${field("SSH 端口", "port", "number", 'value="22" min="1" max="65535" required')}${field("登录用户", "username", "text", 'value="root" required autocomplete="off"')}</div>`}
     <label class="field"><span>${job ? "重试方式" : "登录方式"}</span><select name="authMethod" data-provision-auth><option value="password">密码</option><option value="privateKey">SSH 私钥</option>${job ? '<option value="resume">仅继续配置验证（节点已在线）</option>' : ""}</select></label>
     <div data-provision-password>${field("SSH 密码", "password", "password", 'required autocomplete="new-password"')}</div>
@@ -2267,6 +2289,9 @@ function provisioningFormMarkup(job = null) {
 }
 
 async function submitProvisioningForm(form) {
+  if (controlPlane.provisioning?.canStart === false) {
+    throw new Error("当前控制面地址不支持自动接入，请先配置 VPS 可访问的 HTTPS 控制面，再提交 SSH 登录凭据。");
+  }
   const field = (name) => form.elements[name]?.value || "";
   const authentication = field("authMethod") === "privateKey" ? { privateKey: field("privateKey"), ...(field("passphrase") ? { passphrase: field("passphrase") } : {}) } : { password: field("password") };
   const credentials = field("authMethod") === "resume" ? {} : { ...authentication, ...(field("sudoPassword") ? { sudoPassword: field("sudoPassword") } : {}) };
@@ -2326,11 +2351,12 @@ function renderProvisioningJobs() {
 }
 
 async function loadProvisioningJobs() {
-  if (!canProvision() || provisioning.loading) return;
+  if (!canProvision() || provisioning.loading || bootstrapRefreshInFlight || controlPlaneConnection.disconnected || document.hidden || navigator.onLine === false) return;
   const generation = provisioning.generation;
   const adminId = controlPlane.currentAdmin.id;
   provisioning.loading = true;
   clearTimeout(provisioning.timer);
+  provisioning.timer = null;
   try {
     const { jobs } = await api("/api/hosts/provision", { signal: AbortSignal.timeout(15_000) });
     if (generation !== provisioning.generation || adminId !== controlPlane.currentAdmin?.id || !canProvision()) return;
@@ -2345,11 +2371,15 @@ async function loadProvisioningJobs() {
     if (generation !== provisioning.generation) return;
     if (error.status === 401) { showAdminLogin(); return; }
     setText("#provisioning-status", `暂时无法更新接入进度：${error.message}`);
+    if (!error.status || error.status >= 500) {
+      markControlPlaneDisconnected();
+      scheduleBootstrapRefresh();
+    }
   } finally {
     if (generation === provisioning.generation) {
       provisioning.loading = false;
-      if (canProvision() && provisioning.jobs.some((job) => ["queued", "running"].includes(job.status))) {
-        provisioning.timer = setTimeout(() => void loadProvisioningJobs(), 2_000);
+      if (canProvision() && !controlPlaneConnection.disconnected && !document.hidden && navigator.onLine !== false && provisioning.jobs.some((job) => ["queued", "running"].includes(job.status))) {
+        provisioning.timer = setTimeout(() => loadProvisioningJobs(), 2_000);
       }
     }
   }
@@ -3293,6 +3323,7 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-reconnect-control-plane]")) { await reconnectControlPlane(); return; }
   if (event.target.closest("[data-open-account]")) { openPersonalAccount(); return; }
   const accountMode = event.target.closest("[data-account-mode]");
   if (accountMode) { openPersonalAccount(accountMode.dataset.accountMode); return; }
@@ -3678,32 +3709,160 @@ function syncResponsiveNavigation() {
 
 window.addEventListener("resize", syncResponsiveNavigation);
 
-async function enterControlPlane() {
-  await loadBootstrap();
+function renderControlPlaneConnection() {
+  const notice = document.querySelector("#connection-notice");
+  notice.hidden = !controlPlaneConnection.disconnected;
+  setText("#connection-title", "无法连接控制面服务");
+  const retry = navigator.onLine === false ? "网络已离线，重新联网后将重连。" : "将自动重试，也可立即重连。";
+  setText("#connection-copy", `当前地址 ${location.origin}。页面数据可能已过期，请检查服务是否运行。${retry}SSH 接入表单内容会保留。`);
+  const button = document.querySelector("[data-reconnect-control-plane]");
+  button.disabled = bootstrapRefreshInFlight;
+  button.textContent = bootstrapRefreshInFlight ? "正在重连…" : "立即重连";
+}
+
+function markControlPlaneDisconnected() {
+  controlPlaneConnection.disconnected = true;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  renderControlPlaneConnection();
+}
+
+function stopControlPlaneRefresh() {
+  controlPlaneConnection.active = false;
+  controlPlaneConnection.generation += 1;
+  controlPlaneConnection.controller?.abort();
+  controlPlaneConnection.controller = null;
+  bootstrapReadPromise = null;
+  bootstrapRefreshInFlight = false;
+  bootstrapRefreshPromise = null;
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  controlPlaneConnection.disconnected = false;
+  controlPlaneConnection.failures = 0;
+  renderControlPlaneConnection();
+}
+
+function scheduleBootstrapRefresh(delay = 10_000) {
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  if (!controlPlaneConnection.active || document.hidden || navigator.onLine === false) return;
+  bootstrapRefreshTimer = setTimeout(() => {
+    bootstrapRefreshTimer = null;
+    return refreshControlPlane();
+  }, delay);
+}
+
+async function refreshControlPlane() {
+  if (!controlPlaneConnection.active || document.hidden || navigator.onLine === false) return;
+  if (bootstrapRefreshInFlight) return bootstrapRefreshPromise;
+  // Let an in-flight progress read finish before starting another background read.
+  if (provisioning.loading) { scheduleBootstrapRefresh(1_000); return; }
+  const generation = controlPlaneConnection.generation;
+  const recovering = controlPlaneConnection.disconnected;
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  bootstrapRefreshInFlight = true;
+  renderControlPlaneConnection();
+  const request = (async () => {
+    let delay = 10_000;
+    let refreshed = false;
+    try {
+      await loadBootstrap({ share: true });
+      if (generation !== controlPlaneConnection.generation) return;
+      if (navigator.onLine === false) { markControlPlaneDisconnected(); return; }
+      controlPlaneConnection.disconnected = false;
+      controlPlaneConnection.failures = 0;
+      refreshed = true;
+      if (elements.appShell.hidden) displayControlPlane();
+    } catch (error) {
+      if (generation !== controlPlaneConnection.generation) return;
+      if (error.status === 401) { stopControlPlaneRefresh(); showAdminLogin(); return; }
+      controlPlaneConnection.failures += 1;
+      delay = Math.min(60_000, 10_000 * (2 ** Math.min(controlPlaneConnection.failures - 1, 3)));
+      markControlPlaneDisconnected();
+    } finally {
+      if (generation === controlPlaneConnection.generation) {
+        bootstrapRefreshInFlight = false;
+        renderControlPlaneConnection();
+        if (refreshed && (recovering || provisioning.jobs.some((job) => ["queued", "running"].includes(job.status)))) await loadProvisioningJobs();
+        scheduleBootstrapRefresh(delay);
+      }
+    }
+  })();
+  bootstrapRefreshPromise = request;
+  try { return await request; }
+  finally { if (bootstrapRefreshPromise === request) bootstrapRefreshPromise = null; }
+}
+
+function displayControlPlane() {
   elements.authScreen.hidden = true;
   elements.appShell.hidden = false;
   elements.mobileNav.hidden = false;
+  elements.authError.textContent = "";
   syncResponsiveNavigation();
   const initialRoute = location.hash.replace(/^#\//, "") || "dashboard";
   navigate(initialRoute, false);
-  void loadProvisioningJobs();
-  if (!bootstrapRefreshTimer) {
-    bootstrapRefreshTimer = setInterval(async () => {
-      if (document.hidden || bootstrapRefreshInFlight) return;
-      bootstrapRefreshInFlight = true;
-      try {
-        await loadBootstrap();
-      } catch (error) {
-        if (error.status === 401) showAdminLogin();
-      } finally {
-        bootstrapRefreshInFlight = false;
-      }
-    }, 10_000);
+}
+
+async function reconnectControlPlane() {
+  if (!controlPlaneConnection.active && !controlPlaneConnection.disconnected) return;
+  controlPlaneConnection.active = true;
+  if (navigator.onLine === false) { markControlPlaneDisconnected(); return; }
+  return refreshControlPlane();
+}
+
+function handleControlPlaneConnectivityChange() {
+  if (!controlPlaneConnection.active) return;
+  if (document.hidden || navigator.onLine === false) {
+    clearTimeout(bootstrapRefreshTimer);
+    bootstrapRefreshTimer = null;
+    clearTimeout(provisioning.timer);
+    provisioning.timer = null;
+    if (navigator.onLine === false) markControlPlaneDisconnected();
+    return;
   }
+  return reconnectControlPlane();
+}
+
+window.addEventListener("online", handleControlPlaneConnectivityChange);
+window.addEventListener("offline", handleControlPlaneConnectivityChange);
+document.addEventListener("visibilitychange", handleControlPlaneConnectivityChange);
+
+async function initializeControlPlane() {
+  const generation = controlPlaneConnection.generation;
+  try {
+    await enterControlPlane();
+  } catch (error) {
+    if (generation !== controlPlaneConnection.generation) return;
+    if (error.status !== 401) {
+      elements.authError.textContent = `无法连接控制面 ${location.origin}，请确认服务已启动后重连。`;
+      controlPlaneConnection.active = true;
+      markControlPlaneDisconnected();
+      scheduleBootstrapRefresh();
+    }
+    elements.authScreen.hidden = false;
+    elements.appShell.hidden = true;
+  }
+}
+
+async function enterControlPlane() {
+  const generation = controlPlaneConnection.generation;
+  await loadBootstrap();
+  if (generation !== controlPlaneConnection.generation) return;
+  controlPlaneConnection.active = true;
+  controlPlaneConnection.disconnected = false;
+  controlPlaneConnection.failures = 0;
+  renderControlPlaneConnection();
+  displayControlPlane();
+  void loadProvisioningJobs();
+  scheduleBootstrapRefresh();
 }
 
 elements.authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  stopControlPlaneRefresh();
   elements.authError.textContent = "";
   const submit = elements.authForm.querySelector('button[type="submit"]');
   submit.disabled = true;
@@ -3726,8 +3885,4 @@ elements.authForm.addEventListener("submit", async (event) => {
   }
 });
 
-enterControlPlane().catch((error) => {
-  if (error.status !== 401) elements.authError.textContent = `无法连接控制面：${error.message}`;
-  elements.authScreen.hidden = false;
-  elements.appShell.hidden = true;
-});
+void initializeControlPlane();

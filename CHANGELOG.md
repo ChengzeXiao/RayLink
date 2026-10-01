@@ -2,6 +2,10 @@
 
 ## 0.2.33 (unreleased)
 
+- Add a persistent localhost control-plane entry without simulated users or nodes; surface the HTTPS prerequisite before accepting SSH credentials.
+- Show disconnected control-plane status, back off read polling and reconnect without replaying writes or clearing SSH onboarding forms; require fresh reads after login and successful writes.
+- Initialize the first administrator only when the database has no administrators, preventing renamed credentials from being recreated on restart.
+
 - Add SSH onboarding with durable jobs, pinned host keys, password/key authentication, resumable installation, automatic protocol publication, metering and subscription verification.
 - Add MCP Server management over Streamable HTTP with 48 scoped tools and an Owner Bearer Token console; SSH onboarding requires a separately granted hosts.provision scope.
 - Add current-password-verified administrator username/password changes, session revocation and MCP token revocation on password reset; prevent stale concurrent logins from restoring access.

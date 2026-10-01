@@ -705,9 +705,12 @@ export class RayLinkStore {
 
   seed({ adminUsername, adminPassword, initialHostAddress, initialListenPort, seedDemoData }) {
     const createdAt = nowIso();
+    // Bootstrap credentials initialize an empty database only. Reusing them on
+    // restart must not recreate an account renamed through account settings.
     const insertAdmin = this.db.prepare(`
       INSERT OR IGNORE INTO admins (id, username, password_hash, role, created_at)
-      VALUES (?, ?, ?, 'owner', ?)
+      SELECT ?, ?, ?, 'owner', ?
+      WHERE NOT EXISTS (SELECT 1 FROM admins)
     `);
     insertAdmin.run(randomUUID(), adminUsername, hashPassword(adminPassword), createdAt);
 
