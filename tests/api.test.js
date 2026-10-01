@@ -3236,15 +3236,15 @@ test("control plane serves the RayLink web application on the same origin", asyn
     /node\/runtime\/\$runtime_name/
   );
   assert.match(nodeInstaller, /node\/runtime\/\$cronet_name/);
-  assert.match(nodeInstaller, /\/usr\/local\/bin\/libcronet\.so/);
-  assert.match(nodeInstaller, /已安装预编译 RayLink Runtime/);
+  assert.match(nodeInstaller, /\$RAYLINK_RUNTIME_BIN_DIR\/libcronet\.so/);
+  assert.match(nodeInstaller, /atomic_install 0755 "\$runtime_candidate" "\$sing_box_bin"/);
   assert.match(nodeInstaller, /回退到本机编译/);
   assert.match(nodeInstaller, /sha256sum -c/);
   assert.match(nodeInstaller, /with_naive_outbound/);
   assert.match(nodeInstaller, /with_v2ray_api/);
   assert.match(nodeInstaller, /\^http:\/\/\(127\\\.0\\\.0\\\.1\|localhost\|\\\[::1\\\]\)/);
   assert.match(nodeInstaller, /systemctl is-active --quiet sing-box\.service/);
-  assert.match(nodeInstaller, /systemctl disable sing-box\.service/);
+  assert.doesNotMatch(nodeInstaller, /systemctl disable sing-box\.service/);
   assert.doesNotMatch(nodeInstaller, /disable --now sing-box\.service/);
   assert.doesNotMatch(nodeInstaller, /sing-box\.app\/install\.sh/);
   const meteredBuilderResponse = await fetch(

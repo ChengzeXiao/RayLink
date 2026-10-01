@@ -53,6 +53,7 @@ const controlPlane = {
 };
 
 const mcpAccess = { tokens: [], scopes: [], endpoint: "", issued: null, loading: false, creating: false, generation: 0 };
+const provisioning = { jobs: [], loading: false, timer: null, drawerJobId: null, generation: 0 };
 
 const scopeLabels = {
   all: "全部节点",
@@ -220,6 +221,9 @@ function applyBootstrap(data) {
   })));
   accountSummary.totalUsers = users.length;
   controlPlane.currentAdmin = data.currentAdmin;
+  if (!canProvision() || (previousAdminId && previousAdminId !== data.currentAdmin.id)) clearProvisioning();
+  document.querySelector("#provisioning-history").hidden = !canProvision();
+  document.querySelectorAll("[data-new-host]").forEach((button) => { button.hidden = !canProvision(); });
   controlPlane.hosts = data.hosts;
   controlPlane.runtime = data.runtime;
   controlPlane.runtimePreview = data.runtimePreview;
@@ -1206,7 +1210,7 @@ function renderMcpScopes() {
   const selected = target.children.length
     ? new Set([...target.querySelectorAll("input:checked")].map((input) => input.value))
     : new Set(["read"]);
-  const sensitive = (scope) => ["secrets.read", "admins.manage"].includes(scope.id);
+  const sensitive = (scope) => ["secrets.read", "admins.manage", "hosts.provision"].includes(scope.id);
   const scopes = [...mcpAccess.scopes.filter((scope) => !sensitive(scope)), ...mcpAccess.scopes.filter(sensitive)];
   target.innerHTML = scopes.map((scope) => `<label class="mcp-scope-option">
     <input type="checkbox" name="scope" value="${escapeHtml(scope.id)}" ${selected.has(scope.id) ? "checked" : ""}>
@@ -1573,6 +1577,7 @@ function setProfileMenu(open) {
 }
 
 function showAdminLogin() {
+  clearProvisioning();
   clearMcpAccess();
   if (bootstrapRefreshTimer) {
     clearInterval(bootstrapRefreshTimer);
@@ -1616,11 +1621,14 @@ async function logoutControlPlane(button) {
 }
 
 function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  provisioning.drawerJobId = null;
   lastFocusedElement = document.activeElement;
   elements.drawerTitle.textContent = title;
   elements.drawerEyebrow.textContent = eyebrow;
   elements.drawerContent.innerHTML = content;
   elements.drawerSave.textContent = saveLabel;
+  elements.drawerSave.disabled = false;
   elements.drawer.classList.add("open");
   elements.drawerScrim.classList.add("open");
   elements.drawer.setAttribute("aria-hidden", "false");
@@ -1630,6 +1638,8 @@ function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
 }
 
 function closeDrawer({ restoreFocus = true, clearContent = false } = {}) {
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  provisioning.drawerJobId = null;
   elements.drawer.classList.remove("open");
   elements.drawerScrim.classList.remove("open");
   elements.drawer.setAttribute("aria-hidden", "true");
@@ -2057,13 +2067,151 @@ function newHostDrawerMarkup() {
     </form>`;
 }
 
-function openNewHost() {
+function openNewHost(manual = false) {
   openDrawer({
     title: "添加主机",
     eyebrow: "多节点接入",
-    content: newHostDrawerMarkup(),
-    saveLabel: "创建并生成命令"
+    content: manual ? `<button type="button" class="text-button" data-auto-provision>返回 SSH 自动接入</button>${newHostDrawerMarkup()}` : provisioningFormMarkup(),
+    saveLabel: manual ? "创建并生成命令" : "一键接入"
   });
+}
+
+function clearProvisioningSecrets(form) {
+  if (!form) return;
+  for (const name of ["password", "privateKey", "passphrase", "sudoPassword"]) {
+    if (form.elements[name]) form.elements[name].value = "";
+  }
+}
+
+function syncProvisioningAuthentication(form) {
+  const mode = form.elements.authMethod.value;
+  const privateKey = mode === "privateKey";
+  form.querySelector("[data-provision-password]").hidden = mode !== "password";
+  form.querySelector("[data-provision-key]").hidden = !privateKey;
+  form.elements.password.required = mode === "password";
+  form.elements.privateKey.required = privateKey;
+  if (mode !== "password") form.elements.password.value = "";
+  if (!privateKey) { form.elements.privateKey.value = ""; form.elements.passphrase.value = ""; }
+  if (mode === "resume") clearProvisioningSecrets(form);
+  form.querySelector(".provision-options").hidden = mode === "resume";
+}
+
+function canProvision() { return ["owner", "operator"].includes(controlPlane.currentAdmin?.role); }
+
+function clearProvisioning() {
+  provisioning.generation += 1;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  provisioning.jobs = [];
+  provisioning.loading = false;
+  provisioning.drawerJobId = null;
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  document.querySelector("#provisioning-jobs")?.replaceChildren();
+}
+
+function provisioningFormMarkup(job = null) {
+  const field = (label, name, type, attributes = "") => `<label class="field"><span>${label}</span><input name="${name}" type="${type}" ${attributes}><small class="field-error"></small></label>`;
+  return `<form class="drawer-form" id="provision-host-form" autocomplete="off" ${job ? `data-job-id="${escapeHtml(job.id)}"` : ""}>
+    <div class="drawer-profile"><span class="avatar">${icon("terminal")}</span><div><strong>${job ? "重试原接入任务" : "SSH 自动接入 VPS"}</strong><small>安装 → 心跳 → 协议启用 → 连通与订阅验证</small></div></div>
+    <p class="field-hint">需要 Linux、systemd 与 root 或 sudo 权限；VPS 必须能访问控制面的公网 HTTPS 地址。默认启用 Shadowsocks 稳定协议，无需节点域名。</p>
+    ${job ? `<div class="notice-card"><div><strong>${escapeHtml(job.input.name)}</strong><p>${escapeHtml(job.input.username)}@${escapeHtml(job.input.host)}:${job.input.port} · 保留原任务和 Host；节点已在线时可只继续配置验证。</p></div></div>` : `
+      ${field("公网 IP", "host", "text", 'placeholder="203.0.113.10 或 IPv6" required spellcheck="false"')}
+      <div class="field-grid">${field("SSH 端口", "port", "number", 'value="22" min="1" max="65535" required')}${field("登录用户", "username", "text", 'value="root" required autocomplete="off"')}</div>`}
+    <label class="field"><span>${job ? "重试方式" : "登录方式"}</span><select name="authMethod" data-provision-auth><option value="password">密码</option><option value="privateKey">SSH 私钥</option>${job ? '<option value="resume">仅继续配置验证（节点已在线）</option>' : ""}</select></label>
+    <div data-provision-password>${field("SSH 密码", "password", "password", 'required autocomplete="new-password"')}</div>
+    <div data-provision-key hidden><label class="field"><span>SSH 私钥</span><textarea name="privateKey" rows="6" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><small class="field-error"></small></label>${field("私钥口令（可选）", "passphrase", "password", 'autocomplete="new-password"')}</div>
+    <details class="provision-options"><summary>sudo 密码${job ? "" : " / 名称 / 区域（可选）"}</summary>
+      ${field("sudo 密码（需要时填写）", "sudoPassword", "password", 'autocomplete="new-password"')}
+      ${job ? "" : `${field("名称", "hostname", "text", 'maxlength="80" placeholder="默认 VPS-IP"')}${field("区域标识", "region", "text", 'pattern="[A-Za-z0-9-]{2,32}" placeholder="默认 global"')}<p class="field-hint">仅向“全部节点”或该区域范围内的有效用户自动下发，不改变任何用户权益。</p>`}
+    </details>
+    <p class="field-hint">登录凭据仅用于本次任务，服务端不保存；任务接受后清空表单。安装未完成或节点离线时，重试需要重新输入凭据。</p>
+    ${job ? "" : '<button type="button" class="text-button" data-manual-provision>使用手动接入命令</button>'}
+  </form>`;
+}
+
+async function submitProvisioningForm(form) {
+  const field = (name) => form.elements[name]?.value || "";
+  const authentication = field("authMethod") === "privateKey" ? { privateKey: field("privateKey"), ...(field("passphrase") ? { passphrase: field("passphrase") } : {}) } : { password: field("password") };
+  const credentials = field("authMethod") === "resume" ? {} : { ...authentication, ...(field("sudoPassword") ? { sudoPassword: field("sudoPassword") } : {}) };
+  if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
+  const body = form.dataset.jobId ? { requestId: form.dataset.requestId, ...credentials } : {
+    requestId: form.dataset.requestId, host: field("host").trim(), port: Number(field("port")), username: field("username").trim(),
+    ...(field("hostname").trim() ? { name: field("hostname").trim() } : {}), ...(field("region").trim() ? { region: field("region").trim() } : {}), ...credentials
+  };
+  const path = form.dataset.jobId ? `/api/hosts/provision/${encodeURIComponent(form.dataset.jobId)}/retry` : "/api/hosts/provision";
+  let response;
+  try {
+    response = await api(path, { method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+  } catch (error) {
+    // Retry has an existing durable identity: resolve an ambiguous response by
+    // reading that job before asking the user to send credentials again.
+    if (form.dataset.jobId && (!error.status || error.status >= 500 || error.status === 409)) {
+      const observed = await api(`/api/hosts/provision/${encodeURIComponent(form.dataset.jobId)}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (["queued", "running", "succeeded"].includes(observed?.job?.status)) response = observed;
+    }
+    if (!response) throw error;
+  }
+  clearProvisioningSecrets(form);
+  return response.job;
+}
+
+const provisioningLabels = { queued: "等待接入", running: "正在接入", succeeded: "接入完成", failed: "接入失败", interrupted: "接入中断" };
+
+function provisioningProgressMarkup(job) {
+  const completed = job.status === "succeeded";
+  return `<div class="drawer-form" data-provisioning-progress="${escapeHtml(job.id)}">
+    <div class="drawer-profile"><span class="avatar">${icon("server")}</span><div><strong>${escapeHtml(job.input.name)}</strong><small>${escapeHtml(job.input.host)}:${job.input.port}</small></div></div>
+    <h3>${escapeHtml(provisioningLabels[job.status] || job.status)}</h3>
+    <progress class="provision-progress" max="100" value="${Number(job.progress) || 0}" aria-label="接入进度"></progress>
+    <p role="status" aria-live="polite">${escapeHtml(job.message)} · ${Number(job.progress) || 0}%</p>
+    ${job.errorCode ? `<p class="provision-error">${escapeHtml(job.errorCode)}</p>` : ""}
+    ${job.hostKeyFingerprint ? `<p class="field-hint">SSH 指纹 <code class="provision-fingerprint">${escapeHtml(job.hostKeyFingerprint)}</code></p>` : ""}
+    ${completed ? `<div class="notice-card"><div><strong>${job.result?.subscriptionStatus === "verified" ? `已验证 ${Number(job.result.verifiedUserCount) || 0} 位用户的订阅` : "等待有效用户"}</strong><p>${job.result?.subscriptionStatus === "verified" ? "有权限的用户刷新客户端订阅后可获得新节点。" : "尚无可用于验证的有效用户；创建或启用符合节点范围的用户后，刷新订阅获取节点。"}</p></div></div>` : ""}
+    ${job.result?.protocolChecks?.length ? `<div class="provision-checks">${job.result.protocolChecks.map((check) => `<p><strong>${escapeHtml(check.type)}</strong><span>${escapeHtml(check.state)}${check.latencyMs == null ? "" : ` · ${Number(check.latencyMs)} ms`}</span></p>`).join("")}</div>` : ""}
+    ${["failed", "interrupted"].includes(job.status) ? `<button type="button" class="button primary" data-retry-provision="${escapeHtml(job.id)}">重试原任务</button>` : ""}
+    ${job.hostId ? `<button type="button" class="button secondary" data-open-host="${escapeHtml(job.hostId)}">查看主机</button>` : ""}
+    <p class="field-hint">${["queued", "running"].includes(job.status) ? "关闭此面板后任务继续运行，可在主机页的接入记录中查看结果。" : "结果已保存，可从主机页的接入记录再次查看。"}服务端连通检查不等于移动网络实测。</p>
+  </div>`;
+}
+
+function openProvisioningJob(job) {
+  openDrawer({ title: "自动接入进度", eyebrow: "VPS 自动接入", content: provisioningProgressMarkup(job), saveLabel: "关闭" });
+  provisioning.drawerJobId = job.id;
+}
+
+function renderProvisioningJobs() {
+  const target = document.querySelector("#provisioning-jobs");
+  target.innerHTML = provisioning.jobs.length ? provisioning.jobs.map((job) => `<button type="button" class="provision-job" data-open-provision="${escapeHtml(job.id)}"><span><strong>${escapeHtml(job.input.name)}</strong><small>${escapeHtml(job.input.host)} · ${escapeHtml(job.message)}</small></span><span class="status-badge ${job.status === "succeeded" ? "good" : ["failed", "interrupted"].includes(job.status) ? "danger" : "warning"}">${escapeHtml(provisioningLabels[job.status] || job.status)} · ${job.progress}%</span></button>`).join("") : '<p class="field-hint">暂无自动接入记录。</p>';
+}
+
+async function loadProvisioningJobs() {
+  if (!canProvision() || provisioning.loading) return;
+  const generation = provisioning.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  provisioning.loading = true;
+  clearTimeout(provisioning.timer);
+  try {
+    const { jobs } = await api("/api/hosts/provision", { signal: AbortSignal.timeout(15_000) });
+    if (generation !== provisioning.generation || adminId !== controlPlane.currentAdmin?.id || !canProvision()) return;
+    const changedToTerminal = jobs.some((job) => !["queued", "running"].includes(job.status) && provisioning.jobs.some((previous) => previous.id === job.id && ["queued", "running"].includes(previous.status)));
+    provisioning.jobs = jobs;
+    renderProvisioningJobs();
+    const current = jobs.find((job) => job.id === provisioning.drawerJobId);
+    if (current && elements.drawer.classList.contains("open")) elements.drawerContent.innerHTML = provisioningProgressMarkup(current);
+    setText("#provisioning-status", jobs.some((job) => ["queued", "running"].includes(job.status)) ? "接入任务进行中，每 2 秒更新。" : "进度已同步；失败或中断任务可重试，已在线节点可直接继续验证。");
+    if (changedToTerminal) await loadBootstrap();
+  } catch (error) {
+    if (generation !== provisioning.generation) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    setText("#provisioning-status", `暂时无法更新接入进度：${error.message}`);
+  } finally {
+    if (generation === provisioning.generation) {
+      provisioning.loading = false;
+      if (canProvision() && provisioning.jobs.some((job) => ["queued", "running"].includes(job.status))) {
+        provisioning.timer = setTimeout(() => void loadProvisioningJobs(), 2_000);
+      }
+    }
+  }
 }
 
 function shellQuote(value) {
@@ -2596,6 +2744,34 @@ async function saveDrawer() {
   }
   if (!validateDrawerForm(form)) return;
 
+  if (form.id === "provision-host-form") {
+    const generation = provisioning.generation;
+    const adminId = controlPlane.currentAdmin?.id;
+    elements.drawerSave.disabled = true;
+    elements.drawerSave.textContent = "提交接入任务…";
+    try {
+      const job = await submitProvisioningForm(form);
+      if (generation !== provisioning.generation || adminId !== controlPlane.currentAdmin?.id || !canProvision()) return;
+      provisioning.jobs = [job, ...provisioning.jobs.filter((entry) => entry.id !== job.id)];
+      renderProvisioningJobs();
+      if (form.isConnected && elements.drawer.classList.contains("open")) openProvisioningJob(job);
+      showToast("接入任务已接受", "后台正在安装并验证，关闭面板不影响任务。");
+      void loadProvisioningJobs();
+    } catch (error) {
+      if (generation !== provisioning.generation) return;
+      if (error.status === 401) { showAdminLogin(); return; }
+      if (form.isConnected) showDrawerFormError(form, error);
+      showToast("提交失败", error.message);
+      void loadProvisioningJobs();
+    } finally {
+      if (form.isConnected) {
+        elements.drawerSave.disabled = false;
+        elements.drawerSave.textContent = form.dataset.jobId ? "重试接入" : "一键接入";
+      }
+    }
+    return;
+  }
+
   if (form.id === "portal-login-form") {
     const email = form.elements.portalEmail.value.trim();
     const password = form.elements.portalPassword.value;
@@ -2961,6 +3137,13 @@ function openAdvancedConfig() {
   });
 }
 
+document.addEventListener("change", (event) => {
+  if (event.target.matches("[data-provision-auth]")) syncProvisioningAuthentication(event.target.form);
+});
+document.addEventListener("submit", (event) => {
+  if (event.target.id === "provision-host-form") { event.preventDefault(); if (!elements.drawerSave.disabled) void saveDrawer(); }
+});
+
 document.addEventListener("click", async (event) => {
   const logoutButton = event.target.closest("[data-logout]");
   if (logoutButton) {
@@ -3002,6 +3185,22 @@ document.addEventListener("click", async (event) => {
 
   if (event.target.closest("[data-new-host]")) {
     openNewHost();
+    return;
+  }
+
+  if (event.target.closest("[data-manual-provision]")) { openNewHost(true); return; }
+  if (event.target.closest("[data-auto-provision]")) { openNewHost(); return; }
+  if (event.target.closest("[data-refresh-provisioning]")) { await loadProvisioningJobs(); return; }
+  const jobButton = event.target.closest("[data-open-provision]");
+  if (jobButton) {
+    const job = provisioning.jobs.find((entry) => entry.id === jobButton.dataset.openProvision);
+    if (job) openProvisioningJob(job);
+    return;
+  }
+  const retryJobButton = event.target.closest("[data-retry-provision]");
+  if (retryJobButton) {
+    const job = provisioning.jobs.find((entry) => entry.id === retryJobButton.dataset.retryProvision);
+    if (job) openDrawer({ title: "重试自动接入", eyebrow: "保留原 Host", content: provisioningFormMarkup(job), saveLabel: "重试接入" });
     return;
   }
 
@@ -3072,6 +3271,7 @@ document.addEventListener("click", async (event) => {
       await refreshReadiness(document.querySelector("[data-refresh-readiness]"));
     }
     if (systemTab.dataset.systemTab === "mcp") await loadMcpAccess();
+    if (systemTab.dataset.systemTab === "hosts") await loadProvisioningJobs();
     return;
   }
 
@@ -3330,6 +3530,7 @@ async function enterControlPlane() {
   syncResponsiveNavigation();
   const initialRoute = location.hash.replace(/^#\//, "") || "dashboard";
   navigate(initialRoute, false);
+  void loadProvisioningJobs();
   if (!bootstrapRefreshTimer) {
     bootstrapRefreshTimer = setInterval(async () => {
       if (document.hidden || bootstrapRefreshInFlight) return;

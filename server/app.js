@@ -16,6 +16,7 @@ import { normalizeCertificateEmail } from "./certificate-settings.js";
 import { RayLinkStore } from "./database.js";
 import { McpCredentials, MCP_SCOPES } from "./mcp-credentials.js";
 import { createMcpService } from "./mcp.js";
+import { NodeProvisioning } from "./node-provisioning.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
@@ -1014,6 +1015,20 @@ export async function createRayLinkApp(options) {
     });
     return { singBoxConfig, endpointOverrides };
   };
+  const nodeProvisioning = new NodeProvisioning({
+    store, sshBootstrap: options.sshBootstrap, publicOrigin: () => currentPublicOrigin().origin,
+    pollMs: options.provisioningPollMs, waitMs: options.provisioningWaitMs,
+    acceptedNodeVersions: [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION],
+    buildClientConfig: buildClientConfigForUser,
+    measure: (input) => protocolActivationManager.measureHost(input),
+    activate: ({ preferredPort, ...input }) => runLocalRuntimeOperation("节点自动接入", async () => {
+      const profile = store.listHostProtocolConfigs(input.hostId).find((entry) => entry.type === input.type);
+      if (!profile.enabled && !store.getHost(input.hostId).protocolActivations.some((entry) => entry.type === input.type)) {
+        store.updateHostProtocolConfig(input.hostId, input.type, { port: preferredPort });
+      }
+      return protocolActivationManager.enable(input);
+    })
+  });
   const reconcileUserEntitlements = async (publisherAdminId, reconcileOptions = {}) => {
     try {
       const result = await runLocalRuntimeOperation(
@@ -1098,6 +1113,25 @@ export async function createRayLinkApp(options) {
           console.warn(`[RayLink] Audit event could not be recorded: ${error.message}`);
         }
       });
+    }
+
+    if (url.pathname === "/api/hosts/provision") {
+      if (request.method === "GET") {
+        sendJson(response, 200, { jobs: nodeProvisioning.list() });
+        return;
+      }
+      if (request.method === "POST") {
+        sendJson(response, 202, { job: nodeProvisioning.start(await readJson(request), admin.id) });
+        return;
+      }
+    }
+    const provisioningMatch = url.pathname.match(/^\/api\/hosts\/provision\/([^/]+)(\/retry)?$/);
+    if (provisioningMatch && request.method === (provisioningMatch[2] ? "POST" : "GET")) {
+      const id = decodeURIComponent(provisioningMatch[1]);
+      sendJson(response, provisioningMatch[2] ? 202 : 200, { job: provisioningMatch[2]
+        ? nodeProvisioning.retry(id, await readJson(request), admin.id)
+        : nodeProvisioning.get(id) });
+      return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/mcp/tokens") {
@@ -2202,6 +2236,7 @@ export async function createRayLinkApp(options) {
     store,
     runtimeManager,
     protocolActivationManager,
+    nodeProvisioning,
     async listen({ host, port }) {
       await new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -2313,6 +2348,7 @@ export async function createRayLinkApp(options) {
       const httpClosed = server.listening
         ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
         : Promise.resolve();
+      await nodeProvisioning.close();
       await mcp.close();
       await httpClosed;
       await Promise.allSettled([...backupOperations]);

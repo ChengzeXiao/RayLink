@@ -33,6 +33,7 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 | 用户与权益 | `users_list`, `users_get`, `users_create`, `users_update`, `users_reset_password` |
 | 客户端订阅 | `users_subscription_get`, `users_subscription_rotate`，返回所有现有客户端格式的专属 URL |
 | Host 接入与升级 | `hosts_list`, `hosts_get`, `hosts_create`, `hosts_update`, `hosts_enrollment_rotate`, `hosts_runtime_upgrade` |
+| SSH 自动接入 | `hosts_provision_start`, `hosts_provision_list`, `hosts_provision_get`, `hosts_provision_retry` |
 | 入口协议 | `hosts_protocol_get`, `hosts_protocol_update`, `hosts_protocol_activate`, `hosts_protocol_measure` |
 | 智能分流 | `routing_get`, `routing_update`, `routing_diagnose` |
 | 证书设置 | `certificate_get`, `certificate_update` |
@@ -41,9 +42,9 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 | 备份 | `backups_list`, `backups_create`, `backups_verify` |
 | 管理员与审计 | `admins_list`, `admins_create`, `admins_update`, `audit_list` |
 
-共 42 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。没有任意 HTTP 转发、Shell 执行、数据库 SQL 或文件读写工具。
+共 46 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。SSH 接入只执行固定的安装流程，没有任意 HTTP 转发、Shell 命令、数据库 SQL 或文件读写工具。
 
-`hosts_create` 返回 Host、一次性 enrollment token 和 VPS 安装命令；它不会 SSH 登录 VPS。自动 SSH 安装仍属于后续功能。安装成功、心跳上线、协议探测通过、流量计量正常是不同状态，Agent 不应把“已创建记录”当成“节点可用”。
+`hosts_create` 返回手动接入的 Host、一次性 enrollment token 和 VPS 安装命令。使用 `hosts_provision_start` 可[通过 SSH 自动安装、配置协议并验证订阅](ssh-node-provisioning.md)，传入 IP、SSH 用户与密码或私钥即可。启动调用返回持久任务，随后使用 `hosts_provision_get` 检查结果；安装成功、心跳上线、协议探测通过、流量计量正常分别验证。没有有效用户时结果明确标为 `awaiting-users`。
 
 ## 权限和输出
 
@@ -52,6 +53,7 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 - `read`：无密钥的业务查询。
 - `users.manage`：创建/修改用户、服务权益和门户密码。
 - `runtime.manage`：Host、协议、分流、发布、Runtime 运维。
+- `hosts.provision`：SSH 自动接入和重试；同时需要 `runtime.manage`。此权限需单独勾选，不进入现有预设。
 - `system.manage`：证书设置、备份创建与校验。
 - `admins.manage`：管理员管理；具有此权限的 Owner Agent 可创建新的高权限管理员，应仅为此类任务授予。
 - `audit.read`：审计查询。
@@ -106,4 +108,4 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 
 验证命令：`node --test tests/mcp.test.js tests/mcp-tools.test.js tests/mcp-credentials.test.js`，完整回归 `npm run check`。发布包测试验证离线依赖加载和依赖异常时不切换服务。2026-10-01 本地验收：`npm run check` **353/353 通过**（含完整既有 API 回归）。官方 MCP SDK 客户端、2025 HTTP 握手、令牌撤销/降权、跨重启密文重放、真实 SIGKILL 和 HTTP 断线恢复、SSE 关停、错误脱敏均通过。MCP 工作流实际覆盖用户及订阅、Host 登记、路由与证书、协议配置、dry-run 发布/回滚、备份校验、管理员及体检查询。桌面界面完成创建/一次性显示/清除/撤销，390px 视口无横向溢出。
 
-审查以 `c0e2373` 为基线；独立 Standards 与 Spec 复核完成。发现的 SSE 关停阻塞和 Runtime 原始错误泄露均已修复并加入回归。真实远端安装、生产服务切换和移动网络质量未在本轮执行；42 工具的 schema/映射覆盖不等于每个外部运维动作都完成了生产实测。
+初始 MCP 审查以 `c0e2373` 为基线，独立 Standards 与 Spec 复核完成；本次 SSH 扩展以 `e5ef11d` 为基线。SSH 扩展新增了真实 SDK 的启动/查询/重放和单独 scope 验证，以及 Node 注册、发布、计量和订阅的模拟闭环。真实公网 VPS 安装、生产服务切换和移动网络质量仍需环境实测；工具的 schema/映射覆盖不等于每个外部运维动作都完成了生产验收。

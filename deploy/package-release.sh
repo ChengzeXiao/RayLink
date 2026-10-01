@@ -87,7 +87,7 @@ else
   source_tree=HEAD
 fi
 git -C "$git_root" archive --format=tar "$source_tree" \
-  package.json package-lock.json README.md CHANGELOG.md server web deploy docs/production-readiness-plan.md docs/mcp-server.md \
+  package.json package-lock.json README.md CHANGELOG.md server web deploy docs/production-readiness-plan.md docs/mcp-server.md docs/ssh-node-provisioning.md \
   | tar -xf - -C "$package_root"
 
 node "$package_root/deploy/prepare-runtime-dependencies.mjs" "$package_root" --install

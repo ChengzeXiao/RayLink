@@ -27,6 +27,12 @@ function safeBusinessError(response) {
     NODE_NOT_ENROLLED: "请先安装 RayLink Node 并完成节点接入",
     HOST_CAPABILITIES_UNKNOWN: "等待节点上报 Runtime 能力后再配置协议",
     PROTOCOL_UNAVAILABLE: "当前 Runtime 版本、平台或构建能力不支持该协议",
+    PROVISIONING_PUBLIC_ORIGIN: "先配置 VPS 可访问且证书可信的控制面 HTTPS 根地址",
+    INVALID_SSH_CREDENTIALS: "提供密码或私钥中的一种认证方式，必要时附带 sudo 密码",
+    PROVISIONING_BUSY: "已有节点正在接入，请完成后再试",
+    PROVISIONING_RETRY_REQUIRED: "该服务器已有失败或中断任务；先查询接入列表，再对原 job 调用 retry",
+    PROVISIONING_REQUEST_CONFLICT: "请求编号已用于其他接入参数，请先查询已有任务",
+    PROVISIONING_RETRY_NOT_ALLOWED: "仅失败或中断的任务可以显式重试；先查询原 job 状态",
     LAST_OWNER_REQUIRED: "系统必须至少保留一个 Owner"
   };
   return { error: { code, statusCode: response.statusCode,

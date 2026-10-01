@@ -29,7 +29,8 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 | 安全发布 | `sing-box check`、原子替换、版本快照、失败恢复和历史回滚 |
 | 真实流量计量 | 使用 sing-box 用户级统计，不以 Host 网卡总流量估算用户配额 |
 | Host 可观测性 | 汇总 CPU、内存、上下行速率、服务状态、心跳和 Runtime 版本 |
-| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 42 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
+| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 46 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
+| 自动接入 VPS | [SSH 一键接入](docs/ssh-node-provisioning.md)：填写 IP 和登录凭据，自动安装、注册、配置协议、发布并验证订阅 |
 | 在线升级 | 发现已验证的 sing-box 新版本后提示升级，失败自动恢复旧二进制和服务状态 |
 
 ## 界面预览
@@ -42,7 +43,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 
 ### 协议绑定 Host
 
-每台 Host 独立维护入口协议和 Runtime 状态。新 VPS 通过一次性接入令牌安装 RayLink Node，在线后即可参与客户端配置编译和 Deployment。
+每台 Host 独立维护入口协议和 Runtime 状态。新 VPS 可通过 SSH 一键接入，自动安装 RayLink Node、启用无需域名的稳定协议并发布；进度和验证结果保存在主机页。也可通过一次性接入令牌手动安装。
 
 ![RayLink Host 与系统管理](docs/assets/readme/system.png)
 

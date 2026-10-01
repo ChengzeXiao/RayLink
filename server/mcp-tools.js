@@ -31,6 +31,8 @@ function safeOutput(value) {
   return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
     const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
     if (key === "passwordReset" && typeof child === "boolean") return [[key, child]];
+    if (key === "subscriptionVerified" && typeof child === "boolean") return [[key, child]];
+    if (key === "subscriptionStatus" && ["verified", "awaiting-users"].includes(child)) return [[key, child]];
     if (/password|secret|token|privatekey|runtimeuuid|subscription|authorization|cookie|credential|configtext|configjson|sealedtlsbundle/.test(normalized)
       || ["options", "config", "raw", "error", "lasterror", "rollbackerror"].includes(normalized)) return [];
     return [[key, safeOutput(child)]];
@@ -38,19 +40,19 @@ function safeOutput(value) {
 }
 
 // Every route is fixed here; MCP callers cannot choose a URL, command or HTTP verb.
-function defineTool({ name, description, permission = "read", secret = false, mutating = false,
+function defineTool({ name, description, permission = "read", secret = false, mutating = false, additionalScopes = [], preserveRequestId = false,
   fields = {}, method = "GET", path, params = [], body = false, select = (value) => value }) {
   const inputSchema = z.strictObject({ ...fields, ...(mutating ? { requestId } : {}) });
   return {
     name, description, permission, secret, mutating,
-    requiresScopes: [permission, ...(secret ? ["secrets.read"] : [])],
+    requiresScopes: [permission, ...additionalScopes, ...(secret ? ["secrets.read"] : [])],
     inputSchema,
     request(input) {
       const args = inputSchema.parse(input);
       return {
         method,
         path: typeof path === "function" ? path(args) : path,
-        ...(body ? { body: Object.fromEntries(Object.entries(args).filter(([key]) => key !== "requestId" && !params.includes(key))) } : {})
+        ...(body ? { body: Object.fromEntries(Object.entries(args).filter(([key]) => (preserveRequestId || key !== "requestId") && !params.includes(key))) } : {})
       };
     },
     select: (payload, args = {}) => {
@@ -88,6 +90,11 @@ const adminView = (value) => pick(value, ["id", "username", "role", "createdAt"]
 const adminFields = { username: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}$/), role: z.enum(["owner", "operator", "support", "auditor"]), password: z.string().min(12) };
 const protocolType = z.enum(protocolCatalog.map((entry) => entry.type));
 const port = z.number().int().min(1).max(65535);
+const sshCredentialFields = {
+  password: z.string().min(1).max(4096).optional(), privateKey: z.string().min(1).max(65536).optional(),
+  passphrase: z.string().max(4096).optional(), sudoPassword: z.string().max(4096).optional()
+};
+const provisioningPath = ({ jobId }) => `/api/hosts/provision/${encodeURIComponent(jobId)}`;
 const protocolFields = {
   enabled: z.boolean().optional(), listen: z.string().trim().min(1).optional(), port: port.nullable().optional(),
   tls: z.strictObject({
@@ -115,6 +122,16 @@ const routingFields = {
 };
 
 export const mcpTools = [
+  defineTool({ name: "hosts_provision_start", description: "Automatically install a Linux/systemd Node over SSH, enroll it, activate Shadowsocks, publish configuration and verify eligible subscriptions. Requires a reachable HTTPS control plane and root/sudo on the supplied IP. Returns a durable job; poll hosts_provision_get until succeeded. SSH credentials are not stored. Reuse requestId for transport retries.",
+    permission: "runtime.manage", additionalScopes: ["hosts.provision"], mutating: true, preserveRequestId: true,
+    fields: { host: z.union([z.ipv4(), z.ipv6()]), port: port.optional(), username: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/).optional(),
+      name: hostFields.name.optional(), region: hostFields.region.optional(), ...sshCredentialFields },
+    method: "POST", path: "/api/hosts/provision", body: true }),
+  defineTool({ name: "hosts_provision_list", description: "List durable SSH onboarding jobs and safe progress, including interrupted attempts.", path: "/api/hosts/provision" }),
+  defineTool({ name: "hosts_provision_get", description: "Read onboarding status and evidence. succeeded verifies node, protocol and metering; subscriptionStatus awaiting-users means no entitled user exists yet.", fields: { jobId: id }, path: provisioningPath }),
+  defineTool({ name: "hosts_provision_retry", description: "Resume a failed or interrupted onboarding job without creating another Host. Supply SSH credentials again if installation/enrollment is incomplete. Use a NEW requestId for this intentional retry; transport retries reuse that requestId.",
+    permission: "runtime.manage", additionalScopes: ["hosts.provision"], mutating: true, preserveRequestId: true, fields: { jobId: id, ...sshCredentialFields }, params: ["jobId"],
+    method: "POST", path: (args) => `${provisioningPath(args)}/retry`, body: true }),
   defineTool({ name: "system_overview", description: "Read a curated control-plane overview; excludes user records, administrator lists, audit records and credentials.", path: "/api/bootstrap",
     select: (payload) => ({ currentAdmin: pick(payload.currentAdmin, ["id", "username", "role"]), userCount: payload.users?.length || 0,
       hostCount: payload.hosts?.length || 0, runtime: runtimeView(payload.runtime), runtimePreview: previewView(payload.runtimePreview),

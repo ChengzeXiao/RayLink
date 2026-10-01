@@ -2,7 +2,8 @@
 
 ## 0.2.33 (unreleased)
 
-- Add HTTP MCP management with 42 scoped tools and an Owner credential console; preserve current role checks and the existing management workflows.
+- Add SSH onboarding with durable jobs, pinned host keys, password/key authentication, resumable installation, automatic protocol publication, metering and subscription verification.
+- Add HTTP MCP management with 46 scoped tools and an Owner credential console; SSH onboarding requires a separately granted hosts.provision scope.
 - Encrypt durable MCP write outcomes, deduplicate retries across restarts, and report uncertain crash outcomes without blindly reapplying changes.
 - Bundle locked production npm dependencies, validate them before service switching, and include them in release SBOMs.
 

@@ -21,6 +21,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",
     "@modelcontextprotocol/server": "2.2.0",
+    "ssh2": "1.17.0",
     "zod": "4.2.0"
   },
   "devDependencies": {

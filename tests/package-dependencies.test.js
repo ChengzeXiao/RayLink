@@ -28,7 +28,7 @@ test("release archive carries locked production dependencies and boots its modul
   }));
   await execFile("npm", ["install", "--package-lock-only", "--ignore-scripts", "--offline"], { cwd: root });
   await writeFile(join(root, "server/app.js"), 'import { value } from "release-fixture-dependency"; if (value !== "locked-runtime-dependency") throw new Error("bad dependency"); export { value };\n');
-  for (const file of ["README.md", "CHANGELOG.md", "docs/production-readiness-plan.md", "docs/mcp-server.md"]) await writeFile(join(root, file), "fixture\n");
+  for (const file of ["README.md", "CHANGELOG.md", "docs/production-readiness-plan.md", "docs/mcp-server.md", "docs/ssh-node-provisioning.md"]) await writeFile(join(root, file), "fixture\n");
   for (const filename of ["raylink-sing-box-1.14.2-linux-amd64", "raylink-libcronet-1.14.2-linux-amd64.so"]) {
     const contents = Buffer.from("approved-runtime-fixture");
     await writeFile(join(root, "web/node/runtime", filename), contents);

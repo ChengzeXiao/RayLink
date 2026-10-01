@@ -675,7 +675,8 @@ export class ProtocolActivationManager {
   async prepare(host, type, policy, catalog, profiles) {
     const current = profiles.find((profile) => profile.type === type);
     if (!current) throw activationError("PROTOCOL_NOT_FOUND", "sing-box 入站协议不存在", 404);
-    const listen = policy.exposure === "private" ? "127.0.0.1" : "::";
+    const listen = policy.exposure === "private" ? "127.0.0.1"
+      : net.isIP(host.address) === 4 ? "0.0.0.0" : "::";
     const usedPorts = profiles
       .filter((profile) => profile.type !== type && profile.enabled && profile.port)
       .map((profile) => profile.port);

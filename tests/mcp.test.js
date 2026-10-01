@@ -194,8 +194,8 @@ test("Agent manages routing, certificates, protocol publication and rollback, ba
   const f = await fixture(t, {
     installer: { async status() { return { installed: true, version: "1.14.2", platform: "linux", architecture: "amd64", tags: ["with_quic", "with_utls", "with_acme"] }; } }
   });
-  const { client } = await connect(t, f, ["read", "users.manage", "runtime.manage", "system.manage", "admins.manage", "audit.read", "secrets.read"]);
-  assert.equal((await client.listTools()).tools.length, 42);
+  const { client } = await connect(t, f, ["read", "users.manage", "runtime.manage", "hosts.provision", "system.manage", "admins.manage", "audit.read", "secrets.read"]);
+  assert.equal((await client.listTools()).tools.length, 46);
   let sequence = 0;
   const call = async (name, args = {}, write = false) => {
     const response = await client.callTool({ name, arguments: { ...args, ...(write ? { requestId: `workflow-${++sequence}` } : {}) } });

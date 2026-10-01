@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -288,7 +289,7 @@ function normalizedHostInput(input, current = {}) {
   if (!host.name || host.name.length > 80) {
     throw domainError("INVALID_HOST_NAME", "主机名称不能为空且不能超过 80 个字符");
   }
-  if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])$/i.test(host.address)) {
+  if (!isIP(host.address) && !/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])$/i.test(host.address)) {
     throw domainError("INVALID_HOST_ADDRESS", "请输入有效的主机域名或 IP 地址");
   }
   if (!/^[a-z0-9-]{2,32}$/i.test(host.region)) {

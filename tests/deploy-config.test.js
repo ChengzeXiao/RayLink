@@ -71,15 +71,15 @@ test("systemd sandboxes permit only RayLink-managed UFW rule files", async () =>
   assert.doesNotMatch(service, /ReadWritePaths=.*\/etc\/raylink(?:\s|$)/);
   assert.match(
     nodeInstaller,
-    /ReadWritePaths=\/etc\/raylink-node \/var\/lib\/raylink-node \/opt\/raylink-node \/usr\/local\/bin -\/run\/ufw\.lock -\/run\/xtables\.lock -\/etc\/ufw\/user\.rules -\/etc\/ufw\/user6\.rules/
+    /ReadWritePaths=\$RAYLINK_NODE_CONFIG_ROOT \$RAYLINK_NODE_DATA_ROOT \$RAYLINK_NODE_ROOT \$RAYLINK_RUNTIME_BIN_DIR -\/run\/ufw\.lock -\/run\/xtables\.lock -\/etc\/ufw\/user\.rules -\/etc\/ufw\/user6\.rules/
   );
   assert.match(
     nodeInstaller,
-    /curl -fsSL "\$RAYLINK_SERVER\/node\/raylink-ufw\.tmpfiles\.conf"/
+    /download "\$RAYLINK_SERVER\/node\/raylink-ufw\.tmpfiles\.conf"/
   );
   assert.match(
     nodeInstaller,
-    /systemd-tmpfiles --create \/etc\/tmpfiles\.d\/raylink-node-ufw\.conf/
+    /systemd-tmpfiles --create "\$RAYLINK_TMPFILES_ROOT\/raylink-node-ufw\.conf"/
   );
   assert.match(firewallTmpfiles, /^f \/run\/ufw\.lock 0644 root root -$/m);
   assert.match(firewallTmpfiles, /^f \/run\/xtables\.lock 0600 root root -$/m);
