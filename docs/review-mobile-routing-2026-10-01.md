@@ -19,7 +19,7 @@
 | P1 | Egern 自定义 `proxy` 规则引用不存在的 `RayLink 代理` 策略组 | 生成对应代理选择组；校验规则引用存在 |
 | P1 | Shadowsocks 服务端配置 `network: tcp`，客户端却声明 UDP relay 可用 | sing-box 限定 TCP；Mihomo/Egern/Loon 导出相同能力，不再将 UDP 发给不存在的服务端监听 |
 | P2 | Mihomo 同一域名多条路由按优先级首条生效，DNS 字典却被后续低优先级规则覆盖 | 重复 DNS key 使用首条；本地域名 DNS 保留最高优先级 |
-| P2 | Mihomo 顶部私网 CIDR 规则可能先触发 DNS，再到达域名规则，弱网增加依赖与等待 | 私网 bypass 加 `no-resolve`；仍保留后续国内 GEOIP 解析判断 |
+| P2 | Mihomo 顶部私网 CIDR 规则可能先触发 DNS，再到达域名规则，弱网增加依赖与等待 | 私网快速 bypass 加 `no-resolve`；域名规则之后再解析检查私网 IP，保留 split-DNS 直连与国内 GEOIP 判断 |
 | P2 | Google/YouTube 被硬编码到智能组，绕过用户选择的代理/回退策略 | 使用统一默认代理组，显式自定义规则仍优先 |
 | P2 | sing-box 自动测速切换主动打断既有连接 | 自动 urltest 切换保留已建立连接；手动 selector 切换仍可中断连接 |
 
@@ -27,7 +27,7 @@
 
 ## 本次落地的移动网络策略
 
-Mihomo 和 Egern 的默认故障回退直接包含节点，顺序为 TCP 节点、UDP 节点，再补齐其他节点，去重后由客户端探测。
+Mihomo 和 Egern 的默认故障回退直接包含节点，顺序为 TCP 节点、UDP 节点，再补齐其他节点，去重后由客户端探测。VLESS/VMess 的 QUIC transport 按 UDP 分类，不再误入 TCP 组。
 服务器测得 UDP 可用不再提高它在默认回退中的优先级。UDP 仍可手动选择，且 TCP 全部不可达时可用于回退。
 Egern 蜂窝网络、Wi-Fi 和未知网络均默认进入此回退组，避免蜂窝网络被固定在无备用的 TCP 组。
 回退组定期探测间隔调整为 60 秒；这不是 60 秒内恢复的服务承诺，实际检测、连接重试和客户端缓存仍影响恢复时间。
@@ -82,7 +82,13 @@ DNS 与路由共同使用有版本的策略模型，并在生成后检查所有�
 
 - 基线：`npm test`，239/239 通过。
 - 失败复现：`node --test tests/user-save-ui.test.js`，原实现两项失败；订阅缺陷和 TCP-only 能力测试同样先红后绿。
-- 最终全量测试、协议检查、Mihomo 内核检查结果见本次交付说明。
+- 最终：`npm run check`，248 项测试及语法检查通过。
+- `npm run check:protocols`：sing-box 1.13.14 的服务端、客户端、Reality、ACME 和探测配置检查通过。
+- Mihomo 1.19.25 `-t` 与 sing-box 1.13.14 `check`：智能、全局代理、直连三种模式的生成配置通过。
+- `node tests/mihomo-routing-check.mjs`（需安装 Mihomo/curl）：Mihomo 原生行为对照：本地 DNS 将普通域名解析到本地 HTTP 服务；缺少后置私网判断时请求走代理失败，修复后日志显示命中 `IPCIDR(127.0.0.0/8) using DIRECT` 并获得预期正文。此测试证明的是分流逻辑，不是蜂窝性能。
+- 浏览器重新载入修复版本，创建测试用户成功，进入用户详情并显示“保存更改”。截图见 `output/review-2026-10-01/user-created.png`。
+
+独立 review 分为 Standards 和 Spec 两个轴：Standards 发现 1 个私网分流回归，已通过后置解析检查修复；无文档规范违反或必须处理的代码异味。Spec 发现 1 个 QUIC 错分 TCP 问题，已修复并补跨主机排序测试。两轴均保留生产环境尚未验证的边界。
 - 无生产发布、无手机实测；Egern/Loon 尚未经过设备导入验收。
 
 ## 协议依据

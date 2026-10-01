@@ -204,10 +204,14 @@ function mihomoLocalBypassRules() {
   return [
     "DOMAIN,localhost,DIRECT",
     ...LOCAL_DOMAIN_SUFFIXES.map((suffix) => `DOMAIN-SUFFIX,${suffix},DIRECT`),
-    ...PRIVATE_NETWORK_CIDRS.map((cidr) => (
-      `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT,no-resolve`
-    ))
+    ...mihomoPrivateIpRules()
   ];
+}
+
+function mihomoPrivateIpRules({ resolveDomains = false } = {}) {
+  return PRIVATE_NETWORK_CIDRS.map((cidr) => (
+    `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT${resolveDomains ? "" : ",no-resolve"}`
+  ));
 }
 
 function egernCustomRule(rule) {
@@ -582,14 +586,15 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       ...mihomoLocalBypassRules(),
       ...routePolicy.rules.filter((rule) => rule.enabled).map(mihomoRule),
       ...(routePolicy.mode === "direct"
-        ? ["MATCH,DIRECT"]
+        ? [...mihomoPrivateIpRules({ resolveDomains: true }), "MATCH,DIRECT"]
         : routePolicy.mode === "global-proxy"
-          ? [`MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`]
+          ? [...mihomoPrivateIpRules({ resolveDomains: true }), `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`]
           : [
               ...AI_DOMAIN_SUFFIXES.map(
                 (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.ai.name}`
               ),
               "GEOSITE,CN,DIRECT",
+              ...mihomoPrivateIpRules({ resolveDomains: true }),
               "GEOIP,CN,DIRECT",
               `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`
             ])

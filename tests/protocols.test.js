@@ -10,6 +10,7 @@ import {
   protocolAvailability,
   protocolCatalog
 } from "../server/singbox/protocol-catalog.js";
+import { createRoutePolicyCandidates } from "../server/routing/policy.js";
 
 const eligibleUsers = [
   {
@@ -18,6 +19,29 @@ const eligibleUsers = [
     runtimePassword: "dXNlci1wYXNzd29yZA=="
   }
 ];
+
+test("QUIC transports remain UDP candidates even when their protocol is VLESS", () => {
+  const vless = defaultProtocolConfigs().find((profile) => profile.type === "vless");
+  const config = buildMultiHostProtocolClientConfig({
+    credential: { ...eligibleUsers[0], serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+    hosts: [
+      { id: "quic", address: "quic.example.com", protocols: [{
+        ...vless, enabled: true, transport: { type: "quic" },
+        tls: { mode: "certificate", serverName: "quic.example.com" }
+      }] },
+      { id: "tcp", address: "tcp.example.com", protocols: [{ ...vless, enabled: true }] }
+    ]
+  });
+  const members = (tag) => config.outbounds.find((outbound) => outbound.tag === tag).outbounds;
+  assert.deepEqual(members("raylink-tcp"), ["raylink-tcp-vless"]);
+  assert.deepEqual(members("raylink-udp"), ["raylink-quic-vless"]);
+  assert.deepEqual(members("raylink-smart"), ["raylink-tcp-vless"]);
+  const policy = createRoutePolicyCandidates({
+    names: ["raylink-quic-vless", "raylink-tcp-vless"],
+    tcp: members("raylink-tcp"), udp: members("raylink-udp"), smart: members("raylink-smart")
+  });
+  assert.deepEqual(policy.fallback, ["raylink-tcp-vless", "raylink-quic-vless"]);
+});
 
 test("client capabilities match the TCP-only managed Shadowsocks listener", () => {
   const config = buildProtocolClientConfig({

@@ -42,6 +42,23 @@ test("Mihomo local IP bypass does not resolve domains before domain routing", ()
   assert.doesNotMatch(body, /DOMAIN-SUFFIX,(google|youtube)\.com,RayLink 智能/);
 });
 
+test("Mihomo resolves split-DNS private hosts after domain decisions in every mode", () => {
+  for (const mode of ["smart", "global-proxy", "direct"]) {
+    const body = buildSubscriptionArtifact({
+      format: "mihomo", singBoxConfig,
+      routePolicy: { mode, rules: [{ match: "domain", value: "corp.example", action: "proxy" }] }
+    }).body;
+    const rules = body.split("\nrules:\n")[1].trim().split("\n").map((line) => JSON.parse(line.trim().slice(2)));
+    const privateRule = rules.indexOf("IP-CIDR,10.0.0.0/8,DIRECT");
+    assert.ok(privateRule > rules.indexOf("DOMAIN,corp.example,RayLink 代理"));
+    assert.ok(privateRule < rules.findIndex((rule) => rule.startsWith("MATCH,")));
+    if (mode === "smart") {
+      assert.ok(privateRule > rules.indexOf("GEOSITE,CN,DIRECT"));
+      assert.ok(privateRule < rules.indexOf("GEOIP,CN,DIRECT"));
+    }
+  }
+});
+
 const singBoxConfig = {
   outbounds: [
     {

@@ -373,8 +373,11 @@ export function buildProtocolClientConfig({
 }
 
 const udpClientProtocolTypes = new Set(["hysteria", "hysteria2", "tuic"]);
-const adaptiveUdpProtocolTypes = new Set(udpClientProtocolTypes);
 const UDP_STABLE_JITTER_LIMIT_MS = 80;
+
+function usesUdpTransport(protocol) {
+  return udpClientProtocolTypes.has(protocol.type) || protocol.transport?.type === "quic";
+}
 
 function protocolIsStableForSmartSelection(activation) {
   const check = activation?.publicCheck;
@@ -412,7 +415,7 @@ export function buildMultiHostProtocolClientConfig({
     return managed.map((profile) => {
       const tag = `raylink-${hostTag}-${profile.type}`;
       if (
-        adaptiveUdpProtocolTypes.has(profile.type)
+        usesUdpTransport(profile)
         && !protocolIsStableForSmartSelection(activations.get(profile.type))
       ) {
         smartExcludedTags.add(tag);
@@ -453,10 +456,10 @@ function clientConfigForOutbounds(
   if (!protocolOutbounds.length) throw protocolError("NO_CLIENT_PROTOCOL", "当前没有可下发的用户协议", 409);
   const tags = protocolOutbounds.map((outbound) => outbound.tag);
   const tcpTags = protocolOutbounds
-    .filter((outbound) => !udpClientProtocolTypes.has(outbound.type))
+    .filter((outbound) => !usesUdpTransport(outbound))
     .map((outbound) => outbound.tag);
   const udpTags = protocolOutbounds
-    .filter((outbound) => adaptiveUdpProtocolTypes.has(outbound.type))
+    .filter(usesUdpTransport)
     .map((outbound) => outbound.tag);
   const healthyUdpTags = udpTags.filter((tag) => !smartExcludedTags.has(tag));
   const smartTags = [...tcpTags, ...healthyUdpTags];
