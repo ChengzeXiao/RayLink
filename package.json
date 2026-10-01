@@ -17,5 +17,13 @@
     "check:traffic": "node tests/runtime-traffic-check.mjs",
     "check:dns": "node tests/dns-resilience-check.mjs",
     "check:routing": "node tests/smart-routing-check.mjs && node tests/smart-routing-check.mjs --ip-priority && node tests/route-failover-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "zod": "4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.2.0"
   }
 }

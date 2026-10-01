@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { rename, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 function fail(message) {
@@ -28,7 +28,8 @@ const [
   version = "",
   runtimeVersion = "",
   architecture = "",
-  cronetArgument
+  cronetArgument,
+  lockArgument
 ] = process.argv.slice(2);
 
 if (!archiveArgument || !runtimeArgument || !cronetArgument) {
@@ -166,6 +167,47 @@ const sbom = {
     }
   ]
 };
+
+// Inventory the installed release candidate, not the developer's node_modules.
+// Optional dependencies absent on the release platform are not shipped.
+if (lockArgument) {
+  const lockPath = resolve(lockArgument);
+  const lockText = await readFile(lockPath, "utf8");
+  const lock = JSON.parse(lockText);
+  let packageCount = 0;
+  for (const [packagePath, entry] of Object.entries(lock.packages || {})) {
+    if (!packagePath || entry.dev) continue;
+    if (!packagePath.startsWith("node_modules/") || packagePath.split("/").includes("..") || entry.link) {
+      fail(`不支持的生产依赖路径：${packagePath}`);
+    }
+    const installed = await readFile(join(dirname(lockPath), packagePath, "package.json"), "utf8")
+      .then(JSON.parse).catch((error) => {
+        if (entry.optional && error.code === "ENOENT") return null;
+        throw error;
+      });
+    if (!installed) continue;
+    if (!installed.name || installed.version !== entry.version) fail(`生产依赖版本与锁文件不一致：${packagePath}`);
+    const packageId = `SPDXRef-npm-${createHash("sha256").update(packagePath).digest("hex").slice(0, 24)}`;
+    const integrity = /^(sha256|sha512)-([A-Za-z0-9+/=]+)$/.exec(entry.integrity || "");
+    sbom.packages.push({
+      name: installed.name,
+      SPDXID: packageId,
+      versionInfo: installed.version,
+      supplier: "NOASSERTION",
+      downloadLocation: /^https?:\/\//.test(entry.resolved || "") ? entry.resolved : "NOASSERTION",
+      filesAnalyzed: false,
+      licenseConcluded: "NOASSERTION",
+      licenseDeclared: typeof installed.license === "string" ? installed.license : "NOASSERTION",
+      copyrightText: "NOASSERTION",
+      externalRefs: [{ referenceCategory: "PACKAGE-MANAGER", referenceType: "purl",
+        referenceLocator: `pkg:npm/${installed.name.replace(/^@/, "%40")}@${installed.version}` }],
+      ...(integrity ? { checksums: [{ algorithm: integrity[1].toUpperCase(), checksumValue: Buffer.from(integrity[2], "base64").toString("hex") }] } : {})
+    });
+    sbom.relationships.push({ spdxElementId: rayLinkId, relationshipType: "CONTAINS", relatedSpdxElement: packageId });
+    packageCount += 1;
+  }
+  manifest.productionDependencies = { lockfile: "package-lock.json", sha256: createHash("sha256").update(lockText).digest("hex"), packageCount };
+}
 
 await Promise.all([
   atomicJson(manifestPath, manifest),

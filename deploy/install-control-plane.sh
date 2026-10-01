@@ -145,11 +145,20 @@ if [ -z "$source_root" ]; then
 fi
 
 [ -f "$source_root/package.json" ] || fail "安装源缺少 package.json"
+[ -f "$source_root/package-lock.json" ] || fail "安装源缺少 package-lock.json"
 [ -f "$source_root/server/index.js" ] || fail "安装源缺少控制面程序"
 [ -f "$source_root/web/node/build-metered-runtime.sh" ] || fail "安装源缺少 sing-box 构建器"
 
+application_candidate="$temporary_root/application"
+install -d -m 0755 "$application_candidate"
+cp -a "$source_root/package.json" "$source_root/package-lock.json" \
+  "$source_root/server" "$source_root/web" "$source_root/deploy" "$application_candidate/"
+if [ -d "$source_root/node_modules" ]; then
+  cp -a "$source_root/node_modules" "$application_candidate/"
+fi
+"$node_root/bin/node" "$application_candidate/deploy/prepare-runtime-dependencies.mjs" "$application_candidate"
 install -d -m 0755 "$install_root"
-cp -a "$source_root/package.json" "$source_root/server" "$source_root/web" "$source_root/deploy" "$install_root/"
+cp -a "$application_candidate/." "$install_root/"
 install -d -m 0710 -o root -g caddy "$data_root"
 install -d -m 0750 -o root -g caddy "$managed_root"
 install -d -m 0700 "$config_root"

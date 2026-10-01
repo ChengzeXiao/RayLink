@@ -7,6 +7,12 @@
 - 环境：`/etc/raylink/raylink.env`
 - 受管配置：`/var/lib/raylink/sing-box/config.json`
 
+正式发布包包含 `package-lock.json` 和生产 `node_modules`，构建时在隔离目录执行
+`npm ci --omit=dev --ignore-scripts`。安装与升级会在候选目录校验锁文件、已安装版本和控制面模块导入；
+依赖检查失败不会切换应用或停止旧控制面。完整发布包的依赖检查无需访问 npm registry；
+直接从源码安装时需要 npm registry 可达（或本机已有完整 npm 缓存）。
+远程 RayLink Node 使用独立脚本，不安装控制面的 MCP SDK 依赖。
+
 ## 推荐：一键安装与首次初始化
 
 v0.2.33 源码发布目标（待发布）支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。以下 0.2.33 下载命令须在对应 Release 发布后使用。

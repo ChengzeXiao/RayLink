@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -12,6 +14,8 @@ import { buildReadinessReport } from "./readiness.js";
 import { AlertWebhookDispatcher } from "./alert-dispatcher.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
 import { RayLinkStore } from "./database.js";
+import { McpCredentials, MCP_SCOPES } from "./mcp-credentials.js";
+import { createMcpService } from "./mcp.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
@@ -76,6 +80,7 @@ const contentTypes = {
 };
 
 function adminPermissionForRequest(method, pathname) {
+  if (pathname === "/api/mcp/tokens" || pathname.startsWith("/api/mcp/tokens/")) return "admins.manage";
   if (pathname === "/api/admins" || pathname.startsWith("/api/admins/")) {
     return "admins.manage";
   }
@@ -1060,6 +1065,577 @@ export async function createRayLinkApp(options) {
     if (entry) entry.count += 1;
   };
 
+  // Browser API and MCP share the same authorization and business operations.
+  const handleAdminRequest = async (request, response, admin) => {
+    const url = new URL(request.url, currentPublicOrigin());
+    const requiredPermission = adminPermissionForRequest(request.method, url.pathname);
+    const permissions = rolePermissions.get(admin.role || "owner") || new Set();
+    if (!permissions.has(requiredPermission)) {
+      sendJson(response, 403, {
+        error: {
+          code: "FORBIDDEN",
+          message: "当前管理员角色无权执行此操作"
+        }
+      });
+      return;
+    }
+
+    if (!request.mcp && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      const { resourceType, resourceId } = auditResource(url.pathname);
+      response.once("finish", () => {
+        if (response.statusCode >= 400) return;
+        try {
+          store.recordAuditEvent({
+            adminId: admin.id,
+            actorUsername: admin.username,
+            actorRole: admin.role || "owner",
+            action: `${request.method} ${url.pathname}`,
+            resourceType,
+            resourceId,
+            metadata: { statusCode: response.statusCode }
+          });
+        } catch (error) {
+          console.warn(`[RayLink] Audit event could not be recorded: ${error.message}`);
+        }
+      });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/mcp/tokens") {
+      sendJson(response, 200, {
+        tokens: mcpCredentials.list(), scopes: MCP_SCOPES,
+        endpoint: new URL("/mcp", currentPublicOrigin()).toString()
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/mcp/tokens") {
+      const input = await readJson(request);
+      sendJson(response, 201, mcpCredentials.create({ ...input, adminId: admin.id }));
+      return;
+    }
+    const mcpTokenMatch = url.pathname.match(/^\/api\/mcp\/tokens\/([^/]+)$/);
+    if (request.method === "DELETE" && mcpTokenMatch) {
+      sendJson(response, 200, mcpCredentials.revoke(decodeURIComponent(mcpTokenMatch[1])));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/admins") {
+      sendJson(response, 200, { admins: store.listAdmins() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/admins") {
+      sendJson(response, 201, store.createAdmin(await readJson(request)));
+      return;
+    }
+
+    const adminMatch = url.pathname.match(/^\/api\/admins\/([^/]+)$/);
+    if (request.method === "PATCH" && adminMatch) {
+      sendJson(
+        response,
+        200,
+        store.updateAdmin(
+          decodeURIComponent(adminMatch[1]),
+          await readJson(request)
+        )
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/audit") {
+      sendJson(response, 200, {
+        events: store.listAuditEvents(url.searchParams.get("limit"))
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/backups") {
+      sendJson(response, 200, { backups: await backupManager.list() });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/alerts") {
+      sendJson(response, 200, {
+        alerts: await currentAlerts(),
+        delivery: alertDispatcher.status()
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/operations/readiness") {
+      sendJson(response, 200, await currentReadiness());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/backups") {
+      sendJson(response, 201, await backupManager.create());
+      return;
+    }
+
+    const backupVerifyMatch = url.pathname.match(
+      /^\/api\/backups\/([^/]+)\/verify$/
+    );
+    if (request.method === "POST" && backupVerifyMatch) {
+      sendJson(
+        response,
+        200,
+        await backupManager.verify(decodeURIComponent(backupVerifyMatch[1]))
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/bootstrap") {
+      const installation = await refreshLocalRuntimeCapabilities();
+      const runtime = await runtimeManager.status();
+      const bootstrap = store.bootstrap(admin);
+      const deployments = store.listDeployments();
+      const backups = await backupManager.list();
+      const hosts = bootstrap.hosts.map((host) => {
+        const capabilities = host.id === "local"
+          ? installation
+          : {
+              installed: Boolean(host.runtimeVersion),
+              version: host.runtimeVersion,
+              platform: host.platform || "linux",
+              architecture: host.architecture,
+              tags: host.buildTags
+            };
+        return {
+          ...host,
+          protocolCatalog: protocolCatalog.map(
+            (protocol) => ({
+              ...protocolAvailability(protocol, capabilities),
+              activationPolicy: protocolActivationPolicy(protocol.type)
+            })
+          )
+        };
+      });
+      const alerts = evaluateOperationalAlerts({ hosts, deployments, backups });
+      const routingRuleSets = routingRuleSetStatus();
+      sendJson(response, 200, {
+        ...bootstrap,
+        hosts,
+        admins: admin.role === "owner" ? store.listAdmins() : [],
+        auditEvents: ["owner", "operator", "auditor"].includes(admin.role)
+          ? store.listAuditEvents(30)
+          : [],
+        access: store.setupStatus().access,
+        certificate: store.certificateSettings(),
+        routingPolicy: store.routingPolicy(),
+        routingRuleSets,
+        telemetry: store.telemetryOverview(),
+        runtime,
+        runtimePreview: runtimeManager.preview(),
+        deployments,
+        backups,
+        alerts,
+        alertDelivery: alertDispatcher.status(),
+        installation,
+        runtimeUpdate: typeof installer.releaseStatus === "function"
+          ? installer.releaseStatus()
+          : null,
+        protocolCatalog: protocolCatalog.map((protocol) => ({
+          ...protocolAvailability(protocol, installation),
+          activationPolicy: protocolActivationPolicy(protocol.type)
+        }))
+      });
+      return;
+    }
+
+    if (
+      request.method === "PATCH"
+      && url.pathname === "/api/settings/routing"
+    ) {
+      sendJson(
+        response,
+        200,
+        store.updateRoutingPolicy(await readJson(request))
+      );
+      return;
+    }
+
+    if (
+      request.method === "POST"
+      && url.pathname === "/api/routing/diagnose"
+    ) {
+      const body = await readJson(request);
+      sendJson(
+        response,
+        200,
+        await diagnoseRoutingDomain({
+          domain: body.domain,
+          policy: store.routingPolicy(),
+          matchRuleSet: ruleSetCache.available()
+            && typeof ruleSetCache.matches === "function"
+            ? (filename, value) => ruleSetCache.matches(
+                filename,
+                value,
+                options.singBoxBinary || "sing-box"
+              )
+            : null
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method === "PATCH"
+      && url.pathname === "/api/settings/certificate"
+    ) {
+      sendJson(
+        response,
+        200,
+        store.updateCertificateSettings(await readJson(request))
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/runtime/status") {
+      sendJson(response, 200, await runtimeManager.status());
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/runtime/installation") {
+      sendJson(response, 200, await installer.status());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/runtime/install") {
+      sendJson(
+        response,
+        200,
+        await runLocalRuntimeOperation("安装", () => installer.install())
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/runtime/update") {
+      if (typeof installer.checkForUpdates !== "function") {
+        throw httpError("UPDATE_CHECK_UNAVAILABLE", "当前 Runtime 不支持在线版本检查", 501);
+      }
+      sendJson(response, 200, await installer.checkForUpdates());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/runtime/upgrade") {
+      if (
+        typeof installer.checkForUpdates !== "function"
+        || typeof installer.upgrade !== "function"
+      ) {
+        throw httpError("RUNTIME_UPGRADE_UNAVAILABLE", "当前 Runtime 不支持在线升级", 501);
+      }
+      const update = await installer.checkForUpdates();
+      if (!update.updateAvailable) {
+        throw httpError(
+          update.blockedReason ? "RUNTIME_UPGRADE_INCOMPATIBLE" : "RUNTIME_ALREADY_CURRENT",
+          update.blockedReason || "当前 sing-box 已是可用的最新稳定版本",
+          409
+        );
+      }
+      const upgraded = await runLocalRuntimeOperation(
+        "在线升级",
+        () => installer.upgrade(update.latestVersion)
+      );
+      sendJson(response, 200, upgraded);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/runtime/reality-keypair") {
+      sendJson(response, 201, await installer.generateRealityKeypair());
+      return;
+    }
+
+    const protocolMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/protocols\/([^/]+)$/);
+    if (request.method === "PATCH" && protocolMatch) {
+      const hostId = decodeURIComponent(protocolMatch[1]);
+      const protocolType = decodeURIComponent(protocolMatch[2]);
+      const input = await readJson(request);
+      const host = store.getHost(hostId);
+      if (!host) {
+        sendJson(response, 404, { error: { code: "HOST_NOT_FOUND", message: "主机不存在" } });
+        return;
+      }
+      const candidate = store.prepareHostProtocolConfig(hostId, protocolType, input);
+      if (candidate.enabled) {
+        if (host.kind === "remote" && !host.runtimeVersion) {
+          throw httpError(
+            "HOST_CAPABILITIES_UNKNOWN",
+            "远程主机尚未上报 sing-box 能力，请先完成 RayLink Node 接入",
+            409
+          );
+        }
+        const installation = host.id === "local"
+          ? await installer.status()
+          : host.runtimeVersion
+            ? {
+                installed: true,
+                version: host.runtimeVersion,
+                platform: host.platform,
+                architecture: host.architecture,
+                tags: host.buildTags
+              }
+            : null;
+        const catalog = protocolCatalog.find((entry) => entry.type === protocolType);
+        const availability = installation
+          ? protocolAvailability(catalog, installation)
+          : null;
+        if (availability && !availability.available) {
+          sendJson(response, 422, {
+            error: {
+              code: "PROTOCOL_UNAVAILABLE",
+              message: !availability.versionSupported
+                ? `RayLink 当前协议 schema 支持 sing-box 1.13.x / 1.14.x，检测到 ${installation.version || "未知版本"}`
+                : availability.platformSupported
+                  ? `当前 sing-box 构建缺少 ${availability.missingTags.join(", ") || "所需能力"}`
+                  : `当前平台不支持 ${catalog.name}`
+            }
+          });
+          return;
+        }
+        if (availability && candidate.tls.mode === "reality" && !availability.realityAvailable) {
+          sendJson(response, 422, {
+            error: { code: "REALITY_UNAVAILABLE", message: "当前 sing-box 构建缺少 with_utls" }
+          });
+          return;
+        }
+        if (availability && candidate.transport.type === "quic" && !availability.quicTransportAvailable) {
+          sendJson(response, 422, {
+            error: { code: "QUIC_UNAVAILABLE", message: "当前 sing-box 构建缺少 with_quic" }
+          });
+          return;
+        }
+      }
+      sendJson(response, 200, store.updateHostProtocolConfig(hostId, protocolType, input));
+      return;
+    }
+
+    const protocolActivationMatch = url.pathname.match(
+      /^\/api\/hosts\/([^/]+)\/protocols\/([^/]+)\/activate$/
+    );
+    if (request.method === "POST" && protocolActivationMatch) {
+      const result = await runLocalRuntimeOperation(
+        "协议一键启用",
+        () => protocolActivationManager.enable({
+          hostId: decodeURIComponent(protocolActivationMatch[1]),
+          type: decodeURIComponent(protocolActivationMatch[2]),
+          adminId: admin.id
+        })
+      );
+      sendJson(response, result.activation?.asynchronous ? 202 : 200, result);
+      return;
+    }
+
+    const protocolLatencyMatch = url.pathname.match(
+      /^\/api\/hosts\/([^/]+)\/protocols\/latency$/
+    );
+    if (request.method === "POST" && protocolLatencyMatch) {
+      sendJson(
+        response,
+        200,
+        await protocolActivationManager.measureHost({
+          hostId: decodeURIComponent(protocolLatencyMatch[1])
+        })
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/deployments") {
+      sendJson(response, 200, { deployments: store.listDeployments() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/deployments/preview") {
+      sendJson(response, 200, runtimeManager.preview());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/deployments") {
+      await refreshLocalRuntimeCapabilities();
+      sendJson(
+        response,
+        201,
+        await runLocalRuntimeOperation("配置发布", () => runtimeManager.publish(admin.id))
+      );
+      return;
+    }
+
+    const rollbackMatch = url.pathname.match(/^\/api\/deployments\/([^/]+)\/rollback$/);
+    if (request.method === "POST" && rollbackMatch) {
+      sendJson(
+        response,
+        201,
+        await runLocalRuntimeOperation(
+          "配置回滚",
+          () => runtimeManager.rollback(decodeURIComponent(rollbackMatch[1]), admin.id)
+        )
+      );
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/users") {
+      const user = store.createUser(await readJson(request));
+      const runtimeSync = await reconcileUserEntitlements(admin.id);
+      sendJson(response, runtimeSync.status === "pending" ? 202 : 201, {
+        ...user,
+        runtimeSync
+      });
+      return;
+    }
+
+    const currentUserSubscriptionMatch = url.pathname.match(
+      /^\/api\/users\/([^/]+)\/subscription$/
+    );
+    if (request.method === "GET" && currentUserSubscriptionMatch) {
+      sendJson(
+        response,
+        200,
+        currentSubscription(decodeURIComponent(currentUserSubscriptionMatch[1]))
+      );
+      return;
+    }
+    const rotateUserSubscriptionMatch = url.pathname.match(
+      /^\/api\/users\/([^/]+)\/subscription\/rotate$/
+    );
+    if (request.method === "POST" && rotateUserSubscriptionMatch) {
+      const subscription = store.rotateUserSubscription(
+        decodeURIComponent(rotateUserSubscriptionMatch[1])
+      );
+      sendJson(response, 201, subscriptionDetails(subscription));
+      return;
+    }
+
+    const resetUserPasswordMatch = url.pathname.match(
+      /^\/api\/users\/([^/]+)\/password\/reset$/
+    );
+    if (request.method === "POST" && resetUserPasswordMatch) {
+      const body = await readJson(request);
+      sendJson(
+        response,
+        200,
+        store.resetUserPassword(
+          decodeURIComponent(resetUserPasswordMatch[1]),
+          body.password
+        )
+      );
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/hosts") {
+      sendJson(response, 201, store.createRemoteHost(await readJson(request)));
+      return;
+    }
+
+    const enrollmentTokenMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/enrollment-token$/);
+    if (request.method === "POST" && enrollmentTokenMatch) {
+      sendJson(
+        response,
+        201,
+        store.rotateNodeEnrollmentToken(decodeURIComponent(enrollmentTokenMatch[1]))
+      );
+      return;
+    }
+
+    const runtimeUpgradeMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/runtime-upgrade$/);
+    if (request.method === "POST" && runtimeUpgradeMatch) {
+      const hostId = decodeURIComponent(runtimeUpgradeMatch[1]);
+      const host = store.getHost(hostId);
+      if (!host || host.kind !== "remote") {
+        throw httpError("REMOTE_HOST_NOT_FOUND", "远程主机不存在", 404);
+      }
+      if (!host.enrolledAt) {
+        throw httpError("NODE_NOT_ENROLLED", "远程主机尚未完成 RayLink Node 接入", 409);
+      }
+      if (host.agentVersion !== RUNTIME_UPGRADE_NODE_VERSION) {
+        throw httpError(
+          "NODE_UPGRADE_REQUIRED",
+          `请先通过 /node/upgrade.sh 将 RayLink Node 升级到 ${RUNTIME_UPGRADE_NODE_VERSION}，再升级 Runtime`,
+          409
+        );
+      }
+      if (typeof installer.checkForUpdates !== "function") {
+        throw httpError("UPDATE_CHECK_UNAVAILABLE", "当前 Runtime 不支持在线版本检查", 501);
+      }
+      const update = await installer.checkForUpdates();
+      if (!update.compatible || !update.latestVersion) {
+        throw httpError(
+          "RUNTIME_UPGRADE_INCOMPATIBLE",
+          update.blockedReason || "最新稳定版与当前 RayLink 不兼容",
+          409
+        );
+      }
+      const targetVersion = update.approvedVersion || APPROVED_METERED_RUNTIME_VERSION;
+      const needsMeteredRebuild = host.runtimeVersion === targetVersion
+        && !host.usageMetering.supported;
+      if (!versionIsOlder(host.runtimeVersion, targetVersion) && !needsMeteredRebuild) {
+        throw httpError("RUNTIME_ALREADY_CURRENT", "该主机已是最新版本", 409);
+      }
+      const taskId = store.queueNodeTask(host.id, "upgrade-runtime", {
+        targetVersion,
+        requestedAt: new Date().toISOString()
+      }, { maxAttempts: 1 });
+      sendJson(response, 202, {
+        taskId,
+        status: "queued",
+        targetVersion
+      });
+      return;
+    }
+
+    const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (request.method === "PATCH" && userMatch) {
+      const user = store.updateUser(
+        decodeURIComponent(userMatch[1]),
+        await readJson(request)
+      );
+      const runtimeSync = await reconcileUserEntitlements(admin.id);
+      sendJson(response, runtimeSync.status === "pending" ? 202 : 200, {
+        ...user,
+        runtimeSync
+      });
+      return;
+    }
+
+    const hostMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)$/);
+    if (request.method === "PATCH" && hostMatch) {
+      sendJson(response, 200, store.updateHost(
+        decodeURIComponent(hostMatch[1]),
+        await readJson(request)
+      ));
+      return;
+    }
+
+    sendJson(response, 404, { error: { code: "NOT_FOUND", message: "接口不存在" } });
+    return;
+  };
+  const mcpCredentials = new McpCredentials({ store });
+  const mcp = createMcpService({
+    store, credentials: mcpCredentials, rolePermissions,
+    originAllowed: requestOriginIsAllowed, publicOrigin: currentPublicOrigin,
+    allowedHosts: () => [...new Set([
+      currentPublicOrigin().hostname,
+      ...(store.setupStatus().access?.allowedOrigins || []).map((origin) => new URL(origin).hostname)
+    ])],
+    async dispatch({ admin, method, path, body }) {
+      const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+      Object.assign(request, { method, url: path, headers: {}, mcp: true });
+      const response = new EventEmitter();
+      let result;
+      response.writeHead = (statusCode) => { response.statusCode = statusCode; };
+      response.end = (payload) => {
+        result = { statusCode: response.statusCode, body: JSON.parse(payload) };
+        response.emit("finish");
+      };
+      try {
+        await handleAdminRequest(request, response, admin);
+        return result;
+      } catch (error) {
+        return { statusCode: error.statusCode || 500, body: { error: {
+          code: error.code || (error.statusCode ? "BAD_REQUEST" : "INTERNAL_ERROR"),
+          message: error.statusCode ? error.message : "服务器处理请求失败"
+        } } };
+      }
+    }
+  });
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, currentPublicOrigin());
@@ -1244,6 +1820,11 @@ export async function createRayLinkApp(options) {
       if (request.method === "GET" && ["/setup", "/setup/"].includes(url.pathname)) {
         response.writeHead(302, { location: "/", "cache-control": "no-store" });
         response.end();
+        return;
+      }
+
+      if (url.pathname === "/mcp") {
+        await mcp.handle(request, response);
         return;
       }
 
@@ -1600,524 +2181,7 @@ export async function createRayLinkApp(options) {
           return;
         }
 
-        const requiredPermission = adminPermissionForRequest(request.method, url.pathname);
-        const permissions = rolePermissions.get(admin.role || "owner") || new Set();
-        if (!permissions.has(requiredPermission)) {
-          sendJson(response, 403, {
-            error: {
-              code: "FORBIDDEN",
-              message: "当前管理员角色无权执行此操作"
-            }
-          });
-          return;
-        }
-
-        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
-          const { resourceType, resourceId } = auditResource(url.pathname);
-          response.once("finish", () => {
-            if (response.statusCode >= 400) return;
-            try {
-              store.recordAuditEvent({
-                adminId: admin.id,
-                actorUsername: admin.username,
-                actorRole: admin.role || "owner",
-                action: `${request.method} ${url.pathname}`,
-                resourceType,
-                resourceId,
-                metadata: { statusCode: response.statusCode }
-              });
-            } catch (error) {
-              console.warn(`[RayLink] Audit event could not be recorded: ${error.message}`);
-            }
-          });
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/admins") {
-          sendJson(response, 200, { admins: store.listAdmins() });
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/admins") {
-          sendJson(response, 201, store.createAdmin(await readJson(request)));
-          return;
-        }
-
-        const adminMatch = url.pathname.match(/^\/api\/admins\/([^/]+)$/);
-        if (request.method === "PATCH" && adminMatch) {
-          sendJson(
-            response,
-            200,
-            store.updateAdmin(
-              decodeURIComponent(adminMatch[1]),
-              await readJson(request)
-            )
-          );
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/audit") {
-          sendJson(response, 200, {
-            events: store.listAuditEvents(url.searchParams.get("limit"))
-          });
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/backups") {
-          sendJson(response, 200, { backups: await backupManager.list() });
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/alerts") {
-          sendJson(response, 200, {
-            alerts: await currentAlerts(),
-            delivery: alertDispatcher.status()
-          });
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/operations/readiness") {
-          sendJson(response, 200, await currentReadiness());
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/backups") {
-          sendJson(response, 201, await backupManager.create());
-          return;
-        }
-
-        const backupVerifyMatch = url.pathname.match(
-          /^\/api\/backups\/([^/]+)\/verify$/
-        );
-        if (request.method === "POST" && backupVerifyMatch) {
-          sendJson(
-            response,
-            200,
-            await backupManager.verify(decodeURIComponent(backupVerifyMatch[1]))
-          );
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/bootstrap") {
-          const installation = await refreshLocalRuntimeCapabilities();
-          const runtime = await runtimeManager.status();
-          const bootstrap = store.bootstrap(admin);
-          const deployments = store.listDeployments();
-          const backups = await backupManager.list();
-          const hosts = bootstrap.hosts.map((host) => {
-            const capabilities = host.id === "local"
-              ? installation
-              : {
-                  installed: Boolean(host.runtimeVersion),
-                  version: host.runtimeVersion,
-                  platform: host.platform || "linux",
-                  architecture: host.architecture,
-                  tags: host.buildTags
-                };
-            return {
-              ...host,
-              protocolCatalog: protocolCatalog.map(
-                (protocol) => ({
-                  ...protocolAvailability(protocol, capabilities),
-                  activationPolicy: protocolActivationPolicy(protocol.type)
-                })
-              )
-            };
-          });
-          const alerts = evaluateOperationalAlerts({ hosts, deployments, backups });
-          const routingRuleSets = routingRuleSetStatus();
-          sendJson(response, 200, {
-            ...bootstrap,
-            hosts,
-            admins: admin.role === "owner" ? store.listAdmins() : [],
-            auditEvents: ["owner", "operator", "auditor"].includes(admin.role)
-              ? store.listAuditEvents(30)
-              : [],
-            access: store.setupStatus().access,
-            certificate: store.certificateSettings(),
-            routingPolicy: store.routingPolicy(),
-            routingRuleSets,
-            telemetry: store.telemetryOverview(),
-            runtime,
-            runtimePreview: runtimeManager.preview(),
-            deployments,
-            backups,
-            alerts,
-            alertDelivery: alertDispatcher.status(),
-            installation,
-            runtimeUpdate: typeof installer.releaseStatus === "function"
-              ? installer.releaseStatus()
-              : null,
-            protocolCatalog: protocolCatalog.map((protocol) => ({
-              ...protocolAvailability(protocol, installation),
-              activationPolicy: protocolActivationPolicy(protocol.type)
-            }))
-          });
-          return;
-        }
-
-        if (
-          request.method === "PATCH"
-          && url.pathname === "/api/settings/routing"
-        ) {
-          sendJson(
-            response,
-            200,
-            store.updateRoutingPolicy(await readJson(request))
-          );
-          return;
-        }
-
-        if (
-          request.method === "POST"
-          && url.pathname === "/api/routing/diagnose"
-        ) {
-          const body = await readJson(request);
-          sendJson(
-            response,
-            200,
-            await diagnoseRoutingDomain({
-              domain: body.domain,
-              policy: store.routingPolicy(),
-              matchRuleSet: ruleSetCache.available()
-                && typeof ruleSetCache.matches === "function"
-                ? (filename, value) => ruleSetCache.matches(
-                    filename,
-                    value,
-                    options.singBoxBinary || "sing-box"
-                  )
-                : null
-            })
-          );
-          return;
-        }
-
-        if (
-          request.method === "PATCH"
-          && url.pathname === "/api/settings/certificate"
-        ) {
-          sendJson(
-            response,
-            200,
-            store.updateCertificateSettings(await readJson(request))
-          );
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/runtime/status") {
-          sendJson(response, 200, await runtimeManager.status());
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/runtime/installation") {
-          sendJson(response, 200, await installer.status());
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/runtime/install") {
-          sendJson(
-            response,
-            200,
-            await runLocalRuntimeOperation("安装", () => installer.install())
-          );
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/runtime/update") {
-          if (typeof installer.checkForUpdates !== "function") {
-            throw httpError("UPDATE_CHECK_UNAVAILABLE", "当前 Runtime 不支持在线版本检查", 501);
-          }
-          sendJson(response, 200, await installer.checkForUpdates());
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/runtime/upgrade") {
-          if (
-            typeof installer.checkForUpdates !== "function"
-            || typeof installer.upgrade !== "function"
-          ) {
-            throw httpError("RUNTIME_UPGRADE_UNAVAILABLE", "当前 Runtime 不支持在线升级", 501);
-          }
-          const update = await installer.checkForUpdates();
-          if (!update.updateAvailable) {
-            throw httpError(
-              update.blockedReason ? "RUNTIME_UPGRADE_INCOMPATIBLE" : "RUNTIME_ALREADY_CURRENT",
-              update.blockedReason || "当前 sing-box 已是可用的最新稳定版本",
-              409
-            );
-          }
-          const upgraded = await runLocalRuntimeOperation(
-            "在线升级",
-            () => installer.upgrade(update.latestVersion)
-          );
-          sendJson(response, 200, upgraded);
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/runtime/reality-keypair") {
-          sendJson(response, 201, await installer.generateRealityKeypair());
-          return;
-        }
-
-        const protocolMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/protocols\/([^/]+)$/);
-        if (request.method === "PATCH" && protocolMatch) {
-          const hostId = decodeURIComponent(protocolMatch[1]);
-          const protocolType = decodeURIComponent(protocolMatch[2]);
-          const input = await readJson(request);
-          const host = store.getHost(hostId);
-          if (!host) {
-            sendJson(response, 404, { error: { code: "HOST_NOT_FOUND", message: "主机不存在" } });
-            return;
-          }
-          const candidate = store.prepareHostProtocolConfig(hostId, protocolType, input);
-          if (candidate.enabled) {
-            if (host.kind === "remote" && !host.runtimeVersion) {
-              throw httpError(
-                "HOST_CAPABILITIES_UNKNOWN",
-                "远程主机尚未上报 sing-box 能力，请先完成 RayLink Node 接入",
-                409
-              );
-            }
-            const installation = host.id === "local"
-              ? await installer.status()
-              : host.runtimeVersion
-                ? {
-                    installed: true,
-                    version: host.runtimeVersion,
-                    platform: host.platform,
-                    architecture: host.architecture,
-                    tags: host.buildTags
-                  }
-                : null;
-            const catalog = protocolCatalog.find((entry) => entry.type === protocolType);
-            const availability = installation
-              ? protocolAvailability(catalog, installation)
-              : null;
-            if (availability && !availability.available) {
-              sendJson(response, 422, {
-                error: {
-                  code: "PROTOCOL_UNAVAILABLE",
-                  message: !availability.versionSupported
-                    ? `RayLink 当前协议 schema 支持 sing-box 1.13.x / 1.14.x，检测到 ${installation.version || "未知版本"}`
-                    : availability.platformSupported
-                      ? `当前 sing-box 构建缺少 ${availability.missingTags.join(", ") || "所需能力"}`
-                      : `当前平台不支持 ${catalog.name}`
-                }
-              });
-              return;
-            }
-            if (availability && candidate.tls.mode === "reality" && !availability.realityAvailable) {
-              sendJson(response, 422, {
-                error: { code: "REALITY_UNAVAILABLE", message: "当前 sing-box 构建缺少 with_utls" }
-              });
-              return;
-            }
-            if (availability && candidate.transport.type === "quic" && !availability.quicTransportAvailable) {
-              sendJson(response, 422, {
-                error: { code: "QUIC_UNAVAILABLE", message: "当前 sing-box 构建缺少 with_quic" }
-              });
-              return;
-            }
-          }
-          sendJson(response, 200, store.updateHostProtocolConfig(hostId, protocolType, input));
-          return;
-        }
-
-        const protocolActivationMatch = url.pathname.match(
-          /^\/api\/hosts\/([^/]+)\/protocols\/([^/]+)\/activate$/
-        );
-        if (request.method === "POST" && protocolActivationMatch) {
-          const result = await runLocalRuntimeOperation(
-            "协议一键启用",
-            () => protocolActivationManager.enable({
-              hostId: decodeURIComponent(protocolActivationMatch[1]),
-              type: decodeURIComponent(protocolActivationMatch[2]),
-              adminId: admin.id
-            })
-          );
-          sendJson(response, result.activation?.asynchronous ? 202 : 200, result);
-          return;
-        }
-
-        const protocolLatencyMatch = url.pathname.match(
-          /^\/api\/hosts\/([^/]+)\/protocols\/latency$/
-        );
-        if (request.method === "POST" && protocolLatencyMatch) {
-          sendJson(
-            response,
-            200,
-            await protocolActivationManager.measureHost({
-              hostId: decodeURIComponent(protocolLatencyMatch[1])
-            })
-          );
-          return;
-        }
-
-        if (request.method === "GET" && url.pathname === "/api/deployments") {
-          sendJson(response, 200, { deployments: store.listDeployments() });
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/deployments/preview") {
-          sendJson(response, 200, runtimeManager.preview());
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/deployments") {
-          await refreshLocalRuntimeCapabilities();
-          sendJson(
-            response,
-            201,
-            await runLocalRuntimeOperation("配置发布", () => runtimeManager.publish(admin.id))
-          );
-          return;
-        }
-
-        const rollbackMatch = url.pathname.match(/^\/api\/deployments\/([^/]+)\/rollback$/);
-        if (request.method === "POST" && rollbackMatch) {
-          sendJson(
-            response,
-            201,
-            await runLocalRuntimeOperation(
-              "配置回滚",
-              () => runtimeManager.rollback(decodeURIComponent(rollbackMatch[1]), admin.id)
-            )
-          );
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/users") {
-          const user = store.createUser(await readJson(request));
-          const runtimeSync = await reconcileUserEntitlements(admin.id);
-          sendJson(response, runtimeSync.status === "pending" ? 202 : 201, {
-            ...user,
-            runtimeSync
-          });
-          return;
-        }
-
-        const currentUserSubscriptionMatch = url.pathname.match(
-          /^\/api\/users\/([^/]+)\/subscription$/
-        );
-        if (request.method === "GET" && currentUserSubscriptionMatch) {
-          sendJson(
-            response,
-            200,
-            currentSubscription(decodeURIComponent(currentUserSubscriptionMatch[1]))
-          );
-          return;
-        }
-        const rotateUserSubscriptionMatch = url.pathname.match(
-          /^\/api\/users\/([^/]+)\/subscription\/rotate$/
-        );
-        if (request.method === "POST" && rotateUserSubscriptionMatch) {
-          const subscription = store.rotateUserSubscription(
-            decodeURIComponent(rotateUserSubscriptionMatch[1])
-          );
-          sendJson(response, 201, subscriptionDetails(subscription));
-          return;
-        }
-
-        const resetUserPasswordMatch = url.pathname.match(
-          /^\/api\/users\/([^/]+)\/password\/reset$/
-        );
-        if (request.method === "POST" && resetUserPasswordMatch) {
-          const body = await readJson(request);
-          sendJson(
-            response,
-            200,
-            store.resetUserPassword(
-              decodeURIComponent(resetUserPasswordMatch[1]),
-              body.password
-            )
-          );
-          return;
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/hosts") {
-          sendJson(response, 201, store.createRemoteHost(await readJson(request)));
-          return;
-        }
-
-        const enrollmentTokenMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/enrollment-token$/);
-        if (request.method === "POST" && enrollmentTokenMatch) {
-          sendJson(
-            response,
-            201,
-            store.rotateNodeEnrollmentToken(decodeURIComponent(enrollmentTokenMatch[1]))
-          );
-          return;
-        }
-
-        const runtimeUpgradeMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)\/runtime-upgrade$/);
-        if (request.method === "POST" && runtimeUpgradeMatch) {
-          const hostId = decodeURIComponent(runtimeUpgradeMatch[1]);
-          const host = store.getHost(hostId);
-          if (!host || host.kind !== "remote") {
-            throw httpError("REMOTE_HOST_NOT_FOUND", "远程主机不存在", 404);
-          }
-          if (!host.enrolledAt) {
-            throw httpError("NODE_NOT_ENROLLED", "远程主机尚未完成 RayLink Node 接入", 409);
-          }
-          if (host.agentVersion !== RUNTIME_UPGRADE_NODE_VERSION) {
-            throw httpError(
-              "NODE_UPGRADE_REQUIRED",
-              `请先通过 /node/upgrade.sh 将 RayLink Node 升级到 ${RUNTIME_UPGRADE_NODE_VERSION}，再升级 Runtime`,
-              409
-            );
-          }
-          if (typeof installer.checkForUpdates !== "function") {
-            throw httpError("UPDATE_CHECK_UNAVAILABLE", "当前 Runtime 不支持在线版本检查", 501);
-          }
-          const update = await installer.checkForUpdates();
-          if (!update.compatible || !update.latestVersion) {
-            throw httpError(
-              "RUNTIME_UPGRADE_INCOMPATIBLE",
-              update.blockedReason || "最新稳定版与当前 RayLink 不兼容",
-              409
-            );
-          }
-          const targetVersion = update.approvedVersion || APPROVED_METERED_RUNTIME_VERSION;
-          const needsMeteredRebuild = host.runtimeVersion === targetVersion
-            && !host.usageMetering.supported;
-          if (!versionIsOlder(host.runtimeVersion, targetVersion) && !needsMeteredRebuild) {
-            throw httpError("RUNTIME_ALREADY_CURRENT", "该主机已是最新版本", 409);
-          }
-          const taskId = store.queueNodeTask(host.id, "upgrade-runtime", {
-            targetVersion,
-            requestedAt: new Date().toISOString()
-          }, { maxAttempts: 1 });
-          sendJson(response, 202, {
-            taskId,
-            status: "queued",
-            targetVersion
-          });
-          return;
-        }
-
-        const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
-        if (request.method === "PATCH" && userMatch) {
-          const user = store.updateUser(
-            decodeURIComponent(userMatch[1]),
-            await readJson(request)
-          );
-          const runtimeSync = await reconcileUserEntitlements(admin.id);
-          sendJson(response, runtimeSync.status === "pending" ? 202 : 200, {
-            ...user,
-            runtimeSync
-          });
-          return;
-        }
-
-        const hostMatch = url.pathname.match(/^\/api\/hosts\/([^/]+)$/);
-        if (request.method === "PATCH" && hostMatch) {
-          sendJson(response, 200, store.updateHost(
-            decodeURIComponent(hostMatch[1]),
-            await readJson(request)
-          ));
-          return;
-        }
-
-        sendJson(response, 404, { error: { code: "NOT_FOUND", message: "接口不存在" } });
+        await handleAdminRequest(request, response, admin);
         return;
       }
 
@@ -2244,9 +2308,13 @@ export async function createRayLinkApp(options) {
       if (telemetrySamplePromise) await telemetrySamplePromise;
       if (usageMeteringPromise) await usageMeteringPromise;
       if (protocolLatencyPromise) await protocolLatencyPromise;
-      if (server.listening) {
-        await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      }
+      // Stop accepting requests first; then drain tools and close SDK SSE
+      // streams before waiting for HTTP connections to finish.
+      const httpClosed = server.listening
+        ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+        : Promise.resolve();
+      await mcp.close();
+      await httpClosed;
       await Promise.allSettled([...backupOperations]);
       store.close();
     }

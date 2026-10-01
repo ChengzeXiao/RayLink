@@ -87,8 +87,10 @@ else
   source_tree=HEAD
 fi
 git -C "$git_root" archive --format=tar "$source_tree" \
-  package.json README.md CHANGELOG.md server web deploy docs/production-readiness-plan.md \
+  package.json package-lock.json README.md CHANGELOG.md server web deploy docs/production-readiness-plan.md docs/mcp-server.md \
   | tar -xf - -C "$package_root"
+
+node "$package_root/deploy/prepare-runtime-dependencies.mjs" "$package_root" --install
 
 install -d -m 0755 "$package_root/web/node/runtime"
 for runtime_arch in $release_arches; do
@@ -121,7 +123,8 @@ node "$source_root/deploy/generate-release-metadata.mjs" \
   "$release_version" \
   "$runtime_version" \
   "$release_arches" \
-  "$source_root/web/node/runtime/raylink-libcronet-${runtime_version}-linux-${release_arches}.so"
+  "$source_root/web/node/runtime/raylink-libcronet-${runtime_version}-linux-${release_arches}.so" \
+  "$package_root/package-lock.json"
 
 printf 'RayLink 发布包：%s\n' "$output_path"
 printf 'RayLink 发布包校验：%s.sha256\n' "$output_path"

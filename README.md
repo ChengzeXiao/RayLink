@@ -29,6 +29,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 | 安全发布 | `sing-box check`、原子替换、版本快照、失败恢复和历史回滚 |
 | 真实流量计量 | 使用 sing-box 用户级统计，不以 Host 网卡总流量估算用户配额 |
 | Host 可观测性 | 汇总 CPU、内存、上下行速率、服务状态、心跳和 Runtime 版本 |
+| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 42 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
 | 在线升级 | 发现已验证的 sing-box 新版本后提示升级，失败自动恢复旧二进制和服务状态 |
 
 ## 界面预览
@@ -49,6 +50,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 
 ```mermaid
 flowchart LR
+  Agent["管理 Agent"] -->|"HTTP MCP / Bearer Token"| Control
   Admin["管理员浏览器"] -->|"HTTPS / Cookie Session"| Control["RayLink Control Plane<br/>Node.js + SQLite"]
   Portal["用户中心"] -->|"登录 / 获取专属配置 URL"| Control
 
@@ -197,6 +199,7 @@ docs/     架构决策、协议支持矩阵和生产落地资料
 ```bash
 git clone https://github.com/Zanetach/RayLink.git
 cd RayLink
+npm ci --ignore-scripts
 npm start
 ```
 

@@ -52,6 +52,8 @@ const controlPlane = {
   portalProfile: null
 };
 
+const mcpAccess = { tokens: [], scopes: [], endpoint: "", issued: null, loading: false, creating: false, generation: 0 };
+
 const scopeLabels = {
   all: "全部节点",
   tokyo: "东京",
@@ -202,6 +204,7 @@ function versionIsOlder(currentVersion, targetVersion) {
 }
 
 function applyBootstrap(data) {
+  const previousAdminId = controlPlane.currentAdmin?.id;
   users.splice(0, users.length, ...data.users.map((user) => ({
     id: user.id,
     name: user.name,
@@ -260,6 +263,10 @@ function applyBootstrap(data) {
   document.querySelectorAll("[data-owner-only]").forEach((element) => {
     element.hidden = data.currentAdmin.role !== "owner";
   });
+  if (data.currentAdmin.role !== "owner" || (previousAdminId && previousAdminId !== data.currentAdmin.id)) {
+    clearMcpAccess();
+    if (!document.querySelector('[data-system-panel="mcp"]').hidden) selectWorkspaceTab("system", "hosts");
+  }
   renderUsers();
   renderRuntime();
   renderRoutingPolicy();
@@ -1151,6 +1158,167 @@ async function refreshReadiness(button, exportReport = false) {
   }
 }
 
+function syncMcpCreateButton() {
+  document.querySelector("#mcp-create-submit").disabled = controlPlane.currentAdmin?.role !== "owner"
+    || !mcpAccess.scopes.length || !mcpAccess.endpoint || mcpAccess.loading || mcpAccess.creating || Boolean(mcpAccess.issued);
+  document.querySelector("[data-refresh-mcp]").disabled = mcpAccess.loading || mcpAccess.creating;
+}
+
+function clearMcpSecret() {
+  mcpAccess.issued = null;
+  document.querySelector("#mcp-issued-token").value = "";
+  document.querySelector("#mcp-issued-config").value = "";
+  document.querySelector("#mcp-issued").hidden = true;
+  syncMcpCreateButton();
+}
+
+function clearMcpAccess() {
+  mcpAccess.generation += 1;
+  mcpAccess.tokens = [];
+  mcpAccess.scopes = [];
+  mcpAccess.endpoint = "";
+  mcpAccess.loading = false;
+  mcpAccess.creating = false;
+  clearMcpSecret();
+  document.querySelector("#mcp-create-form").reset();
+  document.querySelector("#mcp-endpoint").value = "";
+  document.querySelector("#mcp-scope-list").replaceChildren();
+  applyMcpPreset("read");
+  document.querySelector("#mcp-token-list").replaceChildren();
+  document.querySelector("[data-refresh-mcp]").disabled = false;
+  setText("#mcp-access-status", "打开此页后读取凭据。");
+}
+
+function mcpSessionIsCurrent(generation, adminId) {
+  return generation === mcpAccess.generation && controlPlane.currentAdmin?.id === adminId
+    && controlPlane.currentAdmin?.role === "owner";
+}
+
+function handleMcpError(error, title) {
+  if (error.status === 401) { showAdminLogin(); return; }
+  if (error.status === 403) clearMcpAccess();
+  setText("#mcp-access-status", error.message);
+  showToast(title, error.message);
+}
+
+function renderMcpScopes() {
+  const target = document.querySelector("#mcp-scope-list");
+  const selected = target.children.length
+    ? new Set([...target.querySelectorAll("input:checked")].map((input) => input.value))
+    : new Set(["read"]);
+  const sensitive = (scope) => ["secrets.read", "admins.manage"].includes(scope.id);
+  const scopes = [...mcpAccess.scopes.filter((scope) => !sensitive(scope)), ...mcpAccess.scopes.filter(sensitive)];
+  target.innerHTML = scopes.map((scope) => `<label class="mcp-scope-option">
+    <input type="checkbox" name="scope" value="${escapeHtml(scope.id)}" ${selected.has(scope.id) ? "checked" : ""}>
+    <span><strong>${escapeHtml(scope.label || scope.id)}${sensitive(scope) ? "<em>单独授权</em>" : ""}</strong><small>${escapeHtml(scope.description || scope.id)}</small></span>
+  </label>`).join("");
+}
+
+function applyMcpPreset(preset) {
+  const selected = new Set(preset === "operator" ? ["read", "users.manage", "runtime.manage"]
+    : preset === "full" ? ["read", "users.manage", "runtime.manage", "system.manage", "audit.read"] : ["read"]);
+  document.querySelectorAll('#mcp-scope-list input[name="scope"]').forEach((input) => { input.checked = selected.has(input.value); });
+  document.querySelectorAll("[data-mcp-preset]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.mcpPreset === preset));
+  });
+}
+
+function renderMcpTokens() {
+  const target = document.querySelector("#mcp-token-list");
+  const date = (value) => value ? new Date(value).toLocaleString("zh-CN") : "尚未使用";
+  const labels = new Map(mcpAccess.scopes.map((scope) => [scope.id, scope.label || scope.id]));
+  target.innerHTML = mcpAccess.tokens.length ? mcpAccess.tokens.map((token) => {
+    const expired = Date.parse(token.expiresAt) <= Date.now();
+    const status = token.revokedAt ? "已撤销" : expired ? "已到期" : "有效";
+    return `<article class="mcp-token-row"><div><strong>${escapeHtml(token.name)}</strong>
+      <p>${escapeHtml(token.adminUsername || "管理员")} · ${escapeHtml((token.scopes || []).map((scope) => labels.get(scope) || scope).join("、"))}</p>
+      <p>到期 ${escapeHtml(date(token.expiresAt))} · 最近使用 ${escapeHtml(date(token.lastUsedAt))}</p></div>
+      <div class="mcp-token-actions"><span class="status-badge ${token.revokedAt || expired ? "neutral" : "good"}"><i></i>${status}</span>
+      <button type="button" class="button secondary" data-revoke-mcp="${escapeHtml(token.id)}" ${token.revokedAt ? "disabled" : ""}>${token.revokedAt ? "已撤销" : "撤销"}</button></div></article>`;
+  }).join("") : '<div class="empty-state">尚无 MCP 凭据。创建一个只读凭据开始使用。</div>';
+}
+
+async function loadMcpAccess() {
+  if (controlPlane.currentAdmin?.role !== "owner" || mcpAccess.loading || mcpAccess.creating) return;
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  const button = document.querySelector("[data-refresh-mcp]");
+  mcpAccess.loading = true;
+  syncMcpCreateButton();
+  setText("#mcp-access-status", "正在读取凭据…");
+  try {
+    const data = await api("/api/mcp/tokens", { signal: AbortSignal.timeout(15_000) });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    mcpAccess.tokens = data.tokens || [];
+    mcpAccess.scopes = data.scopes || [];
+    mcpAccess.endpoint = data.endpoint || "";
+    document.querySelector("#mcp-endpoint").value = mcpAccess.endpoint;
+    renderMcpScopes();
+    renderMcpTokens();
+    if (mcpAccess.issued && mcpAccess.tokens.find((token) => token.id === mcpAccess.issued.id)?.revokedAt) clearMcpSecret();
+    setText("#mcp-access-status", `${mcpAccess.tokens.length} 个凭据 · 列表更新于 ${new Date().toLocaleTimeString("zh-CN")}`);
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) handleMcpError(error, "凭据加载失败");
+  } finally {
+    if (generation === mcpAccess.generation) {
+      mcpAccess.loading = false;
+      button.disabled = false;
+      syncMcpCreateButton();
+    }
+  }
+}
+
+async function createMcpCredential(event) {
+  event.preventDefault();
+  if (controlPlane.currentAdmin?.role !== "owner" || mcpAccess.loading || mcpAccess.creating || mcpAccess.issued) return;
+  const form = event.currentTarget;
+  const scopes = [...form.querySelectorAll('input[name="scope"]:checked')].map((input) => input.value);
+  if (!scopes.length) { setText("#mcp-access-status", "请至少选择一项权限。"); return; }
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  mcpAccess.creating = true;
+  syncMcpCreateButton();
+  try {
+    const created = await api("/api/mcp/tokens", { method: "POST", body: JSON.stringify({
+      name: form.elements.name.value.trim(), scopes, expiresInDays: Number(form.elements.expiresInDays.value)
+    }) });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    const { token, ...metadata } = created;
+    mcpAccess.tokens = [metadata, ...mcpAccess.tokens.filter((entry) => entry.id !== metadata.id)];
+    mcpAccess.issued = { id: metadata.id };
+    document.querySelector("#mcp-issued-token").value = token;
+    document.querySelector("#mcp-issued-config").value = JSON.stringify({ mcpServers: { raylink: {
+      type: "http", url: mcpAccess.endpoint, headers: { Authorization: `Bearer ${token}` }
+    } } }, null, 2);
+    document.querySelector("#mcp-issued").hidden = false;
+    renderMcpTokens();
+    setText("#mcp-access-status", "凭据已创建。保存下方令牌后关闭一次性显示区，再创建其他凭据。");
+    document.querySelector("#mcp-issued-token").focus();
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) handleMcpError(error, "创建凭据失败");
+  } finally {
+    if (generation === mcpAccess.generation) { mcpAccess.creating = false; syncMcpCreateButton(); }
+  }
+}
+
+async function revokeMcpCredential(button) {
+  if (controlPlane.currentAdmin?.role !== "owner" || button.disabled) return;
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  button.disabled = true;
+  try {
+    const revoked = await api(`/api/mcp/tokens/${encodeURIComponent(button.dataset.revokeMcp)}`, { method: "DELETE" });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    mcpAccess.tokens = mcpAccess.tokens.map((token) => token.id === revoked.id ? revoked : token);
+    if (mcpAccess.issued?.id === revoked.id) clearMcpSecret();
+    renderMcpTokens();
+    setText("#mcp-access-status", "凭据已撤销，使用此令牌的新请求将被拒绝。");
+    showToast("凭据已撤销", "已停止此 Agent 的访问权限。");
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) { handleMcpError(error, "撤销失败"); button.disabled = false; }
+  }
+}
+
 function renderAdminAccess() {
   const target = document.querySelector("#admin-access-list");
   const auditTarget = document.querySelector("#audit-event-list");
@@ -1405,6 +1573,7 @@ function setProfileMenu(open) {
 }
 
 function showAdminLogin() {
+  clearMcpAccess();
   if (bootstrapRefreshTimer) {
     clearInterval(bootstrapRefreshTimer);
     bootstrapRefreshTimer = null;
@@ -1425,6 +1594,7 @@ function showAdminLogin() {
 }
 
 async function logoutControlPlane(button) {
+  clearMcpAccess();
   button.disabled = true;
   const previousMarkup = button.innerHTML;
   button.textContent = "正在退出…";
@@ -2758,6 +2928,7 @@ async function generateRealityKeypair(form) {
 }
 
 function selectWorkspaceTab(kind, value) {
+  if (kind === "system" && ["mcp", "access"].includes(value) && controlPlane.currentAdmin?.role !== "owner") value = "hosts";
   const buttons = [...document.querySelectorAll(`[data-${kind}-tab]`)];
   buttons.forEach((button) => {
     const active = button.dataset[`${kind}Tab`] === value;
@@ -2900,8 +3071,28 @@ document.addEventListener("click", async (event) => {
     if (systemTab.dataset.systemTab === "readiness" && !controlPlane.readiness) {
       await refreshReadiness(document.querySelector("[data-refresh-readiness]"));
     }
+    if (systemTab.dataset.systemTab === "mcp") await loadMcpAccess();
     return;
   }
+
+  if (event.target.closest("[data-refresh-mcp]")) { await loadMcpAccess(); return; }
+  const mcpPreset = event.target.closest("[data-mcp-preset]");
+  if (mcpPreset) { applyMcpPreset(mcpPreset.dataset.mcpPreset); return; }
+  if (event.target.closest("[data-dismiss-mcp]")) {
+    clearMcpSecret();
+    setText("#mcp-access-status", "一次性显示已关闭。令牌仍然有效，无法再次查看；不再使用时请撤销。");
+    document.querySelector("#mcp-create-submit").focus();
+    return;
+  }
+  const copyMcp = event.target.closest("[data-copy-mcp]");
+  if (copyMcp) {
+    if (controlPlane.currentAdmin?.role !== "owner" || !mcpAccess.issued) return;
+    const value = document.querySelector(copyMcp.dataset.copyMcp === "config" ? "#mcp-issued-config" : "#mcp-issued-token").value;
+    if (value) await copyText(value, "连接凭据已复制，请仅粘贴到受信任的 Agent 客户端。");
+    return;
+  }
+  const revokeMcp = event.target.closest("[data-revoke-mcp]");
+  if (revokeMcp) { await revokeMcpCredential(revokeMcp); return; }
 
   const readinessButton = event.target.closest("[data-refresh-readiness], [data-export-readiness]");
   if (readinessButton) {
@@ -3070,6 +3261,10 @@ elements.drawerScrim.addEventListener("click", closeDrawer);
 elements.drawerSave.addEventListener("click", saveDrawer);
 document.querySelector("#certificate-settings-form").addEventListener("submit", saveCertificateSettings);
 document.querySelector("#admin-create-form")?.addEventListener("submit", createAdministrator);
+document.querySelector("#mcp-create-form").addEventListener("submit", createMcpCredential);
+document.querySelector("#mcp-scope-list").addEventListener("change", () => {
+  document.querySelectorAll("[data-mcp-preset]").forEach((button) => button.setAttribute("aria-pressed", "false"));
+});
 document.querySelector("#routing-mode-form")?.addEventListener("submit", saveRoutingMode);
 document.querySelector("#routing-rule-form")?.addEventListener("submit", addRoutingRule);
 document.querySelector("#routing-diagnose-form")?.addEventListener("submit", diagnoseRouting);

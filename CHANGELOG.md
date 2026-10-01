@@ -2,6 +2,10 @@
 
 ## 0.2.33 (unreleased)
 
+- Add HTTP MCP management with 42 scoped tools and an Owner credential console; preserve current role checks and the existing management workflows.
+- Encrypt durable MCP write outcomes, deduplicate retries across restarts, and report uncertain crash outcomes without blindly reapplying changes.
+- Bundle locked production npm dependencies, validate them before service switching, and include them in release SBOMs.
+
 - Resolve hostname requests before IP routing, preserve explicit rule priority, and align system/domestic/AI DNS with their selected exits.
 - Default sing-box to TCP candidates, give AI an independent stable selection, and preserve active connections during policy changes.
 - Correct Egern top-level selection and provide complete verified offline China rules, atomic rule-set updates and visible version/degradation status.

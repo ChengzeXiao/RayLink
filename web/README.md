@@ -16,6 +16,7 @@ RayLink Web 由同源 Node.js 控制面直接提供。界面按四个工作区�
 项目不依赖前端构建工具，但数据与操作依赖同源 API。请从仓库根目录运行：
 
 ```bash
+npm ci --ignore-scripts
 npm start
 ```
 

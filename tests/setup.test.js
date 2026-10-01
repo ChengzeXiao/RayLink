@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -847,7 +847,8 @@ test("the release package keeps every installer dependency executable", async ()
     "../deploy/package-release.sh",
     "../deploy/restore-database.sh",
     "../deploy/check-database-compatibility.mjs",
-    "../deploy/generate-release-metadata.mjs"
+    "../deploy/generate-release-metadata.mjs",
+    "../deploy/prepare-runtime-dependencies.mjs"
   ]) {
     const dependency = await stat(new URL(relativePath, import.meta.url));
     assert.notEqual(
@@ -971,7 +972,7 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.match(packager, /CHANGELOG\.md/);
 });
 
-async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingCronet = false } = {}) {
+async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingCronet = false, dependencyFailure = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-upgrade-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const installRoot = join(directory, "installed");
@@ -1052,6 +1053,15 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
   );
   await chmod(join(nodeRoot, "bin", "node"), 0o755);
 
+  let sourceRoot = new URL("..", import.meta.url).pathname;
+  if (dependencyFailure) {
+    sourceRoot = join(directory, "candidate-source");
+    await mkdir(sourceRoot);
+    for (const path of ["package.json", "server", "web", "deploy"]) {
+      await cp(new URL(`../${path}`, import.meta.url), join(sourceRoot, path), { recursive: true });
+    }
+    await writeFile(join(sourceRoot, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { "unlocked-dependency": "1.0.0" } } } }));
+  }
   let error = null;
   try {
     await execFile("bash", [
@@ -1070,7 +1080,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
         RAYLINK_SERVICE_UNIT: serviceUnit,
         RAYLINK_ENV_FILE: environmentFile,
         RAYLINK_PUBLIC_IP: "203.0.113.10",
-        RAYLINK_SOURCE_DIR: new URL("..", import.meta.url).pathname,
+        RAYLINK_SOURCE_DIR: sourceRoot,
         RAYLINK_CRONET_SOURCE: cronetSource,
         RAYLINK_CRONET_PATH: cronetInstallPath,
         RAYLINK_PORT: "4173"
@@ -1092,6 +1102,14 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
     serviceUnit
   };
 }
+
+test("dependency verification failure leaves the installed service and application untouched", async (t) => {
+  const { error, operations, installRoot } = await runControlPlaneUpgradeHarness(t, { dependencyFailure: true });
+  assert.ok(error, "an inconsistent dependency lock must reject the candidate");
+  assert.match(error.stderr, /生产依赖检查失败/);
+  assert.ok(!operations.includes("systemctl stop raylink"), "preflight must not interrupt the existing service");
+  assert.equal(JSON.parse(await readFile(join(installRoot, "package.json"), "utf8")).version, "0.2.12");
+});
 
 test("the control-plane upgrader backfills the local Host dial IP", async (t) => {
   const { environmentFile, error } = await runControlPlaneUpgradeHarness(t);
