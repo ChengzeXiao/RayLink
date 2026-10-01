@@ -390,11 +390,15 @@ export class NodeUsageCollector {
     if (!/^[a-zA-Z0-9_.:-]{1,160}$/.test(runtimeInstanceId)) {
       throw new Error("Runtime 实例编号无效");
     }
+    const users = normalizeV2RayStats(await this.query());
+    if (String(await this.instanceProvider()) !== runtimeInstanceId) {
+      throw new Error("采样期间 Runtime 实例发生变化，等待下一轮重新采样");
+    }
     return {
       sampleId: this.sampleId(),
       runtimeInstanceId,
       observedAt: this.clock().toISOString(),
-      users: normalizeV2RayStats(await this.query())
+      users
     };
   }
 }
@@ -882,18 +886,7 @@ export class NodeRuntimeAdapter {
       await rename(temporaryPath, this.configPath);
       configActivated = true;
       if (this.runtimeMode === "systemd") {
-        try {
-          await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
-        } catch (error) {
-          if (hadConfig && await pathExists(backupPath)) {
-            await copyFile(backupPath, this.configPath);
-            await this.commandRunner("systemctl", ["restart", this.systemdUnit]).catch(() => {});
-          } else {
-            await rm(this.configPath, { force: true });
-          }
-          configActivated = false;
-          throw error;
-        }
+        await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
       }
       let activation = null;
       if (task.activation) {
@@ -940,12 +933,14 @@ export class NodeRuntimeAdapter {
       if (configActivated) {
         try {
           if (hadConfig && await pathExists(backupPath)) {
-            await copyFile(backupPath, this.configPath);
+            await copyFile(backupPath, temporaryPath);
+            await rename(temporaryPath, this.configPath);
             if (this.runtimeMode === "systemd") {
               await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
             }
           } else {
             await rm(this.configPath, { force: true });
+            if (this.runtimeMode === "systemd") await this.stopSystemd();
           }
         } catch (rollbackError) {
           rolledBack = false;
@@ -979,6 +974,21 @@ export class NodeRuntimeAdapter {
       throw new Error("无法定位 sing-box 可执行文件");
     }
     return resolvedPath;
+  }
+
+  async stopSystemd() {
+    await this.commandRunner("systemctl", ["stop", this.systemdUnit], { timeout: 20_000 });
+    let state;
+    try {
+      const { stdout } = await this.commandRunner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      state = String(stdout).trim();
+    } catch (error) {
+      if (error.code !== 3) throw error;
+      state = String(error.stdout || error.cause?.stdout || "").trim();
+    }
+    if (!["inactive", "failed"].includes(state)) {
+      throw new Error(`${this.systemdUnit} 停止后仍未确认退出（${state || "未知状态"}）`);
+    }
   }
 
   async restartAndVerify(expectedVersion) {
@@ -1383,8 +1393,21 @@ export class RayLinkNode {
     });
   }
 
+  async flushTaskReceipt() {
+    const state = await this.ensureEnrolled();
+    const receipt = state.pendingTaskReceipt;
+    if (!receipt) return false;
+    await this.completeTask(receipt.taskId, receipt.attempt, receipt.status, receipt.result);
+    const next = { ...state };
+    delete next.pendingTaskReceipt;
+    await this.persistState(next);
+    return true;
+  }
+
   async pollOnce() {
     const state = await this.ensureEnrolled();
+    // Report the previous execution before claiming work, including after a Node restart.
+    if (await this.flushTaskReceipt()) return true;
     const metadata = await this.metadataProvider();
     await this.authenticatedRequest("/api/node/heartbeat", {
       method: "POST",
@@ -1413,15 +1436,16 @@ export class RayLinkNode {
     }
     const task = await this.authenticatedRequest("/api/node/tasks/next");
     if (!task) return false;
+    let receipt;
     try {
       const result = task.kind === "publish-config"
         ? await this.runtimeAdapter.publish(task.payload, state.encryptionPrivateKey)
         : task.kind === "upgrade-runtime"
           ? await this.runtimeAdapter.upgrade(task.payload)
           : (() => { throw new Error(`不支持的节点任务：${task.kind}`); })();
-      await this.completeTask(task.id, task.attempt, "succeeded", result);
+      receipt = { taskId: task.id, attempt: task.attempt, status: "succeeded", result };
     } catch (error) {
-      await this.completeTask(task.id, task.attempt, "failed", {
+      receipt = { taskId: task.id, attempt: task.attempt, status: "failed", result: {
         error: error.message,
         ...(error.previousVersion ? { previousVersion: error.previousVersion } : {}),
         ...(error.code ? { code: error.code } : {}),
@@ -1433,8 +1457,10 @@ export class RayLinkNode {
         ...(typeof error.packageMetadataRestored === "boolean"
           ? { packageMetadataRestored: error.packageMetadataRestored }
           : {})
-      });
+      } };
     }
+    await this.persistState({ ...state, pendingTaskReceipt: receipt });
+    await this.flushTaskReceipt();
     return true;
   }
 

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { BbrManager } from "./bbr.js";
 import { BackupManager } from "./backup.js";
 import { evaluateOperationalAlerts } from "./alerts.js";
+import { buildReadinessReport } from "./readiness.js";
 import { AlertWebhookDispatcher } from "./alert-dispatcher.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
 import { RayLinkStore } from "./database.js";
@@ -659,6 +660,13 @@ export async function createRayLinkApp(options) {
   let operationalMaintenanceTimer = null;
   let backupTimer = null;
   let backupStartupTimer = null;
+  const backupOperations = new Set();
+  const trackBackup = (operation) => {
+    const promise = Promise.resolve().then(operation);
+    backupOperations.add(promise);
+    promise.finally(() => backupOperations.delete(promise)).catch(() => {});
+    return promise;
+  };
   let alertTimer = null;
   let localRuntimeOperation = null;
   const operationalMaintenanceIntervalMs = Math.max(
@@ -669,16 +677,16 @@ export async function createRayLinkApp(options) {
     0,
     Number(options.backupIntervalMs ?? 24 * 60 * 60 * 1000)
   );
-  const createScheduledBackup = () => backupManager.create().catch((error) => {
+  const createScheduledBackup = () => trackBackup(() => backupManager.create().catch((error) => {
     console.warn(`[RayLink] Scheduled database backup failed: ${error.message}`);
-  });
-  const createInitialBackup = async () => {
+  }));
+  const createInitialBackup = () => trackBackup(async () => {
     try {
       if (!(await backupManager.list()).length) await backupManager.create();
     } catch (error) {
       console.warn(`[RayLink] Initial database backup failed: ${error.message}`);
     }
-  };
+  });
   const alertIntervalMs = Math.max(
     0,
     Number(options.alertIntervalMs ?? 60_000)
@@ -688,6 +696,27 @@ export async function createRayLinkApp(options) {
     deployments: store.listDeployments(),
     backups: await backupManager.list()
   });
+  const routingRuleSetStatus = () => typeof ruleSetCache.status === "function"
+    ? { ...ruleSetCache.status(), bundledVersion: getBundledRoutingVersion() } : null;
+  let readinessPromise = null;
+  const currentReadiness = () => {
+    // Multiple operators/export clicks share one disk integrity scan.
+    if (readinessPromise) return readinessPromise;
+    readinessPromise = (async () => {
+      const backups = await backupManager.list();
+      const backupVerification = backups[0]
+        ? await backupManager.verify(backups[0].filename).catch(() => ({ valid: false })) : null;
+      const runtime = await runtimeManager.status();
+      const hosts = store.listHosts();
+      const deployments = store.listDeployments();
+      return buildReadinessReport({
+        hosts, deployments, backups, backupVerification, runtime,
+        routingPolicy: store.routingPolicy(), ruleSets: routingRuleSetStatus(),
+        alerts: evaluateOperationalAlerts({ hosts, deployments, backups })
+      });
+    })().finally(() => { readinessPromise = null; });
+    return readinessPromise;
+  };
   const dispatchOperationalAlerts = async () => {
     try {
       await alertDispatcher.dispatch(await currentAlerts());
@@ -1646,6 +1675,11 @@ export async function createRayLinkApp(options) {
           return;
         }
 
+        if (request.method === "GET" && url.pathname === "/api/operations/readiness") {
+          sendJson(response, 200, await currentReadiness());
+          return;
+        }
+
         if (request.method === "POST" && url.pathname === "/api/backups") {
           sendJson(response, 201, await backupManager.create());
           return;
@@ -1689,6 +1723,8 @@ export async function createRayLinkApp(options) {
               )
             };
           });
+          const alerts = evaluateOperationalAlerts({ hosts, deployments, backups });
+          const routingRuleSets = routingRuleSetStatus();
           sendJson(response, 200, {
             ...bootstrap,
             hosts,
@@ -1699,18 +1735,13 @@ export async function createRayLinkApp(options) {
             access: store.setupStatus().access,
             certificate: store.certificateSettings(),
             routingPolicy: store.routingPolicy(),
-            routingRuleSets: typeof ruleSetCache.status === "function"
-              ? { ...ruleSetCache.status(), bundledVersion: getBundledRoutingVersion() } : null,
+            routingRuleSets,
             telemetry: store.telemetryOverview(),
             runtime,
             runtimePreview: runtimeManager.preview(),
             deployments,
             backups,
-            alerts: evaluateOperationalAlerts({
-              hosts,
-              deployments,
-              backups
-            }),
+            alerts,
             alertDelivery: alertDispatcher.status(),
             installation,
             runtimeUpdate: typeof installer.releaseStatus === "function"
@@ -2216,6 +2247,7 @@ export async function createRayLinkApp(options) {
       if (server.listening) {
         await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       }
+      await Promise.allSettled([...backupOperations]);
       store.close();
     }
   };

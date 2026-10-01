@@ -1,9 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { randomBytes as cryptoRandomBytes } from "node:crypto";
+import { createHash, randomBytes as cryptoRandomBytes } from "node:crypto";
 import dgram from "node:dgram";
 import net from "node:net";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 
 import {
   protocolAvailability,
@@ -42,6 +42,16 @@ function activationError(code, message, statusCode = 422) {
 const PROTOCOL_CONNECTION_SAMPLE_COUNT = 5;
 const PROTOCOL_CONNECTION_MINIMUM_SUCCESSES = 4;
 const PROTOCOL_HEALTH_WINDOW_ROUNDS = 12;
+
+function measurementFingerprint(host, configuredProfiles, type) {
+  if (!host) return null;
+  const appliedProfiles = host.appliedProtocols?.length ? host.appliedProtocols : configuredProfiles;
+  return createHash("sha256").update(JSON.stringify({
+    address: host.address,
+    configured: configuredProfiles.find((profile) => profile.type === type),
+    applied: appliedProfiles.find((profile) => profile.type === type)
+  })).digest("hex");
+}
 
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right);
@@ -460,6 +470,16 @@ export class ProtocolActivationManager {
         ? host.appliedProtocols
         : configuredProfiles;
       const profiles = appliedProfiles.filter((profile) => profile.enabled);
+      const fingerprints = new Map(profiles.map((profile) => [
+        profile.type, measurementFingerprint(host, configuredProfiles, profile.type)
+      ]));
+      const configurationUnchanged = (type) => {
+        const currentHost = this.store.getHost(hostId);
+        return currentHost && measurementFingerprint(
+          currentHost, this.store.listHostProtocolConfigs(hostId), type
+        ) === fingerprints.get(type);
+      };
+      const skipped = (type) => ({ type, status: "skipped", reason: "configuration-changed", retryable: true });
       const serverConfig = typeof this.runtimeManager.compileHostRuntimeConfig === "function"
         ? this.runtimeManager.compileHostRuntimeConfig(hostId, appliedProfiles)
         : null;
@@ -469,6 +489,11 @@ export class ProtocolActivationManager {
       const checkedAt = new Date().toISOString();
       const results = [];
       for (const profile of profiles) {
+        if (!isDeepStrictEqual(profile, configuredProfiles.find((entry) => entry.type === profile.type))
+          || !configurationUnchanged(profile.type)) {
+          results.push(skipped(profile.type));
+          continue;
+        }
         const policy = protocolActivationPolicy(profile.type);
         if (policy.exposure !== "public" || !profile.port) {
           const unsupportedReason = policy.exposure === "private"
@@ -501,6 +526,7 @@ export class ProtocolActivationManager {
         }
         const existing = existingActivations.get(profile.type);
         let publicCheck;
+        let result;
         const latencies = [];
         let lastProbe = null;
         let lastError = null;
@@ -564,14 +590,14 @@ export class ProtocolActivationManager {
             lastSuccessAt: checkedAt,
             checkedAt
           };
-          results.push({
+          result = {
             type: profile.type,
             status: "available",
             latencyMs,
             jitterMs,
             sampleCount: sampleSummary.count,
             successfulSamples: sampleSummary.successful
-          });
+          };
         } catch (error) {
           const timedOut = /tim(?:e|ed)[ -]?out|超时/i.test(
             `${error.code || ""} ${error.message || ""}`
@@ -610,7 +636,7 @@ export class ProtocolActivationManager {
             checkedAt,
             error: String(error.message || "协议探测失败").slice(0, 300)
           };
-          results.push({
+          result = {
             type: profile.type,
             status: confirmedFailure
               ? timedOut ? "timeout" : "unreachable"
@@ -623,7 +649,12 @@ export class ProtocolActivationManager {
               : null,
             sampleCount: PROTOCOL_CONNECTION_SAMPLE_COUNT,
             successfulSamples: sampleSummary.successful
-          });
+          };
+        }
+        // A probe may finish after an edit invalidated its evidence. Never revive it.
+        if (!configurationUnchanged(profile.type)) {
+          results.push(skipped(profile.type));
+          continue;
         }
         this.store.setProtocolActivation(hostId, profile.type, {
           ...(existing || {}),
@@ -633,6 +664,7 @@ export class ProtocolActivationManager {
           publicCheck,
           updatedAt: checkedAt
         });
+        results.push(result);
       }
       return { hostId, checkedAt, results };
     } finally {

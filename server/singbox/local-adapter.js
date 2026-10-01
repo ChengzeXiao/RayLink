@@ -45,7 +45,7 @@ export class LocalSingBoxAdapter {
 
   async binaryVersion() {
     try {
-      const { stdout } = await execFile(this.binaryPath, ["version"], { timeout: 5_000 });
+      const { stdout } = await this.runner(this.binaryPath, ["version"], { timeout: 5_000 });
       return String(stdout).match(/sing-box version\s+([^\s]+)/i)?.[1] || String(stdout).trim() || null;
     } catch (error) {
       if (error.code === "ENOENT" && this.mode === "dry-run") return null;
@@ -55,7 +55,7 @@ export class LocalSingBoxAdapter {
 
   async validate(candidatePath) {
     try {
-      await execFile(this.binaryPath, ["check", "-c", candidatePath], {
+      await this.runner(this.binaryPath, ["check", "-c", candidatePath], {
         timeout: 15_000,
         maxBuffer: 1024 * 1024
       });
@@ -71,11 +71,26 @@ export class LocalSingBoxAdapter {
 
   async restartSystemd() {
     try {
-      await execFile("systemctl", ["restart", this.systemdUnit], { timeout: 20_000 });
-      const { stdout } = await execFile("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      await this.runner("systemctl", ["restart", this.systemdUnit], { timeout: 20_000 });
+      const { stdout } = await this.runner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
       if (String(stdout).trim() !== "active") throw new Error(`${this.systemdUnit} is not active`);
     } catch (error) {
       throw commandFailure(error, "sing-box 服务重启失败");
+    }
+  }
+
+  async stopSystemd() {
+    await this.runner("systemctl", ["stop", this.systemdUnit], { timeout: 20_000 });
+    let state;
+    try {
+      const { stdout } = await this.runner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      state = String(stdout).trim();
+    } catch (error) {
+      if (error.code !== 3) throw error;
+      state = String(error.stdout || "").trim();
+    }
+    if (!["inactive", "failed"].includes(state)) {
+      throw new Error(`${this.systemdUnit} 停止后仍未确认退出（${state || "未知状态"}）`);
     }
   }
 
@@ -102,11 +117,19 @@ export class LocalSingBoxAdapter {
         try {
           await this.restartSystemd();
         } catch (error) {
-          if (hadActiveConfig) {
-            await copyFile(this.backupPath, this.activePath);
-            await this.restartSystemd().catch(() => {});
-          } else {
-            await rm(this.activePath, { force: true });
+          try {
+            if (hadActiveConfig) {
+              await copyFile(this.backupPath, candidatePath);
+              await rename(candidatePath, this.activePath);
+              await this.restartSystemd();
+            } else {
+              await rm(this.activePath, { force: true });
+              await this.stopSystemd();
+            }
+            error.rolledBack = true;
+          } catch (rollbackError) {
+            error.rolledBack = false;
+            error.rollbackError = rollbackError.message;
           }
           throw error;
         }
@@ -145,7 +168,7 @@ export class LocalSingBoxAdapter {
     }
 
     try {
-      const { stdout } = await execFile("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      const { stdout } = await this.runner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
       return {
         state: String(stdout).trim() === "active" ? "running" : "stopped",
         mode: this.mode,

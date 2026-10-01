@@ -270,6 +270,8 @@ npm run check:production
 
 ## 项目资料
 
+- [本轮系统审查、修复与验证](docs/system-review-2026-10-01.md)
+- [运行体检与实用功能设计](docs/practical-features.md)
 - [应用源码说明](docs/application.md)
 - [生产部署手册](deploy/README.md)
 - [sing-box 协议支持矩阵](docs/sing-box-protocol-support.md)

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { RayLinkStore } from "../server/database.js";
 
 import {
   ProtocolActivationManager,
@@ -224,6 +228,47 @@ test("Host latency measurement records TCP and UDP protocol results without chan
   assert.equal(activations.get("shadowsocks").publicCheck.latencyMs, 24);
   assert.equal(activations.get("hysteria2").publicCheck.latencyMs, 61);
 });
+
+for (const change of ["endpoint", "port"]) {
+test(`Host measurement discards an in-flight result after the ${change} changes`, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-probe-endpoint-"));
+  const store = new RayLinkStore({ dbPath: join(directory, "raylink.db"), adminUsername: "admin", adminPassword: "test-password" });
+  t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+  store.updateHostProtocolConfig("local", "shadowsocks", { enabled: true });
+  store.markHostProtocolsApplied("local", store.listHostProtocolConfigs("local"));
+  let started;
+  let release;
+  const probing = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const probed = [];
+  const manager = new ProtocolActivationManager({ store, runtimeManager: {}, installer: {},
+    protocolProbe: async ({ address, port }) => {
+      probed.push({ address, port });
+      started();
+      await gate;
+      return { reachable: true, latencyMs: 20, probe: "sing-box-tools-fetch" };
+    }
+  });
+  const pending = manager.measureHost({ hostId: "local" });
+  await probing;
+  if (change === "endpoint") store.updateHost("local", { address: "changed.example.com" });
+  else store.updateHostProtocolConfig("local", "shadowsocks", { port: 18388 });
+  release();
+  const result = await pending;
+  assert.deepEqual(result.results, [{ type: "shadowsocks", status: "skipped", reason: "configuration-changed", retryable: true }]);
+  assert.equal(store.getHost("local").protocolActivations.find((entry) => entry.type === "shadowsocks")?.publicCheck, undefined);
+  if (change === "port") {
+    const beforePublication = await manager.measureHost({ hostId: "local" });
+    assert.deepEqual(beforePublication.results, [{ type: "shadowsocks", status: "skipped", reason: "configuration-changed", retryable: true }]);
+    store.markHostProtocolsApplied("local", store.listHostProtocolConfigs("local"));
+  }
+  const retried = await manager.measureHost({ hostId: "local" });
+  assert.equal(retried.results[0].status, "available");
+  assert.equal(probed.at(-1).address, store.getHost("local").address);
+  assert.equal(probed.at(-1).port, store.listHostProtocolConfigs("local").find((entry) => entry.type === "shadowsocks").port);
+  assert.equal(store.getHost("local").protocolActivations.find((entry) => entry.type === "shadowsocks").publicCheck.reachable, true);
+});
+}
 
 test("Host connection measurement reports P50, P95 and robust jitter from five samples", async () => {
   const { manager, activations } = fixture("shadowsocks", {

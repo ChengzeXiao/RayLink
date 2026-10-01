@@ -8,11 +8,34 @@ const source = await readFile(
   "utf8"
 );
 
-function loadPresenter() {
-  const context = { window: {}, Intl, Date };
+function loadPresenter(now = "2026-07-28T12:20:00.000Z") {
+  class Clock extends Date { static now() { return new Date(now).getTime(); } }
+  const context = { window: {}, Intl, Date: Clock };
   vm.runInNewContext(source, context);
   return context.window.RayLinkProtocolHealth;
 }
+
+test("missing metrics are unknown rather than fabricated zero latency or success", () => {
+  const result = loadPresenter().present({ publicCheck: {
+    checkedAt: "2026-07-28T12:19:49.365Z", reachable: true, availability: "available",
+    latencyMs: null, jitterMs: null, p95Ms: null, healthWindow: { successRate: null }
+  } });
+  assert.equal(result.latencyLabel, "—");
+  assert.equal(result.jitterLabel, "—");
+  assert.equal(result.p95Label, "—");
+  assert.equal(result.rollingAvailabilityLabel, "—");
+  assert.equal(result.availabilityLabel, "可用");
+  assert.notEqual(result.className, "good");
+});
+
+test("stale, invalid and future health evidence cannot be shown as current availability", () => {
+  for (const checkedAt of ["2026-07-28T12:00:00Z", "invalid", "2026-07-29T12:00:00Z"]) {
+    const result = loadPresenter().present({ publicCheck: { checkedAt, reachable: true,
+      availability: "available", latencyMs: 20 } });
+    assert.equal(result.availabilityLabel, "待复检");
+    assert.equal(result.className, "warning");
+  }
+});
 
 test("protocol health presentation exposes availability, connection time, jitter and check time", () => {
   const presenter = loadPresenter();

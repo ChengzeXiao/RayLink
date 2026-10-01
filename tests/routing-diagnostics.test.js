@@ -3,6 +3,41 @@ import test from "node:test";
 
 import { diagnoseRoutingDomain } from "../server/routing/diagnostics.js";
 
+test("routing diagnostics returns a retryable timeout when system DNS does not answer", async () => {
+  let release;
+  const lookup = () => new Promise((resolve) => { release = resolve; });
+  const pending = diagnoseRoutingDomain({ domain: "unknown.example", lookup, lookupTimeoutMs: 10 });
+  const result = await Promise.race([
+    pending.then(() => ({ code: "UNEXPECTED_SUCCESS" }), (error) => error),
+    new Promise((resolve) => setTimeout(() => resolve({ code: "TEST_WAIT_LIMIT" }), 500))
+  ]);
+  release([]);
+  assert.equal(result.code, "DOMAIN_RESOLUTION_TIMEOUT");
+  assert.equal(result.statusCode, 504);
+  assert.equal(result.retryable, true);
+});
+
+test("timed-out diagnostics coalesce identical DNS work until the native lookup settles", async () => {
+  let calls = 0, release;
+  const lookup = () => { calls++; return new Promise((resolve) => { release = resolve; }); };
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(diagnoseRoutingDomain({ domain: "pending.example", lookup, lookupTimeoutMs: 10 }), { code: "DOMAIN_RESOLUTION_TIMEOUT" });
+  }
+  release([]);
+  assert.equal(calls, 1, "caller timeout must not start another uncancellable system lookup");
+});
+
+test("routing diagnostics bounds simultaneous system DNS work across domains", async () => {
+  const releases = [];
+  const lookup = () => new Promise((resolve) => releases.push(resolve));
+  const results = await Promise.all([0, 1, 2, 3, 4].map((i) => diagnoseRoutingDomain({
+    domain: `pending${i}.example`, lookup, lookupTimeoutMs: 10
+  }).catch((error) => error)));
+  releases.forEach((release) => release([]));
+  assert.equal(releases.length, 4);
+  assert.equal(results.filter((error) => error.code === "DOMAIN_RESOLUTION_BUSY" && error.statusCode === 503 && error.retryable).length, 1);
+});
+
 test("routing diagnostics resolves an unknown domain and explains a China IP decision", async () => {
   const result = await diagnoseRoutingDomain({
     domain: "service.example",

@@ -326,6 +326,7 @@
           </div>
           <div class="workspace-tabs" role="tablist" aria-label="系统设置">
             <button class="active" data-system-tab="hosts" role="tab" aria-selected="true">主机</button>
+            <button data-system-tab="readiness" role="tab" aria-selected="false">运行体检</button>
             <button data-system-tab="certificates" role="tab" aria-selected="false">证书</button>
             <button data-system-tab="maintenance" role="tab" aria-selected="false">版本与备份</button>
             <button data-system-tab="access" data-owner-only role="tab" aria-selected="false">权限与审计</button>
@@ -359,6 +360,15 @@
               </div>
             </section>
           </div>
+          <section class="resource-panel readiness-panel" data-system-panel="readiness" hidden>
+            <div class="resource-panel-heading">
+              <div><p class="eyebrow">运行证据</p><h2>运行体检</h2><p>汇总配置生效、主机、协议检测、计量、分流与备份状态，并给出处理入口。</p></div>
+              <div class="heading-actions"><button class="button secondary" data-refresh-readiness>刷新体检</button><button class="button secondary" data-export-readiness>导出诊断报告</button></div>
+            </div>
+            <p id="readiness-summary" role="status" aria-live="polite">等待读取体检结果…</p>
+            <div id="readiness-checks" class="readiness-checks"></div>
+            <div id="readiness-limitations" class="readiness-limitations"></div>
+          </section>
           <section class="system-card-grid" data-system-panel="certificates" hidden>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">ACME 账户</p><h2>证书通知邮箱</h2><p>用于自动签发证书和接收证书到期通知。Naive、Hysteria、TUIC 与 Hysteria 2 一键启用时会自动读取这里的邮箱。</p><form class="certificate-settings-form" id="certificate-settings-form"><label class="field"><span>通知邮箱</span><input id="certificate-email" name="email" type="email" autocomplete="email" placeholder="ops@example.com" required><small class="field-error"></small></label><div class="heading-actions"><button class="button primary" type="submit">保存邮箱</button><span class="status-badge neutral" id="certificate-mode"><i></i>未配置</span></div></form></div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">TLS 资产</p><h2>证书路径由主机协议管理</h2><p>一键启用会优先使用主机域名自动签发证书；手动证书仍可在主机的“入口协议”中配置。</p><button class="text-button" data-system-tab="hosts">查看主机 <svg><use href="#i-arrow"/></svg></button></div></article>

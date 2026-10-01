@@ -67,9 +67,10 @@ test("deployment failure is recorded and leaves the previous runtime untouched",
     adminUsername: "admin",
     adminPassword: "Admin@2026"
   });
+  let failure = new Error("sing-box check failed");
   const adapter = {
     async publish() {
-      throw new Error("sing-box check failed");
+      throw failure;
     },
     async status() {
       return { state: "unknown", mode: "test" };
@@ -83,6 +84,12 @@ test("deployment failure is recorded and leaves the previous runtime untouched",
 
   await assert.rejects(() => manager.publish(), /sing-box check failed/);
   assert.equal(store.listDeployments()[0].status, "failed");
+  failure = Object.assign(new Error("candidate restart failed"), {
+    rolledBack: false, rollbackError: "previous service is unavailable"
+  });
+  await assert.rejects(() => manager.publish(), /candidate restart failed/);
+  const failed = store.listDeployments().find((deployment) => deployment.error?.includes("candidate restart failed"));
+  assert.match(failed.error, /previous service is unavailable/);
 });
 
 test("runtime manager rejects a concurrent publication", async (t) => {
@@ -130,6 +137,40 @@ test("runtime manager rejects a concurrent publication", async (t) => {
     store.getHost("local").appliedProtocols.find((profile) => profile.type === "vless").enabled,
     false
   );
+  assert.equal(store.listDeployments().length, 1);
+});
+
+test("runtime manager reserves publication before asynchronous TLS preparation", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "raylink-deploy-preparation-"));
+  const store = new RayLinkStore({
+    dbPath: join(dataDir, "raylink.db"), adminUsername: "admin", adminPassword: "test-password"
+  });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const host = store.createRemoteHost({ name: "Remote", address: "remote.example.com", region: "test" });
+  store.enrollNode(host.enrollmentToken, {
+    hostname: "remote", platform: "linux", architecture: "amd64",
+    agentVersion: "0.8.0", runtimeVersion: "1.14.2"
+  });
+  let release;
+  let started;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const preparing = new Promise((resolve) => { started = resolve; });
+  let preparations = 0;
+  const adapter = new RecordingRuntimeAdapter();
+  const manager = new RuntimeManager({ store, adapter, tlsAssetPackager: {
+    async prepare(config) {
+      if (++preparations === 1) { started(); await gate; }
+      return { config, tlsAssets: [] };
+    }
+  } });
+  const first = manager.publish();
+  await preparing;
+  let conflict;
+  try { await manager.publish(); } catch (error) { conflict = error; }
+  release();
+  await first;
+  assert.equal(conflict?.code, "DEPLOYMENT_IN_PROGRESS");
+  assert.equal(adapter.publications.length, 1);
   assert.equal(store.listDeployments().length, 1);
 });
 

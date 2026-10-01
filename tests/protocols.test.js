@@ -405,6 +405,30 @@ test("multi-host client configuration exposes each host's enabled protocols thro
   );
 });
 
+test("smart UDP admission rejects expired health while keeping explicit UDP choices", () => {
+  const now = Date.parse("2026-10-01T12:00:00Z");
+  const profiles = defaultProtocolConfigs().filter((profile) => ["vless", "hysteria2"].includes(profile.type)).map((profile) => ({
+    ...profile, enabled: true, tls: { ...profile.tls, mode: "certificate", serverName: "node.example.com" }
+  }));
+  const generate = (checkedAt, roundsAt = checkedAt, jitterMs = 10) => buildMultiHostProtocolClientConfig({
+    now,
+    credential: { email: "test@example.com", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "password" },
+    hosts: [{ id: "node", address: "node.example.com", protocols: profiles,
+      protocolActivations: [{ type: "hysteria2", publicCheck: {
+        checkedAt, availability: "available", reachable: true, jitterMs,
+        samples: { count: 5, successful: 5 }, consecutiveFailures: 0,
+        healthWindow: { successRate: 100, rounds: [1, 2, 3].map(() => ({ checkedAt: roundsAt })) }
+      } }]
+    }]
+  });
+  const fresh = "2026-10-01T11:59:00Z";
+  for (const config of [generate("2026-09-01T12:00:00Z"), generate(undefined), generate(fresh, "2026-09-01T12:00:00Z"), generate(fresh, fresh, null)]) {
+    assert.deepEqual(config.outbounds.find(({ tag }) => tag === "raylink-smart").outbounds, ["raylink-node-vless"]);
+    assert.deepEqual(config.outbounds.find(({ tag }) => tag === "raylink-udp").outbounds, ["raylink-node-hysteria2"]);
+  }
+  assert.ok(generate(fresh).outbounds.find(({ tag }) => tag === "raylink-smart").outbounds.includes("raylink-node-hysteria2"));
+});
+
 test("client subscription separates TCP and UDP and excludes unhealthy UDP from smart selection", () => {
   const profiles = defaultProtocolConfigs().map((profile) => ({
     ...profile,
@@ -429,6 +453,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
         {
           type: "hysteria2",
           publicCheck: {
+            checkedAt: new Date().toISOString(),
             availability: "available",
             reachable: true,
             jitterMs: 18,
@@ -436,7 +461,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
             samples: { count: 5, successful: 5, failed: 0 },
             healthWindow: {
               successRate: 100,
-              rounds: [{}, {}, {}]
+              rounds: [1, 2, 3].map(() => ({ checkedAt: new Date().toISOString() }))
             }
           }
         },
@@ -497,6 +522,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
         {
           type: "hysteria",
           publicCheck: {
+            checkedAt: new Date().toISOString(),
             availability: "available",
             reachable: true,
             jitterMs: 18,
@@ -504,7 +530,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
             samples: { count: 5, successful: 5, failed: 0 },
             healthWindow: {
               successRate: 100,
-              rounds: [{}, {}, {}]
+              rounds: [1, 2, 3].map(() => ({ checkedAt: new Date().toISOString() }))
             }
           }
         },

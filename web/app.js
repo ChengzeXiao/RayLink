@@ -40,6 +40,7 @@ const controlPlane = {
   deployments: [],
   backups: [],
   alerts: [],
+  readiness: null,
   alertDelivery: null,
   admins: [],
   auditEvents: [],
@@ -976,8 +977,8 @@ function renderSystemRuntime() {
   const installation = controlPlane.installation || { installed: false, version: null };
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const latestDeployment = controlPlane.deployments[0];
-  const ready = ["running", "staged"].includes(runtime.state);
-  setText("#system-runtime-state", ready ? "运行正常" : "等待发布");
+  setText("#system-runtime-state", runtime.state === "running" ? "运行中"
+    : runtime.state === "staged" ? "已暂存 · 未运行" : "未确认运行");
   setText("#system-config-state", activeDeployment?.version || "尚未发布");
   setText(
     "#system-validation-state",
@@ -1089,6 +1090,65 @@ function renderSystem() {
       : "每天自动执行 SQLite 在线备份，并校验 SHA-256 与数据库完整性。";
   }
   renderAdminAccess();
+}
+
+function renderReadiness() {
+  const report = controlPlane.readiness;
+  const target = document.querySelector("#readiness-checks");
+  if (!target) return;
+  if (!report) {
+    setText("#readiness-summary", "尚无体检结果，请刷新后查看。");
+    target.replaceChildren();
+    setText("#readiness-limitations", "");
+    return;
+  }
+  const summary = report.summary;
+  const labels = { healthy: "控制面检查通过", blocked: "存在需处理的异常", attention: "仍有项目待确认" };
+  setText("#readiness-summary", `${labels[report.status] || "待确认"} · ${summary.pass} 项通过 / ${summary.fail} 项异常 / ${summary.warning} 项警告 / ${summary.unknown} 项待确认 · ${new Date(report.generatedAt).toLocaleString("zh-CN")}`);
+  const statuses = {
+    fail: { label: "异常", className: "danger", order: 0 },
+    warning: { label: "警告", className: "warning", order: 1 },
+    unknown: { label: "待确认", className: "neutral", order: 2 },
+    pass: { label: "通过", className: "good", order: 3 }
+  };
+  target.innerHTML = [...report.checks].sort((a, b) => statuses[a.status].order - statuses[b.status].order).map((check) => {
+    const state = statuses[check.status];
+    const hostIndex = /^host:(\d+):/.exec(check.id)?.[1];
+    const hostName = hostIndex === undefined ? "" : controlPlane.hosts[Number(hostIndex)]?.name;
+    return `<article class="readiness-row">
+      <span class="status-badge ${state.className}"><i></i>${state.label}</span>
+      <div><strong>${escapeHtml(check.title)}${hostName ? ` · ${escapeHtml(hostName)}` : ""}</strong><p>${escapeHtml(check.detail)}</p>
+      ${check.observedAt ? `<small>证据时间 ${escapeHtml(new Date(check.observedAt).toLocaleString("zh-CN"))}</small>` : ""}</div>
+      <button class="text-button" data-readiness-target="${escapeHtml(check.target)}">${escapeHtml(check.action)}</button>
+    </article>`;
+  }).join("");
+  setText("#readiness-limitations", `${report.limitations.join(" ")} 导出不包含主机地址、用户资料、订阅密钥或原始配置；“主机 N”对应当前列表顺序。`);
+}
+
+async function refreshReadiness(button, exportReport = false) {
+  button.disabled = true;
+  try {
+    const report = await api("/api/operations/readiness", { signal: AbortSignal.timeout(10_000) });
+    controlPlane.readiness = report;
+    renderReadiness();
+    if (exportReport) {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `raylink-readiness-${report.generatedAt.replace(/[:.]/g, "-")}.json`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      showToast("报告已导出", "已导出当前检查结论、证据时间与处理建议。");
+    } else {
+      showToast("体检已刷新", "已重新汇总运行证据；协议测速请进入对应主机执行。");
+    }
+  } catch (error) {
+    showToast(exportReport ? "导出失败" : "体检刷新失败", error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderAdminAccess() {
@@ -2837,6 +2897,25 @@ document.addEventListener("click", async (event) => {
   const systemTab = event.target.closest("[data-system-tab]");
   if (systemTab) {
     selectWorkspaceTab("system", systemTab.dataset.systemTab);
+    if (systemTab.dataset.systemTab === "readiness" && !controlPlane.readiness) {
+      await refreshReadiness(document.querySelector("[data-refresh-readiness]"));
+    }
+    return;
+  }
+
+  const readinessButton = event.target.closest("[data-refresh-readiness], [data-export-readiness]");
+  if (readinessButton) {
+    await refreshReadiness(readinessButton, readinessButton.hasAttribute("data-export-readiness"));
+    return;
+  }
+  const readinessTarget = event.target.closest("[data-readiness-target]");
+  if (readinessTarget) {
+    const target = readinessTarget.dataset.readinessTarget;
+    if (target === "routing") {
+      navigate("policies");
+    } else {
+      selectWorkspaceTab("system", target);
+    }
     return;
   }
 

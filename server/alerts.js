@@ -71,9 +71,10 @@ export function evaluateOperationalAlerts({
   for (const host of hosts) {
     const telemetry = host.telemetry || {};
     const stale = ageMs(telemetry.updatedAt || host.lastSeenAt, now) > 60_000;
+    const runtimeStopped = telemetry.serviceStatus && telemetry.serviceStatus !== "running";
     const offline = host.kind === "remote"
-      ? host.status !== "online" || stale
-      : telemetry.serviceStatus && telemetry.serviceStatus !== "running";
+      ? host.status !== "online" || stale || runtimeStopped
+      : runtimeStopped;
     if (offline) {
       alerts.push(createAlert({
         code: "HOST_OFFLINE",

@@ -61,6 +61,7 @@ async function startTestApp(overrides = {}) {
   const address = app.server.address();
   return {
     app,
+    dataDir,
     baseUrl: `http://127.0.0.1:${address.port}`,
     async close() {
       await app.close();
@@ -109,6 +110,56 @@ async function enableHostShadowsocks(baseUrl, cookie, hostId, port = 8388) {
   );
   assert.equal(response.status, 200);
 }
+
+test("readiness is authenticated, read-only and safe to export", async (t) => {
+  const testApp = await startTestApp({ backupIntervalMs: 0, alertIntervalMs: 0 });
+  t.after(() => testApp.close());
+  assert.equal((await fetch(`${testApp.baseUrl}/api/operations/readiness`)).status, 401);
+  const cookie = await login(testApp.baseUrl);
+  const before = testApp.app.store.listDeployments().length;
+  const response = await api(testApp.baseUrl, cookie, "/api/operations/readiness");
+  assert.equal(response.status, 200);
+  const report = await response.json();
+  assert.equal(report.schemaVersion, 1);
+  assert.notEqual(report.status, "healthy");
+  assert.ok(report.checks.some((check) => check.id === "deployment"));
+  assert.doesNotMatch(JSON.stringify(report), /runtimePassword|runtimeUuid|privateKey|subscriptionUrl|configPath/);
+  assert.equal(testApp.app.store.listDeployments().length, before);
+  const backup = await (await api(testApp.baseUrl, cookie, "/api/backups", { method: "POST" })).json();
+  const verified = await (await api(testApp.baseUrl, cookie, "/api/operations/readiness")).json();
+  assert.equal(verified.checks.find((check) => check.id === "backup").status, "pass");
+  await rm(join(testApp.dataDir, "backups", backup.filename));
+  const missing = await (await api(testApp.baseUrl, cookie, "/api/operations/readiness")).json();
+  assert.equal(missing.checks.find((check) => check.id === "backup").status, "fail");
+});
+
+test("shutdown waits for an initial backup including its asynchronous listing phase", async () => {
+  let releaseList;
+  let markListing;
+  let created = false;
+  const listingStarted = new Promise((resolve) => { markListing = resolve; });
+  const listingGate = new Promise((resolve) => { releaseList = resolve; });
+  const testApp = await startTestApp({
+    alertIntervalMs: 0, backupStartupDelayMs: 0, backupIntervalMs: 60_000,
+    backupManager: {
+      async list() { markListing(); await listingGate; return []; },
+      async create() {
+        testApp.app.store.listUsers(); // Must still be open after list completes.
+        created = true;
+      }
+    }
+  });
+  await listingStarted;
+  let closed = false;
+  const closing = testApp.app.close().then(() => { closed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const closedBeforeBackup = closed;
+  releaseList();
+  await closing;
+  await rm(testApp.dataDir, { recursive: true, force: true });
+  assert.equal(closedBeforeBackup, false);
+  assert.equal(created, true);
+});
 
 test("admin can run the one-click protocol activation transaction", async (t) => {
   const calls = [];
@@ -625,6 +676,7 @@ test("owner manages administrator roles while support and auditor remain isolate
   });
   const auditorCookie = auditorLogin.headers.getSetCookie()[0].split(";")[0];
   assert.equal((await api(testApp.baseUrl, auditorCookie, "/api/bootstrap")).status, 200);
+  assert.equal((await api(testApp.baseUrl, auditorCookie, "/api/operations/readiness")).status, 200);
   assert.equal(
     (await api(testApp.baseUrl, auditorCookie, "/api/users", {
       method: "POST",

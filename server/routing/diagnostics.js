@@ -9,6 +9,47 @@ import {
 } from "./policy.js";
 
 const MAX_DIAGNOSTIC_ADDRESSES = 16;
+const MAX_PENDING_LOOKUPS = 4;
+const pendingLookups = new WeakMap();
+
+function sharedLookup(lookup, domain) {
+  let pending = pendingLookups.get(lookup);
+  if (!pending) { pending = new Map(); pendingLookups.set(lookup, pending); }
+  if (pending.has(domain)) return pending.get(domain);
+  if (pending.size >= MAX_PENDING_LOOKUPS) {
+    const error = new Error("主控 DNS 诊断繁忙，请稍后重试");
+    error.code = "DOMAIN_RESOLUTION_BUSY";
+    error.statusCode = 503;
+    error.retryable = true;
+    throw error;
+  }
+  // dns.lookup/getaddrinfo cannot be cancelled. Retain its single-flight entry
+  // after caller timeouts, and bound native work rather than merely waiters.
+  const result = Promise.resolve().then(() => lookup(domain, { all: true, verbatim: true }))
+    .finally(() => pending.delete(domain));
+  pending.set(domain, result);
+  return result;
+}
+
+async function lookupWithDeadline(lookup, domain, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      sharedLookup(lookup, domain),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("域名解析超时，请稍后重试或检查主控 DNS 状态");
+          error.code = "DOMAIN_RESOLUTION_TIMEOUT";
+          error.statusCode = 504;
+          error.retryable = true;
+          reject(error);
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function outboundForAction(action) {
   if (action === "indeterminate") return null;
@@ -61,7 +102,8 @@ export async function diagnoseRoutingDomain({
   domain,
   policy: inputPolicy,
   lookup = nodeLookup,
-  matchRuleSet = null
+  matchRuleSet = null,
+  lookupTimeoutMs = 2_000
 }) {
   const policy = normalizeRoutingPolicy(inputPolicy);
   const initial = routingDecisionForDomain(policy, domain);
@@ -90,8 +132,9 @@ export async function diagnoseRoutingDomain({
   }
   let resolved;
   try {
-    resolved = await lookup(normalizedDomain, { all: true, verbatim: true });
+    resolved = await lookupWithDeadline(lookup, normalizedDomain, lookupTimeoutMs);
   } catch (cause) {
+    if (["DOMAIN_RESOLUTION_TIMEOUT", "DOMAIN_RESOLUTION_BUSY"].includes(cause.code)) throw cause;
     const error = new Error("域名解析失败，请检查域名或 DNS 状态");
     error.code = "DOMAIN_RESOLUTION_FAILED";
     error.statusCode = 422;

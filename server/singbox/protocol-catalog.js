@@ -375,20 +375,30 @@ export function buildProtocolClientConfig({
 
 const udpClientProtocolTypes = new Set(["hysteria", "hysteria2", "tuic"]);
 const UDP_STABLE_JITTER_LIMIT_MS = 80;
+export const SMART_PROTOCOL_HEALTH_MAX_AGE_MS = 15 * 60_000;
 
 function usesUdpTransport(protocol) {
   return udpClientProtocolTypes.has(protocol.type) || protocol.transport?.type === "quic";
 }
 
-function protocolIsStableForSmartSelection(activation) {
+function protocolIsStableForSmartSelection(activation, now) {
   const check = activation?.publicCheck;
+  const recent = (value) => {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) && timestamp <= now + 60_000
+      && now - timestamp <= SMART_PROTOCOL_HEALTH_MAX_AGE_MS;
+  };
+  const rounds = Array.isArray(check?.healthWindow?.rounds) ? check.healthWindow.rounds : [];
   return check?.availability === "available"
+    && recent(check.checkedAt)
     && check.reachable === true
     && Number(check.consecutiveFailures || 0) === 0
     && Number(check.samples?.successful || 0) >= 4
-    && Number(check.healthWindow?.rounds?.length || 0) >= 3
+    && rounds.filter((round) => recent(round?.checkedAt)).length >= 3
     && Number(check.healthWindow?.successRate || 0) >= 95
-    && Number.isFinite(Number(check.jitterMs))
+    && typeof check.jitterMs === "number"
+    && Number.isFinite(check.jitterMs)
+    && check.jitterMs >= 0
     && Number(check.jitterMs) <= UDP_STABLE_JITTER_LIMIT_MS;
 }
 
@@ -397,7 +407,8 @@ export function buildMultiHostProtocolClientConfig({
   hosts,
   ruleSetBaseUrl = null,
   probeUrl = DEFAULT_ROUTE_PROBE_URL,
-  routePolicy
+  routePolicy,
+  now = Date.now()
 }) {
   const smartExcludedTags = new Set();
   const protocolOutbounds = hosts.flatMap((host) => {
@@ -417,7 +428,7 @@ export function buildMultiHostProtocolClientConfig({
       const tag = `raylink-${hostTag}-${profile.type}`;
       if (
         usesUdpTransport(profile)
-        && !protocolIsStableForSmartSelection(activations.get(profile.type))
+        && !protocolIsStableForSmartSelection(activations.get(profile.type), now)
       ) {
         smartExcludedTags.add(tag);
       }
