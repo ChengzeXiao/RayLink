@@ -34,7 +34,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
-const AGENT_VERSION = "0.7.0";
+export const AGENT_VERSION = "0.8.0";
 const SECRET_ENVELOPE_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm";
 const SECRET_ENVELOPE_CONTEXT = Buffer.from("raylink-node-secret-v1", "utf8");
 const PROTOCOL_PROBE_TYPES = new Set([

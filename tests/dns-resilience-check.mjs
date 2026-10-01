@@ -79,6 +79,7 @@ try {
     upstream.send(Buffer.concat([response, rr]), remote.port, remote.address);
   });
   const config = buildProtocolClientConfig({ profiles: defaultProtocolConfigs(), server: "127.0.0.1",
+    probeUrl: "http://127.0.0.1:9/generate_204",
     credential: { email: "dns@example.com", runtimePassword: randomBytes(16).toString("base64"),
       serverPassword: randomBytes(16).toString("base64") } });
   // Replace only environmental endpoints. Retain generated DNS/cache/routing policy.

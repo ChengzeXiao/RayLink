@@ -1,5 +1,13 @@
 # RayLink Changelog
 
+## 0.2.33 (unreleased)
+
+- Upgrade the approved metered sing-box Runtime to 1.14.2 and the builder to Go 1.26.8.
+- Migrate ACME per Host version and enable bounded optimistic DNS caching in 1.14+ client configurations.
+- Add Node 0.8.0 program-only updates, preserve the Runtime/Cronet pair during application upgrades, and gate Runtime upgrades on the Node version.
+- Add real protocol traffic, User metering/revocation, DNS outage and Node update rollback checks.
+- Preserve successful User saves during refresh failures and correct mobile fallback and DNS routing behavior.
+
 ## 0.2.32 - 2026-08-25
 
 ### Fixed

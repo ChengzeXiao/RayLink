@@ -4,7 +4,7 @@ const subscriptionQuick = window.RayLinkSubscriptionQuick;
 const protocolHealth = window.RayLinkProtocolHealth;
 let bootstrapRefreshTimer = null;
 let bootstrapRefreshInFlight = false;
-const requiredNodeAgentVersion = "0.7.0";
+const requiredNodeAgentVersion = "0.8.0";
 
 const clientCatalog = {
   mihomo: { name: "Clash / Mihomo", platforms: "Windows / macOS / Android", action: "导入订阅" },
@@ -1654,13 +1654,9 @@ function hostDrawerMarkup(hostId) {
     );
   const nodeUpgradeCommand = [
     'raylink_node_tmp="$(mktemp)"',
-    'raylink_builder_tmp="$(mktemp)"',
-    `curl -fsSL ${shellQuote(`${location.origin}/node/raylink-node.mjs`)} -o "$raylink_node_tmp"`,
-    `curl -fsSL ${shellQuote(`${location.origin}/node/build-metered-runtime.sh`)} -o "$raylink_builder_tmp"`,
-    'sudo install -m 0755 "$raylink_node_tmp" /opt/raylink-node/raylink-node.mjs',
-    'sudo install -m 0755 "$raylink_builder_tmp" /opt/raylink-node/build-metered-runtime.sh',
-    'rm -f "$raylink_node_tmp" "$raylink_builder_tmp"',
-    "sudo systemctl restart raylink-node.service"
+    `curl -fsSL ${shellQuote(`${location.origin}/node/upgrade.sh`)} -o "$raylink_node_tmp"`,
+    `sudo env RAYLINK_SERVER=${shellQuote(location.origin)} bash "$raylink_node_tmp"`,
+    'rm -f "$raylink_node_tmp"'
   ].join(" && ");
   const runtimeCopy = isRemote
     ? `${host.status === "online" ? "在线" : host.status === "pending" ? "等待接入" : "需要检查"} · ${host.runtimeVersion || host.agentVersion || "尚未上报版本"}`
@@ -1780,7 +1776,7 @@ function hostDrawerMarkup(hostId) {
         ? `<button type="button" class="button secondary" data-reissue-host="${escapeHtml(host.id)}">${icon("refresh")}重新生成接入命令</button><p class="field-hint">新的接入令牌会立即替换之前的令牌。</p>`
         : ""}
       ${nodeNeedsUpgrade
-        ? `<p class="drawer-section-label">Node 升级</p><p class="field-hint">当前 ${escapeHtml(host.agentVersion || "旧版")} 不支持正式版任务租约和服务遥测。控制面会暂停向该节点派发配置，升级后自动恢复。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button>`
+        ? `<p class="drawer-section-label">Node 升级</p><p class="field-hint">当前 ${escapeHtml(host.agentVersion || "旧版")} 需要更新到 0.8.0 后才能升级 Runtime。0.7 节点仍可接收配置发布；更新只替换 Node 程序和构建器，保留身份与当前 Runtime。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button>`
         : ""}
       ${runtimeCanUpgrade
         ? `<p class="drawer-section-label">Runtime 升级</p><p class="field-hint">${host.runtimeVersion === runtimeUpdate.latestVersion ? `当前版本缺少真实计量能力，将按审批构建重新安装 ${escapeHtml(runtimeUpdate.latestVersion)}。` : `可从 ${escapeHtml(host.runtimeVersion || "未知版本")} 升级到审批版 ${escapeHtml(runtimeUpdate.latestVersion)}。`}节点会备份当前二进制、校验现有配置并在失败时自动回滚。</p><button type="button" class="button primary" data-upgrade-host="${escapeHtml(host.id)}">${icon("arrow")}升级 sing-box</button>`

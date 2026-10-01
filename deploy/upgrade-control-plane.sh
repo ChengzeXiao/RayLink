@@ -24,8 +24,6 @@ health_port="${RAYLINK_PORT:-}"
 force_upgrade="${RAYLINK_FORCE_UPGRADE:-false}"
 public_ip="${RAYLINK_PUBLIC_IP:-}"
 runtime_version=1.14.2
-cronet_install_path="${RAYLINK_CRONET_PATH:-/usr/local/bin/libcronet.so}"
-cronet_candidate_path="${cronet_install_path}.candidate.$$"
 case "$(uname -m)" in
   x86_64|amd64) runtime_arch=amd64 ;;
   aarch64|arm64) runtime_arch=arm64 ;;
@@ -134,15 +132,12 @@ upgrade_succeeded=false
 data_backup_ready=false
 data_migration_started=false
 service_backup_ready=false
-cronet_changed=false
-cronet_had_previous=false
 environment_backup_ready=false
 environment_changed=false
 environment_candidate_path="${environment_file}.candidate.$$"
 rollback() {
   status=$?
   trap - EXIT
-  rm -f "$cronet_candidate_path"
   rm -f "$environment_candidate_path"
   if [ "$upgrade_succeeded" != true ]; then
     printf '升级未通过健康检查，正在恢复 RayLink v%s…\n' "$current_version" >&2
@@ -164,13 +159,6 @@ rollback() {
     fi
     if [ "$environment_backup_ready" = true ] && [ "$environment_changed" = true ]; then
       cp -a "$backup_directory/raylink.env" "$environment_file"
-    fi
-    if [ "$cronet_changed" = true ]; then
-      if [ "$cronet_had_previous" = true ]; then
-        cp -a "$backup_directory/libcronet.so" "$cronet_install_path"
-      else
-        rm -f "$cronet_install_path"
-      fi
     fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl start raylink >/dev/null 2>&1 || true
@@ -204,10 +192,6 @@ if [ "$backfill_local_host_dial_address" = true ]; then
   mv -f "$environment_candidate_path" "$environment_file"
   environment_changed=true
 fi
-if [ -f "$cronet_install_path" ]; then
-  cp -a "$cronet_install_path" "$backup_directory/libcronet.so"
-  cronet_had_previous=true
-fi
 if [ -f "$backup_directory/data/raylink.db" ]; then
   "$node_root/bin/node" \
     "$candidate_root/deploy/check-database-compatibility.mjs" \
@@ -218,9 +202,8 @@ mv "$install_root" "$previous_root"
 switch_started=true
 mv "$candidate_root" "$install_root"
 install -m 0644 "$install_root/deploy/raylink.service" "$service_unit"
-install -m 0644 "$cronet_source" "$cronet_candidate_path"
-mv -f "$cronet_candidate_path" "$cronet_install_path"
-cronet_changed=true
+# Runtime and Cronet form one versioned pair. Only the transactional Runtime
+# upgrader may replace them; an application-only upgrade leaves both running.
 systemctl daemon-reload
 data_migration_started=true
 systemctl start raylink

@@ -1338,6 +1338,19 @@ test("admin checks, upgrades the local Runtime and queues a remote Runtime upgra
     })
   })).json();
 
+  const oldNodeUpgrade = await api(testApp.baseUrl, cookie,
+    `/api/hosts/${encodeURIComponent(enrolled.hostId)}/runtime-upgrade`, { method: "POST" });
+  assert.equal(oldNodeUpgrade.status, 409);
+  assert.equal((await oldNodeUpgrade.json()).error.code, "NODE_UPGRADE_REQUIRED");
+  const nodeHeaders = { authorization: `Bearer ${enrolled.nodeSecret}`,
+    "x-raylink-host-id": enrolled.hostId, "content-type": "application/json" };
+  assert.equal((await fetch(`${testApp.baseUrl}/api/node/tasks/next`, { headers: nodeHeaders })).status, 204);
+  const nodeUpdate = await fetch(`${testApp.baseUrl}/api/node/heartbeat`, {
+    method: "POST", headers: nodeHeaders,
+    body: JSON.stringify({ agentVersion: "0.8.0", runtimeVersion: "1.14.2", buildTags: ["with_quic"] })
+  });
+  assert.equal(nodeUpdate.status, 200);
+
   const remoteUpgrade = await api(
     testApp.baseUrl,
     cookie,
@@ -3195,12 +3208,15 @@ test("control plane serves the RayLink web application on the same origin", asyn
   assert.match(firewallTmpfiles, /^f \/run\/ufw\.lock 0644 root root -$/m);
   assert.match(firewallTmpfiles, /^f \/run\/xtables\.lock 0600 root root -$/m);
 
+  const nodeUpgradeResponse = await fetch(`${testApp.baseUrl}/node/upgrade.sh`);
+  assert.equal(nodeUpgradeResponse.status, 200);
+  assert.equal(await nodeUpgradeResponse.text(), readFileSync(new URL("../web/node/upgrade.sh", import.meta.url), "utf8"));
   const nodeRuntimeResponse = await fetch(`${testApp.baseUrl}/node/raylink-node.mjs`);
   assert.equal(nodeRuntimeResponse.status, 200);
   assert.match(nodeRuntimeResponse.headers.get("content-type"), /javascript/);
   const nodeRuntime = await nodeRuntimeResponse.text();
   assert.match(nodeRuntime, /class RayLinkNode/);
-  assert.match(nodeRuntime, /AGENT_VERSION = "0\.7\.0"/);
+  assert.match(nodeRuntime, /AGENT_VERSION = "0\.8\.0"/);
   assert.match(nodeRuntime, /upgrade-runtime/);
 
   const portalResponse = await fetch(`${testApp.baseUrl}/portal/`);

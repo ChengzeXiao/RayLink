@@ -969,7 +969,7 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.match(packager, /CHANGELOG\.md/);
 });
 
-async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
+async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingCronet = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-upgrade-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const installRoot = join(directory, "installed");
@@ -1002,6 +1002,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
   await writeFile(environmentFile, previousEnvironment, { mode: 0o600 });
   const cronetArtifact = Buffer.from("approved-cronet-runtime");
   const cronetChecksum = createHash("sha256").update(cronetArtifact).digest("hex");
+  if (existingCronet) await writeFile(cronetInstallPath, "cronet-for-1.13");
   await writeFile(cronetSource, cronetArtifact);
   await writeFile(`${cronetSource}.sha256`, `${cronetChecksum}  ${cronetSource}\n`);
   const executables = {
@@ -1401,4 +1402,11 @@ test("one-command bootstrap verifies and prepares the matching release package",
   });
   assert.match(armDryRun.stdout, /linux-arm64/);
   assert.match(armDryRun.stdout, /SHA-256 校验通过/);
+});
+
+
+test("application-only upgrade preserves the library paired with the old Runtime", async (t) => {
+  const { cronetInstallPath, error } = await runControlPlaneUpgradeHarness(t, { existingCronet: true });
+  assert.equal(error, null);
+  assert.equal(await readFile(cronetInstallPath, "utf8"), "cronet-for-1.13");
 });

@@ -54,6 +54,7 @@ import {
 const SESSION_COOKIE = "raylink_session";
 const PORTAL_SESSION_COOKIE = "raylink_portal_session";
 const REQUIRED_NODE_AGENT_VERSION = "0.7.0";
+const RUNTIME_UPGRADE_NODE_VERSION = "0.8.0";
 const defaultWebDir = fileURLToPath(new URL("../web", import.meta.url));
 const rolePermissions = new Map([
   ["owner", new Set(["read", "users.manage", "runtime.manage", "system.manage", "admins.manage", "audit.read"])],
@@ -1478,7 +1479,7 @@ export async function createRayLinkApp(options) {
           return;
         }
         if (request.method === "GET" && url.pathname === "/api/node/tasks/next") {
-          if (node.agentVersion !== REQUIRED_NODE_AGENT_VERSION) {
+          if (![REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION].includes(node.agentVersion)) {
             sendJson(response, 426, {
               error: {
                 code: "NODE_UPGRADE_REQUIRED",
@@ -2021,10 +2022,10 @@ export async function createRayLinkApp(options) {
           if (!host.enrolledAt) {
             throw httpError("NODE_NOT_ENROLLED", "远程主机尚未完成 RayLink Node 接入", 409);
           }
-          if (host.agentVersion !== REQUIRED_NODE_AGENT_VERSION) {
+          if (host.agentVersion !== RUNTIME_UPGRADE_NODE_VERSION) {
             throw httpError(
               "NODE_UPGRADE_REQUIRED",
-              `请先将 RayLink Node 升级到 ${REQUIRED_NODE_AGENT_VERSION}`,
+              `请先通过 /node/upgrade.sh 将 RayLink Node 升级到 ${RUNTIME_UPGRADE_NODE_VERSION}，再升级 Runtime`,
               409
             );
           }
