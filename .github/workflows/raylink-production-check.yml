@@ -22,7 +22,7 @@ jobs:
       - name: Build and verify metered sing-box Runtime
         run: |
           runtime_directory="${RUNNER_TEMP}/raylink-protocol-runtime"
-          sudo bash deploy/build-runtime-artifact.sh \
+          sudo env RAYLINK_NODE_ROOT="${RUNNER_TEMP}/raylink-build-toolchains" bash deploy/build-runtime-artifact.sh \
             1.14.2 \
             "$runtime_directory" \
             amd64

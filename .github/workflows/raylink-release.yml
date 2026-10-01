@@ -23,7 +23,7 @@ jobs:
       - name: Build approved protocol acceptance Runtime
         run: |
           runtime_directory="${RUNNER_TEMP}/raylink-protocol-runtime"
-          sudo bash deploy/build-runtime-artifact.sh \
+          sudo env RAYLINK_NODE_ROOT="${RUNNER_TEMP}/raylink-build-toolchains" bash deploy/build-runtime-artifact.sh \
             1.14.2 \
             "$runtime_directory" \
             amd64
@@ -70,7 +70,7 @@ jobs:
           printf 'version=%s\n' "$package_version" >> "$GITHUB_OUTPUT"
       - name: Build and natively verify metered sing-box Runtime
         run: |
-          sudo bash deploy/build-runtime-artifact.sh \
+          sudo env RAYLINK_NODE_ROOT="${RUNNER_TEMP}/raylink-build-toolchains" bash deploy/build-runtime-artifact.sh \
             1.14.2 \
             web/node/runtime \
             "${{ matrix.arch }}"
