@@ -256,13 +256,9 @@ export function createRoutePolicyCandidates({
   const udpCandidates = uniqueExisting(udp, all);
   const effectiveAutomatic = automatic.length ? automatic : all;
   const adaptiveUdp = udpCandidates.filter((name) => effectiveAutomatic.includes(name));
-  const fallback = adaptiveUdp.length && tcpCandidates.length
-    ? [ROUTE_POLICY_GROUPS.udp.name, ROUTE_POLICY_GROUPS.tcp.name]
-    : adaptiveUdp.length
-      ? [ROUTE_POLICY_GROUPS.udp.name, ROUTE_POLICY_GROUPS.smart.name]
-      : tcpCandidates.length
-        ? [ROUTE_POLICY_GROUPS.tcp.name, ROUTE_POLICY_GROUPS.smart.name]
-        : [ROUTE_POLICY_GROUPS.smart.name];
+  // Server-side UDP health says nothing about the client's cellular path.
+  // Probe concrete nodes on the client, prefer TCP, and retain UDP for recovery.
+  const fallback = [...new Set([...tcpCandidates, ...udpCandidates, ...all])];
   return {
     all,
     automatic: effectiveAutomatic,

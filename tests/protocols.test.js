@@ -19,6 +19,18 @@ const eligibleUsers = [
   }
 ];
 
+test("client capabilities match the TCP-only managed Shadowsocks listener", () => {
+  const config = buildProtocolClientConfig({
+    credential: { ...eligibleUsers[0], serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+    profiles: defaultProtocolConfigs(),
+    server: "node.example.com"
+  });
+  assert.equal(config.outbounds.find((outbound) => outbound.type === "shadowsocks").network, "tcp");
+  for (const group of config.outbounds.filter((outbound) => outbound.type === "urltest")) {
+    assert.equal(group.interrupt_exist_connections, false);
+  }
+});
+
 test("source catalog exposes the inbound protocols registered by sing-box 1.13", () => {
   assert.deepEqual(
     protocolCatalog.map((protocol) => protocol.type),

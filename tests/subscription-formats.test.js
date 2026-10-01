@@ -3,6 +3,45 @@ import test from "node:test";
 
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 
+test("TCP-only Shadowsocks never advertises UDP relay in exported subscriptions", () => {
+  const config = { outbounds: [{
+    type: "shadowsocks", tag: "ss-tcp", server: "node.example.com", server_port: 8388,
+    method: "2022-blake3-aes-128-gcm", password: "AAAAAAAAAAAAAAAAAAAAAA==", network: "tcp"
+  }] };
+  const exportBody = (format) => buildSubscriptionArtifact({ format, singBoxConfig: config }).body;
+  assert.match(exportBody("mihomo"), /udp: false/);
+  assert.match(exportBody("egern"), /udp_relay: false/);
+  assert.match(exportBody("loon"), /udp=false/);
+});
+
+test("Egern custom proxy rules reference a declared policy", () => {
+  const body = buildSubscriptionArtifact({
+    format: "egern-profile", singBoxConfig,
+    routePolicy: { rules: [{ match: "domain", value: "example.com", action: "proxy" }] }
+  }).body;
+  const names = new Set([...body.matchAll(/^\s+name: "([^"]+)"$/gm)].map((match) => match[1]));
+  for (const [, policy] of body.matchAll(/^\s+(?:policy|default_policy): "([^"]+)"$/gm)) {
+    assert.ok(["DIRECT", "REJECT"].includes(policy) || names.has(policy), `undefined policy: ${policy}`);
+  }
+});
+
+test("Mihomo duplicate domain DNS rules honor the first routing rule", () => {
+  const body = buildSubscriptionArtifact({
+    format: "mihomo", singBoxConfig,
+    routePolicy: { rules: [
+      { match: "domain", value: "example.com", action: "direct", priority: 10 },
+      { match: "domain", value: "example.com", action: "proxy", priority: 20 }
+    ] }
+  }).body;
+  assert.match(body, /"domain:example.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
+});
+
+test("Mihomo local IP bypass does not resolve domains before domain routing", () => {
+  const body = buildSubscriptionArtifact({ format: "mihomo", singBoxConfig }).body;
+  assert.match(body, /"IP-CIDR,10\.0\.0\.0\/8,DIRECT,no-resolve"/);
+  assert.doesNotMatch(body, /DOMAIN-SUFFIX,(google|youtube)\.com,RayLink 智能/);
+});
+
 const singBoxConfig = {
   outbounds: [
     {
@@ -137,7 +176,7 @@ test("Mihomo subscription contains compatible nodes, smart groups, routing and D
   );
   assert.match(
     artifact.body,
-    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "TCP 稳定"[\s\S]*?- "RayLink 智能"/
+    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "raylink-tokyo-vless"[\s\S]*?- "raylink-tokyo-hysteria2"/
   );
   assert.match(
     artifact.body,
@@ -432,19 +471,19 @@ test("Egern profile adds smart TCP UDP manual policies, routing and encrypted DN
   assert.match(artifact.body, /name: "UDP 高速"/);
   assert.match(
     artifact.body,
-    /- fallback:[\s\S]*?name: "故障回退"[\s\S]*?policies:[\s\S]*?- "TCP 稳定"[\s\S]*?- "RayLink 智能"/
+    /- fallback:[\s\S]*?name: "故障回退"[\s\S]*?policies:[\s\S]*?- "raylink-tokyo-vless"[\s\S]*?- "raylink-tokyo-hysteria2"/
   );
   assert.match(artifact.body, /- conditional:/);
   assert.match(artifact.body, /name: "网络环境"/);
   assert.match(
     artifact.body,
-    /cellular:[\s\S]*?match: "\*"[\s\S]*?policy: "TCP 稳定"/
+    /cellular:[\s\S]*?match: "\*"[\s\S]*?policy: "故障回退"/
   );
   assert.match(
     artifact.body,
     /ssid:[\s\S]*?match: "\*"[\s\S]*?policy: "故障回退"/
   );
-  assert.match(artifact.body, /default_policy: "RayLink 智能"/);
+  assert.match(artifact.body, /default_policy: "故障回退"/);
   assert.match(artifact.body, /- select:/);
   assert.match(artifact.body, /name: "手动选择"/);
   assert.match(artifact.body, /name: "AI 网站代理"/);
@@ -463,7 +502,7 @@ test("Egern profile adds smart TCP UDP manual policies, routing and encrypted DN
   assert.match(artifact.body, /match: "192\.168\.0\.0\/16"[\s\S]*?policy: "DIRECT"/);
 });
 
-test("healthy UDP is the first adaptive fallback group in Mihomo and Egern", () => {
+test("server-healthy UDP never overrides TCP-first client fallback in Mihomo and Egern", () => {
   const healthyConfig = {
     ...singBoxConfig,
     outbounds: singBoxConfig.outbounds.map((outbound) => (
@@ -486,11 +525,11 @@ test("healthy UDP is the first adaptive fallback group in Mihomo and Egern", () 
 
   assert.match(
     mihomo,
-    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "UDP 高速"[\s\S]*?- "TCP 稳定"/
+    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "raylink-tokyo-vless"[\s\S]*?- "raylink-tokyo-hysteria2"/
   );
   assert.match(
     egern,
-    /name: "故障回退"[\s\S]*?policies:[\s\S]*?- "UDP 高速"[\s\S]*?- "TCP 稳定"/
+    /name: "故障回退"[\s\S]*?policies:[\s\S]*?- "raylink-tokyo-vless"[\s\S]*?- "raylink-tokyo-hysteria2"/
   );
 });
 
@@ -523,11 +562,11 @@ test("UDP-only subscriptions never emit a dangling TCP policy group", () => {
   assert.doesNotMatch(egern, /name: "TCP 稳定"/);
   assert.match(
     mihomo,
-    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "UDP 高速"[\s\S]*?- "RayLink 智能"/
+    /name: "故障回退"[\s\S]*?proxies:[\s\S]*?- "raylink-tokyo-hysteria2"/
   );
   assert.match(
     egern,
-    /cellular:[\s\S]*?policy: "RayLink 智能"/
+    /cellular:[\s\S]*?policy: "故障回退"/
   );
 });
 

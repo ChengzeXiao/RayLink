@@ -115,14 +115,14 @@ test("smart routing explains explicit, AI, China fallback and unknown decisions"
   );
 });
 
-test("adaptive fallback only prefers UDP when server health admitted a UDP node", () => {
+test("fallback probes concrete client nodes with TCP first regardless of server UDP health", () => {
   const unhealthyUdp = createRoutePolicyCandidates({
     names: ["tcp-a", "udp-a"],
     smart: ["tcp-a"],
     tcp: ["tcp-a"],
     udp: ["udp-a"]
   });
-  assert.deepEqual(unhealthyUdp.fallback, ["TCP 稳定", "RayLink 智能"]);
+  assert.deepEqual(unhealthyUdp.fallback, ["tcp-a", "udp-a"]);
   assert.deepEqual(unhealthyUdp.manual, ["tcp-a", "udp-a"]);
 
   const healthyUdp = createRoutePolicyCandidates({
@@ -131,7 +131,7 @@ test("adaptive fallback only prefers UDP when server health admitted a UDP node"
     tcp: ["tcp-a"],
     udp: ["udp-a"]
   });
-  assert.deepEqual(healthyUdp.fallback, ["UDP 高速", "TCP 稳定"]);
+  assert.deepEqual(healthyUdp.fallback, ["tcp-a", "udp-a"]);
   assert.deepEqual(healthyUdp.adaptiveUdp, ["udp-a"]);
 
   const udpOnly = createRoutePolicyCandidates({
@@ -140,7 +140,7 @@ test("adaptive fallback only prefers UDP when server health admitted a UDP node"
     udp: ["udp-a"]
   });
   assert.deepEqual(udpOnly.tcp, []);
-  assert.deepEqual(udpOnly.fallback, ["UDP 高速", "RayLink 智能"]);
+  assert.deepEqual(udpOnly.fallback, ["udp-a"]);
   assert.ok(!udpOnly.policyChoices.includes("TCP 稳定"));
 });
 

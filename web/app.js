@@ -2179,7 +2179,13 @@ async function saveUserForm(form) {
     method: userId ? "PATCH" : "POST",
     body: JSON.stringify(payload)
   });
-  await loadBootstrap();
+  // The write is committed. A failed refresh must not turn a retry into another POST.
+  form.dataset.userId = result.id;
+  try {
+    await loadBootstrap();
+  } catch {
+    result.refreshWarning = "用户已保存，但列表刷新失败，请刷新页面查看最新状态。";
+  }
   return result;
 }
 
@@ -2429,8 +2435,13 @@ async function saveDrawer() {
       elements.drawerSave.textContent = "保存更改";
       elements.drawerSave.disabled = false;
       showToast(
-        "用户已创建",
-        "可立即复制用户中心入口，并生成订阅链接或二维码。"
+        userSaveResult.runtimeSync?.status === "pending" ? "用户已创建，等待应用" : "用户已创建",
+        [
+          userSaveResult.runtimeSync?.status === "pending"
+            ? userSaveResult.runtimeSync.message
+            : "可立即复制用户中心入口，并生成订阅链接或二维码。",
+          userSaveResult.refreshWarning
+        ].filter(Boolean).join("；")
       );
       return;
     }
@@ -2464,7 +2475,7 @@ async function saveDrawer() {
     protocolSaveResult?.oneClick
       ? protocolSaveResult.activation?.state === "deploying" ? "正在远程部署" : "协议已启用"
       : userSaveResult?.runtimeSync?.status === "pending" ? "已保存，等待应用" : "已保存",
-    message
+    [message, userSaveResult?.refreshWarning].filter(Boolean).join("；")
   );
   elements.drawerSave.disabled = false;
 }

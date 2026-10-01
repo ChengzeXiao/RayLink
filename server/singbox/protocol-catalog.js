@@ -436,7 +436,7 @@ function urlTestOutbound(tag, outbounds, probeUrl, tolerance = 50) {
     url: probeUrl,
     interval: "3m",
     tolerance,
-    interrupt_exist_connections: true
+    interrupt_exist_connections: false
   };
 }
 
@@ -703,6 +703,7 @@ function buildClientOutbound(profile, credential, server, tag = `raylink-${profi
   if (profile.type === "shadowsocks") {
     return {
       ...common,
+      network: "tcp",
       method: "2022-blake3-aes-128-gcm",
       password: `${credential.serverPassword}:${credential.runtimePassword}`
     };

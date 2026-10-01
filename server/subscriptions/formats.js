@@ -184,20 +184,20 @@ function dnsPolicyValue(dns) {
 }
 
 function mihomoDnsPolicyRules(policy) {
-  return {
+  const rules = {
     "domain:localhost": ["system"],
     ...Object.fromEntries(LOCAL_DOMAIN_SUFFIXES.map((suffix) => [
       `+.${suffix}`,
       ["system"]
-    ])),
-    ...Object.fromEntries(policy.rules.flatMap((rule) => {
-      if (!rule.enabled || !["domain", "domain_suffix"].includes(rule.match)) return [];
-      const key = rule.match === "domain"
-        ? `domain:${rule.value}`
-        : `+.${rule.value}`;
-      return [[key, dnsPolicyValue(rule.dns)]];
-    }))
+    ]))
   };
+  for (const rule of policy.rules) {
+    if (!rule.enabled || !["domain", "domain_suffix"].includes(rule.match)) continue;
+    const key = rule.match === "domain" ? `domain:${rule.value}` : `+.${rule.value}`;
+    // Routing uses the first matching rule; duplicate DNS keys must do the same.
+    if (!Object.hasOwn(rules, key)) rules[key] = dnsPolicyValue(rule.dns);
+  }
+  return rules;
 }
 
 function mihomoLocalBypassRules() {
@@ -205,7 +205,7 @@ function mihomoLocalBypassRules() {
     "DOMAIN,localhost,DIRECT",
     ...LOCAL_DOMAIN_SUFFIXES.map((suffix) => `DOMAIN-SUFFIX,${suffix},DIRECT`),
     ...PRIVATE_NETWORK_CIDRS.map((cidr) => (
-      `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT`
+      `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT,no-resolve`
     ))
   ];
 }
@@ -296,7 +296,7 @@ function mihomoProxy(outbound) {
       ...common,
       cipher: outbound.method,
       password: outbound.password,
-      udp: true
+      udp: outbound.network !== "tcp"
     };
   }
   if (outbound.type === "vmess") {
@@ -390,7 +390,7 @@ function loonProxy(outbound) {
   const prefix = `${outbound.tag}=`;
   const common = `${outbound.server},${outbound.server_port}`;
   if (outbound.type === "shadowsocks") {
-    return `${prefix}shadowsocks,${common},${outbound.method},${loonQuote(outbound.password)},udp=true`;
+    return `${prefix}shadowsocks,${common},${outbound.method},${loonQuote(outbound.password)},udp=${outbound.network !== "tcp"}`;
   }
   if (["vmess", "vless"].includes(outbound.type)) {
     const transport = loonTransportOptions(outbound);
@@ -519,7 +519,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       type: "fallback",
       proxies: fallbackGroups,
       url: probeUrl,
-      interval: 180,
+      interval: 60,
       lazy: false,
       timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
@@ -589,8 +589,6 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
               ...AI_DOMAIN_SUFFIXES.map(
                 (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.ai.name}`
               ),
-              `DOMAIN-SUFFIX,google.com,${ROUTE_POLICY_GROUPS.smart.name}`,
-              `DOMAIN-SUFFIX,youtube.com,${ROUTE_POLICY_GROUPS.smart.name}`,
               "GEOSITE,CN,DIRECT",
               "GEOIP,CN,DIRECT",
               `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`
@@ -656,7 +654,7 @@ function egernProxy(outbound) {
         ...common,
         method: outbound.method,
         password: outbound.password,
-        udp_relay: true
+        udp_relay: outbound.network !== "tcp"
       }
     };
   }
@@ -845,8 +843,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         fallback: {
           name: ROUTE_POLICY_GROUPS.fallback.name,
           policies: fallbackGroups,
-          interval: 300,
-          timeout: 5
+          interval: 60,
+          timeout: 5,
+          latency_test_url: probeUrl
         }
       },
       {
@@ -856,14 +855,18 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
             {
               cellular: {
                 match: "*",
-                policy: tcp.length
-                  ? ROUTE_POLICY_GROUPS.tcp.name
-                  : ROUTE_POLICY_GROUPS.smart.name
+                policy: ROUTE_POLICY_GROUPS.fallback.name
               }
             },
             { ssid: { match: "*", policy: "故障回退" } }
           ],
-          default_policy: "RayLink 智能"
+          default_policy: ROUTE_POLICY_GROUPS.fallback.name
+        }
+      },
+      {
+        select: {
+          name: ROUTE_POLICY_GROUPS.proxy.name,
+          policies: ["网络环境", ...candidates.policyChoices]
         }
       },
       {
