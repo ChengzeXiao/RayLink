@@ -17,6 +17,7 @@ import { RayLinkStore } from "./database.js";
 import { McpCredentials, MCP_SCOPES } from "./mcp-credentials.js";
 import { createMcpService } from "./mcp.js";
 import { NodeProvisioning } from "./node-provisioning.js";
+import { NodeDomains } from "./node-domains.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
@@ -81,6 +82,8 @@ const contentTypes = {
 };
 
 function adminPermissionForRequest(method, pathname) {
+  if (method === "POST" && pathname === "/api/account/password") return "read";
+  if (method === "PATCH" && pathname === "/api/account/profile") return "read";
   if (pathname === "/api/mcp/tokens" || pathname.startsWith("/api/mcp/tokens/")) return "admins.manage";
   if (pathname === "/api/admins" || pathname.startsWith("/api/admins/")) {
     return "admins.manage";
@@ -535,23 +538,24 @@ export async function createRayLinkApp(options) {
   };
   const resolveClientEndpointOverrides = async (hosts) => Object.fromEntries(
     (await Promise.all(hosts.map(async (host) => {
-      if (isIP(host.address)) return null;
-      const fallbackAddress = host.id === "local" ? localHostDialAddress : "";
+      const endpoint = host.endpointDomain || host.address;
+      if (isIP(endpoint)) return null;
+      const fallbackAddress = host.id === "local" ? localHostDialAddress : host.endpointDomain && isIP(host.address) ? host.address : "";
       const configuredFallback = isIP(fallbackAddress)
         ? { address: fallbackAddress, source: "configured-fallback" }
         : null;
       let resolved;
       try {
         resolved = await endpointResolver.resolve({
-          hostname: host.address,
+          hostname: endpoint,
           protocols: host.protocols,
           fallbackAddress
         });
       } catch (error) {
-        console.warn(`[RayLink] Endpoint resolution failed for ${host.address}: ${error.message}`);
+        console.warn(`[RayLink] Endpoint resolution failed for ${endpoint}: ${error.message}`);
         resolved = configuredFallback;
       }
-      return isIP(resolved?.address) ? [host.address, resolved.address] : null;
+      return isIP(resolved?.address) ? [endpoint, resolved.address] : null;
     }))).filter(Boolean)
   );
   const subscriptionUrl = (subscription) => new URL(
@@ -1015,16 +1019,20 @@ export async function createRayLinkApp(options) {
     });
     return { singBoxConfig, endpointOverrides };
   };
+  const nodeDomains = new NodeDomains({ store, fetchImpl: options.nodeDomainFetch, lookup: options.nodeDomainLookup,
+    pollMs: options.nodeDomainPollMs, waitMs: options.nodeDomainWaitMs });
   const nodeProvisioning = new NodeProvisioning({
     store, sshBootstrap: options.sshBootstrap, publicOrigin: () => currentPublicOrigin().origin,
+    nodeDomains,
     pollMs: options.provisioningPollMs, waitMs: options.provisioningWaitMs,
     acceptedNodeVersions: [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION],
     buildClientConfig: buildClientConfigForUser,
     measure: (input) => protocolActivationManager.measureHost(input),
-    activate: ({ preferredPort, ...input }) => runLocalRuntimeOperation("节点自动接入", async () => {
+    activate: ({ preferredPort, template, ...input }) => runLocalRuntimeOperation("节点自动接入", async () => {
       const profile = store.listHostProtocolConfigs(input.hostId).find((entry) => entry.type === input.type);
       if (!profile.enabled && !store.getHost(input.hostId).protocolActivations.some((entry) => entry.type === input.type)) {
-        store.updateHostProtocolConfig(input.hostId, input.type, { port: preferredPort });
+        store.updateHostProtocolConfig(input.hostId, input.type, { port: preferredPort,
+          ...(template ? { transport: template.transport, options: template.options } : {}) });
       }
       return protocolActivationManager.enable(input);
     })
@@ -1115,6 +1123,30 @@ export async function createRayLinkApp(options) {
       });
     }
 
+    if ((request.method === "POST" && url.pathname === "/api/account/password")
+      || (request.method === "PATCH" && url.pathname === "/api/account/profile")) {
+      if (request.mcp) {
+        sendJson(response, 403, { error: { code: "FORBIDDEN", message: "请通过浏览器登录后修改个人账号" } });
+        return;
+      }
+      const attemptKey = authKey(request, `account:${admin.id}`);
+      if (!authAllowed(attemptKey)) {
+        sendJson(response, 429, { error: { code: "RATE_LIMITED", message: "密码验证次数过多，请稍后重试" } });
+        return;
+      }
+      try {
+        const result = await store.changeAdminAccount(admin.id, await readJson(request), {
+          changePassword: url.pathname === "/api/account/password"
+        });
+        authAttempts.delete(attemptKey);
+        sendJson(response, 200, result, { "set-cookie": clearedSessionCookie(SESSION_COOKIE, currentPublicOrigin().protocol === "https:") });
+      } catch (error) {
+        if (error.code === "CURRENT_PASSWORD_INVALID") recordAuthFailure(attemptKey);
+        throw error;
+      }
+      return;
+    }
+
     if (url.pathname === "/api/hosts/provision") {
       if (request.method === "GET") {
         sendJson(response, 200, { jobs: nodeProvisioning.list() });
@@ -1131,6 +1163,11 @@ export async function createRayLinkApp(options) {
       sendJson(response, provisioningMatch[2] ? 202 : 200, { job: provisioningMatch[2]
         ? nodeProvisioning.retry(id, await readJson(request), admin.id)
         : nodeProvisioning.get(id) });
+      return;
+    }
+
+    if (url.pathname === "/api/settings/node-domains" && ["GET", "PATCH"].includes(request.method)) {
+      sendJson(response, 200, { nodeDomains: request.method === "GET" ? nodeDomains.settings() : nodeDomains.updateSettings(await readJson(request)) });
       return;
     }
 
@@ -1164,14 +1201,16 @@ export async function createRayLinkApp(options) {
 
     const adminMatch = url.pathname.match(/^\/api\/admins\/([^/]+)$/);
     if (request.method === "PATCH" && adminMatch) {
-      sendJson(
-        response,
-        200,
-        store.updateAdmin(
-          decodeURIComponent(adminMatch[1]),
-          await readJson(request)
-        )
-      );
+      const targetId = decodeURIComponent(adminMatch[1]);
+      const input = await readJson(request);
+      if (targetId === admin.id && (input.password !== undefined || input.username !== undefined)) {
+        sendJson(response, 403, { error: {
+          code: "ACCOUNT_SELF_SERVICE_REQUIRED",
+          message: "修改本人登录名或密码需要使用个人账号设置并验证当前密码"
+        } });
+        return;
+      }
+      sendJson(response, 200, store.updateAdmin(targetId, input));
       return;
     }
 
@@ -1254,6 +1293,7 @@ export async function createRayLinkApp(options) {
           : [],
         access: store.setupStatus().access,
         certificate: store.certificateSettings(),
+        nodeDomains: nodeDomains.settings(),
         routingPolicy: store.routingPolicy(),
         routingRuleSets,
         telemetry: store.telemetryOverview(),

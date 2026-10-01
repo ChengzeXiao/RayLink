@@ -136,8 +136,8 @@ function validateAdminUsername(username) {
 }
 
 function validateAdminPassword(password) {
-  if (typeof password !== "string" || password.length < 12) {
-    throw domainError("INVALID_ADMIN_PASSWORD", "管理员密码至少需要 12 位");
+  if (typeof password !== "string" || password.length < 12 || password.length > 1024 || !password.trim()) {
+    throw domainError("INVALID_ADMIN_PASSWORD", "管理员密码需要 12–1024 位，且不能全为空白");
   }
   return password;
 }
@@ -217,6 +217,7 @@ function hostFromRow(row) {
     id: row.id,
     name: row.name,
     address: row.address,
+    endpointDomain: row.endpoint_domain || null,
     region: row.region,
     status: remoteOffline ? "offline" : row.status,
     kind: row.kind || "local",
@@ -654,6 +655,7 @@ export class RayLinkStore {
     `);
     const hostColumns = this.db.prepare("PRAGMA table_info(hosts)").all();
     const hostMigrations = [
+      ["endpoint_domain", "TEXT"],
       ["kind", "TEXT NOT NULL DEFAULT 'local'"],
       ["enrollment_secret_hash", "TEXT"],
       ["node_secret_hash", "TEXT"],
@@ -825,7 +827,58 @@ export class RayLinkStore {
     const admin = this.db.prepare("SELECT * FROM admins WHERE username = ?").get(username);
     const valid = await verifyPassword(password, admin?.password_hash || DUMMY_PASSWORD_HASH);
     if (!admin || !valid) return null;
-    return { id: admin.id, username: admin.username, role: admin.role || "owner" };
+    // Password verification yields to the event loop; a concurrent rotation may
+    // have revoked this identity while scrypt was running.
+    const current = this.db.prepare("SELECT * FROM admins WHERE id = ?").get(admin.id);
+    if (!current || current.password_hash !== admin.password_hash || current.username !== admin.username) return null;
+    return { id: current.id, username: current.username, role: current.role || "owner" };
+  }
+
+  revokeAdminCredentials(id, { revokeMcp = false } = {}) {
+    const sessionsRevoked = Number(this.db.prepare("DELETE FROM sessions WHERE admin_id = ?").run(id).changes);
+    let mcpTokensRevoked = 0;
+    if (revokeMcp && this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mcp_credentials'").get()) {
+      mcpTokensRevoked = Number(this.db.prepare(`
+        UPDATE mcp_credentials SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL
+      `).run(nowIso(), id).changes);
+    }
+    return { sessionsRevoked, mcpTokensRevoked };
+  }
+
+  async changeAdminAccount(id, input = {}, { changePassword = false } = {}) {
+    const { currentPassword } = input || {};
+    const value = changePassword ? validateAdminPassword(input?.newPassword) : validateAdminUsername(input?.username);
+    const snapshot = this.db.prepare("SELECT username, password_hash FROM admins WHERE id = ?").get(id);
+    if (typeof currentPassword !== "string" || currentPassword.length > 4096
+      || !await verifyPassword(currentPassword, snapshot?.password_hash || DUMMY_PASSWORD_HASH) || !snapshot) {
+      throw domainError("CURRENT_PASSWORD_INVALID", "当前密码不正确", 403);
+    }
+    if (changePassword && currentPassword === value) throw domainError("PASSWORD_UNCHANGED", "新密码不能与当前密码相同");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare("SELECT username, password_hash FROM admins WHERE id = ?").get(id);
+      if (!current || current.password_hash !== snapshot.password_hash || current.username !== snapshot.username) {
+        throw domainError("ACCOUNT_CHANGED", "账号已变更，请重新登录后重试", 409);
+      }
+      if (changePassword) {
+        this.db.prepare("UPDATE admins SET password_hash = ? WHERE id = ?").run(hashPassword(value), id);
+      } else {
+        this.db.prepare("UPDATE admins SET username = ? WHERE id = ?").run(value, id);
+      }
+      const revoked = this.revokeAdminCredentials(id, { revokeMcp: changePassword });
+      this.db.exec("COMMIT");
+      return {
+        ...(changePassword ? { passwordChanged: true } : { profileUpdated: true, username: value }),
+        reauthenticationRequired: true,
+        ...revoked
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      if (/UNIQUE constraint failed: admins\.username/i.test(error.message)) {
+        throw domainError("ADMIN_USERNAME_EXISTS", "管理员用户名已经存在", 409);
+      }
+      throw error;
+    }
   }
 
   listAdmins() {
@@ -917,7 +970,9 @@ export class RayLinkStore {
         }
         throw error;
       }
-      if (password) this.db.prepare("DELETE FROM sessions WHERE admin_id = ?").run(id);
+      if (password || username !== current.username) {
+        this.revokeAdminCredentials(id, { revokeMcp: Boolean(password) });
+      }
       this.db.exec("COMMIT");
       return {
         id,
@@ -1841,6 +1896,27 @@ export class RayLinkStore {
     `).get(hostId)?.encryption_public_key || null;
   }
 
+  setHostEndpointDomain(hostId, domain) {
+    const current = this.getHost(hostId);
+    if (!current) throw domainError("HOST_NOT_FOUND", "主机不存在", 404);
+    if (typeof domain !== "string" || isIP(domain) || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(domain)) {
+      throw domainError("INVALID_HOST_ADDRESS", "请输入有效的节点业务域名");
+    }
+    domain = domain.toLowerCase();
+    this.db.exec("SAVEPOINT host_endpoint_domain");
+    try {
+      this.db.prepare("UPDATE hosts SET endpoint_domain=?, updated_at=? WHERE id=?").run(domain, nowIso(), hostId);
+      if (current.endpointDomain !== domain) {
+        this.db.prepare("UPDATE protocol_activations SET state_json=json_remove(state_json, '$.publicCheck'), updated_at=? WHERE host_id=?").run(nowIso(), hostId);
+      }
+      this.db.exec("RELEASE host_endpoint_domain");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO host_endpoint_domain; RELEASE host_endpoint_domain");
+      throw error;
+    }
+    return this.getHost(hostId);
+  }
+
   createRemoteHost(input) {
     const host = normalizedHostInput(input);
     const id = randomUUID();
@@ -2618,7 +2694,7 @@ export class RayLinkStore {
 
   runtimeSnapshot(hostId = "local") {
     const host = this.db.prepare(`
-      SELECT id, name, address, region, status, build_tags_json, runtime_version AS runtimeVersion
+      SELECT id, name, address, endpoint_domain AS endpointDomain, kind, region, status, build_tags_json, runtime_version AS runtimeVersion
       FROM hosts
       WHERE id = ?
     `).get(hostId);

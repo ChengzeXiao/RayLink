@@ -3,7 +3,10 @@
 ## 0.2.33 (unreleased)
 
 - Add SSH onboarding with durable jobs, pinned host keys, password/key authentication, resumable installation, automatic protocol publication, metering and subscription verification.
-- Add HTTP MCP management with 46 scoped tools and an Owner credential console; SSH onboarding requires a separately granted hosts.provision scope.
+- Add MCP Server management over Streamable HTTP with 48 scoped tools and an Owner Bearer Token console; SSH onboarding requires a separately granted hosts.provision scope.
+- Add current-password-verified administrator username/password changes, session revocation and MCP token revocation on password reset; prevent stale concurrent logins from restoring access.
+- Automate Cloudflare node subdomains, retain separate SSH IPs, inherit enabled public protocols and verify existing subscriptions; preserve working Shadowsocks when domain setup needs retry.
+- Share remote ACME providers on sing-box 1.14, use the Node writable certificate directory and HTTP-01 TCP80, and activate QUIC transports over UDP.
 - Encrypt durable MCP write outcomes, deduplicate retries across restarts, and report uncertain crash outcomes without blindly reapplying changes.
 - Bundle locked production npm dependencies, validate them before service switching, and include them in release SBOMs.
 

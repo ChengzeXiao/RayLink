@@ -239,6 +239,7 @@ function applyBootstrap(data) {
   controlPlane.telemetry = data.telemetry || { windowHours: 24, networkSeries: [] };
   controlPlane.access = data.access || null;
   controlPlane.certificate = data.certificate || { mode: null, email: "" };
+  controlPlane.nodeDomains = data.nodeDomains || null;
   controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
@@ -648,7 +649,7 @@ function renderDashboardNodes({ hosts, runtime, ready }) {
     return `
       <button class="node-row" data-open-host="${escapeHtml(host.id)}">
         <span class="node-pulse ${status.className === "good" ? "" : "warning"}"></span>
-        <span class="node-name"><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span>
+        <span class="node-name"><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span>
         <span class="node-load" title="CPU ${cpu.toFixed(1)}%"><i style="--load:${cpu}%"></i></span>
         <span class="latency ${status.className === "good" ? "" : "warning"}">${escapeHtml(status.label)}</span>
       </button>`;
@@ -669,7 +670,7 @@ function renderDashboardNodes({ hosts, runtime, ready }) {
     return `
       <article class="node-health-card">
         <div class="node-health-heading">
-          <button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span></button>
+          <button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span></button>
           <span class="status-badge ${status.className}"><i></i>${escapeHtml(status.label)}</span>
         </div>
         <div class="node-health-metrics">
@@ -851,7 +852,7 @@ function renderHostTopology(hosts, runtime) {
         <span class="topology-node-mark"><i></i>SB</span>
         <span class="topology-node-copy">
           <strong>${escapeHtml(host.name)}</strong>
-          <small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small>
+          <small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small>
           <em><i></i>${escapeHtml(type)} · ${escapeHtml(state.label)}</em>
         </span>
       </button>`;
@@ -939,7 +940,7 @@ function renderHosts() {
       : "尚无心跳";
     return `
     <tr>
-      <td><button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span></button></td>
+      <td><button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span></button></td>
       <td><span class="status-badge ${statusClass}"><i></i>${status}</span></td>
       <td>${protocolLabels.length
         ? `<div class="host-protocol-tags" aria-label="已启用 ${protocolLabels.length} 个入口协议">${protocolLabels.map(({ name, connection }) => `<span class="tag protocol-latency-tag"><span>${escapeHtml(name)}</span><em class="protocol-latency-value ${connection.className}" title="${escapeHtml(connection.title)}">${escapeHtml(connection.summary)}</em></span>`).join("")}</div>`
@@ -1326,17 +1327,17 @@ async function revokeMcpCredential(button) {
 function renderAdminAccess() {
   const target = document.querySelector("#admin-access-list");
   const auditTarget = document.querySelector("#audit-event-list");
-  if (target) {
+  if (target && !target.contains(document.activeElement)) {
     target.innerHTML = controlPlane.admins.length
       ? controlPlane.admins.map((admin) => `
         <div class="admin-access-row" data-admin-row="${escapeHtml(admin.id)}">
-          <span><strong>${escapeHtml(admin.username)}</strong><small>创建于 ${new Date(admin.createdAt).toLocaleString("zh-CN")}</small></span>
+          <label class="field"><span class="sr-only">管理员用户名</span><input data-admin-username ${admin.id === controlPlane.currentAdmin?.id ? "disabled" : ""} value="${escapeHtml(admin.username)}" minlength="3" maxlength="64" aria-label="${escapeHtml(admin.username)} 的用户名" autocomplete="off"><small>创建于 ${new Date(admin.createdAt).toLocaleString("zh-CN")}</small></label>
           <select data-admin-role aria-label="${escapeHtml(admin.username)} 的角色">
             ${["owner", "operator", "support", "auditor"].map((role) => (
               `<option value="${role}" ${admin.role === role ? "selected" : ""}>${role}</option>`
             )).join("")}
           </select>
-          <input data-admin-password type="password" minlength="12" autocomplete="new-password" placeholder="留空则不重置密码" aria-label="重置 ${escapeHtml(admin.username)} 的密码">
+          <input data-admin-password ${admin.id === controlPlane.currentAdmin?.id ? 'disabled placeholder="请从个人登录信息修改"' : 'placeholder="留空则不重置密码"'} type="password" minlength="12" autocomplete="new-password" aria-label="重置 ${escapeHtml(admin.username)} 的密码">
           <button class="button secondary" data-save-admin="${escapeHtml(admin.id)}">保存</button>
         </div>`).join("")
       : '<div class="empty-state">当前角色不能查看管理员列表。</div>';
@@ -1381,22 +1382,19 @@ async function saveAdministrator(adminId) {
   if (!row) return;
   const button = row.querySelector("[data-save-admin]");
   const password = row.querySelector("[data-admin-password]").value;
+  const username = row.querySelector("[data-admin-username]").value.trim();
   button.disabled = true;
   try {
     await api(`/api/admins/${encodeURIComponent(adminId)}`, {
       method: "PATCH",
       body: JSON.stringify({
         role: row.querySelector("[data-admin-role]").value,
-        ...(password ? { password } : {})
+        ...(adminId !== controlPlane.currentAdmin?.id ? { username, ...(password ? { password } : {}) } : {})
       })
     });
-    if (password && adminId === controlPlane.currentAdmin?.id) {
-      showAdminLogin();
-      elements.authError.textContent = "密码已更新，请使用新密码重新登录。";
-      return;
-    }
+    row.querySelector("[data-admin-password]").value = "";
     await loadBootstrap();
-    showToast("管理员已更新", password ? "角色和登录密码已经更新。" : "管理员角色已经更新。");
+    showToast("管理员已更新", password ? "登录信息已更新，该账号的会话和 MCP Token 已撤销。" : "用户名和角色已保存。");
   } catch (error) {
     showToast("更新管理员失败", error.message);
   } finally {
@@ -1421,6 +1419,70 @@ async function createDatabaseBackup() {
   } finally {
     button.disabled = false;
     button.innerHTML = `${icon("rollback")} 立即备份`;
+  }
+}
+
+function renderNodeDomainSettings() {
+  const form = document.querySelector("#node-domain-settings-form");
+  const settings = controlPlane.nodeDomains || {};
+  const owner = controlPlane.currentAdmin?.role === "owner";
+  form.elements.provider.value = settings.provider || "disabled";
+  form.elements.zoneId.value = settings.zoneId || "";
+  form.elements.baseDomain.value = settings.baseDomain || "";
+  form.elements.apiToken.value = "";
+  form.elements.apiToken.placeholder = settings.tokenConfigured ? "已配置；留空保留现有 Token" : "Cloudflare API Token";
+  form.elements.autoProvision.checked = Boolean(settings.autoProvision);
+  form.elements.inheritProtocols.checked = settings.inheritProtocols !== false;
+  form.querySelectorAll("input, select, button").forEach(input => { input.disabled = !owner; });
+  setText("#node-domain-status", `${settings.tokenConfigured ? "DNS Token 已配置" : "尚未配置 DNS Token"}${owner ? " · Token 不会回显" : " · 仅 Owner 可修改"}`);
+  syncNodeDomainProvider();
+}
+
+function syncNodeDomainProvider() {
+  const form = document.querySelector("#node-domain-settings-form");
+  const enabled = form.elements.provider.value === "cloudflare";
+  form.querySelector("[data-cloudflare-fields]").hidden = !enabled;
+  form.elements.zoneId.required = enabled;
+  form.elements.baseDomain.required = enabled;
+}
+
+async function loadNodeDomainSettings() {
+  const adminId = controlPlane.currentAdmin?.id;
+  if (!adminId) return;
+  try {
+    const data = await api("/api/settings/node-domains", { signal: AbortSignal.timeout(15_000) });
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    controlPlane.nodeDomains = data.nodeDomains;
+    renderNodeDomainSettings();
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id) setText("#node-domain-status", `读取失败：${error.message}`);
+  }
+}
+
+async function saveNodeDomainSettings(event) {
+  event.preventDefault();
+  if (controlPlane.currentAdmin?.role !== "owner") return;
+  const adminId = controlPlane.currentAdmin.id;
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  if (button.disabled) return;
+  button.disabled = true;
+  const apiToken = form.elements.apiToken.value.trim();
+  try {
+    const data = await api("/api/settings/node-domains", { method: "PATCH", body: JSON.stringify({
+      provider: form.elements.provider.value, zoneId: form.elements.zoneId.value.trim(), baseDomain: form.elements.baseDomain.value.trim(),
+      autoProvision: form.elements.autoProvision.checked, inheritProtocols: form.elements.inheritProtocols.checked,
+      ...(apiToken ? { apiToken } : {})
+    }) });
+    form.elements.apiToken.value = "";
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    controlPlane.nodeDomains = data.nodeDomains;
+    renderNodeDomainSettings();
+    showToast("节点域名设置已保存", "新的自动接入任务将使用此设置，现有主机不受影响。");
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id) setText("#node-domain-status", `保存失败：${error.message}`);
+  } finally {
+    button.disabled = controlPlane.currentAdmin?.role !== "owner";
   }
 }
 
@@ -1587,6 +1649,8 @@ function showAdminLogin() {
   closeDrawer({ restoreFocus: false, clearContent: true });
   document.documentElement.classList.remove("hide-root-scrollbar");
   controlPlane.currentAdmin = null;
+  controlPlane.nodeDomains = null;
+  document.querySelector("#node-domain-settings-form")?.reset();
   elements.authError.textContent = "";
   elements.authForm.elements.password.value = "";
   elements.authScreen.hidden = false;
@@ -1620,7 +1684,66 @@ async function logoutControlPlane(button) {
   if (sessionEnded) showAdminLogin();
 }
 
+function clearPersonalAccountSecrets() {
+  elements.drawerContent.querySelectorAll('[data-personal-account] input[type="password"]').forEach((input) => { input.value = ""; });
+}
+
+function openPersonalAccount(mode = "profile") {
+  if (!controlPlane.currentAdmin) return;
+  setProfileMenu(false);
+  const password = mode === "password";
+  openDrawer({
+    title: "个人登录信息", eyebrow: "我的账号", saveLabel: "保存并重新登录",
+    content: `<div class="account-mode-switch" role="group" aria-label="修改登录信息">
+      <button type="button" class="button ${password ? "secondary" : "primary"}" data-account-mode="profile" aria-pressed="${!password}">修改用户名</button>
+      <button type="button" class="button ${password ? "primary" : "secondary"}" data-account-mode="password" aria-pressed="${password}">修改密码</button>
+    </div>
+    <form id="account-${password ? "password" : "profile"}-form" data-personal-account class="drawer-form">
+      <p class="field-hint">当前账号：${escapeHtml(controlPlane.currentAdmin.username)}。修改成功后，所有浏览器会话将退出，需要重新登录。${password ? "此账号的全部 MCP Token 也会立即撤销，请重新创建并更新客户端配置。" : "现有 MCP Token 保持有效。"}</p>
+      ${password ? `<input type="text" name="username" autocomplete="username" value="${escapeHtml(controlPlane.currentAdmin.username)}" hidden>` : `<label class="field"><span>新用户名</span><input name="username" value="${escapeHtml(controlPlane.currentAdmin.username)}" minlength="3" maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\\-]{2,63}" autocomplete="username" required><small>3–64 位字母、数字、下划线、点或短横线，以字母或数字开头。</small></label>`}
+      <label class="field"><span>当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
+      ${password ? `<label class="field"><span>新密码</span><input name="newPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required><small>至少 12 位，须与当前密码不同。</small></label><label class="field"><span>确认新密码</span><input name="confirmPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>` : ""}
+      <button type="submit" hidden>保存并重新登录</button>
+    </form>`
+  });
+}
+
+async function savePersonalAccountForm(form) {
+  if (form.dataset.saving === "true") return;
+  const adminId = controlPlane.currentAdmin?.id;
+  if (!adminId) return;
+  form.querySelector?.("[data-form-error]")?.remove();
+  const password = form.id === "account-password-form";
+  if (password && form.elements.newPassword.value !== form.elements.confirmPassword.value) {
+    showDrawerFormError(form, new Error("两次输入的新密码不一致。"));
+    return;
+  }
+  const username = password ? controlPlane.currentAdmin.username : form.elements.username.value.trim();
+  const body = { currentPassword: form.elements.currentPassword.value };
+  if (password) body.newPassword = form.elements.newPassword.value;
+  else body.username = username;
+  form.dataset.saving = "true";
+  elements.drawerSave.disabled = true;
+  elements.drawerSave.textContent = "正在保存…";
+  try {
+    await api(`/api/account/${password ? "password" : "profile"}`, { method: password ? "POST" : "PATCH", body: JSON.stringify(body) });
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    clearPersonalAccountSecrets();
+    showAdminLogin();
+    elements.authForm.elements.username.value = username;
+    elements.authError.textContent = password ? "密码已更新，所有会话和 MCP Token 已撤销。请使用新密码重新登录。" : "用户名已更新，所有会话已退出。请使用新用户名重新登录。";
+  } catch (error) {
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    if (error.status === 401 || error.code === "ACCOUNT_CHANGED") { showAdminLogin(); elements.authError.textContent = "账号信息已变化，请重新登录。"; return; }
+    if (form.isConnected) showDrawerFormError(form, error);
+  } finally {
+    delete form.dataset.saving;
+    if (form.isConnected) { elements.drawerSave.disabled = false; elements.drawerSave.textContent = "保存并重新登录"; }
+  }
+}
+
 function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
+  clearPersonalAccountSecrets();
   clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
   provisioning.drawerJobId = null;
   lastFocusedElement = document.activeElement;
@@ -1638,6 +1761,7 @@ function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
 }
 
 function closeDrawer({ restoreFocus = true, clearContent = false } = {}) {
+  clearPersonalAccountSecrets();
   clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
   provisioning.drawerJobId = null;
   elements.drawer.classList.remove("open");
@@ -2003,7 +2127,7 @@ function hostDrawerMarkup(hostId) {
     </article>`).join("");
   return `
     <form class="drawer-form" id="host-drawer-form" data-host-id="${escapeHtml(host.id)}">
-      <div class="drawer-profile"><span class="avatar">${escapeHtml(host.name.slice(0, 1))}</span><div><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></div></div>
+      <div class="drawer-profile"><span class="avatar">${escapeHtml(host.name.slice(0, 1))}</span><div><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></div></div>
       <p class="drawer-section-label">主机连接</p>
       <label class="field"><span>名称</span><input name="hostname" value="${escapeHtml(host.name)}" placeholder="例如：东京生产节点" required></label>
       <label class="field"><span>节点连接地址（每台 Host 独立）</span><input name="address" value="${escapeHtml(host.address)}" placeholder="node.example.com" required><small class="field-hint">每台 Host 可以使用不同的域名或公网 IP，订阅会使用这里的地址连接该节点。</small></label>
@@ -2096,6 +2220,14 @@ function syncProvisioningAuthentication(form) {
   form.querySelector(".provision-options").hidden = mode === "resume";
 }
 
+function syncProvisioningDomain(form) {
+  const mode = form.elements.domainMode.value;
+  form.querySelector("[data-provision-domain-field]").hidden = mode !== "existing";
+  form.elements.endpointDomain.required = mode === "existing";
+  if (mode !== "existing") form.elements.endpointDomain.value = "";
+  form.querySelector("[data-provision-inherit]").hidden = mode === "none";
+}
+
 function canProvision() { return ["owner", "operator"].includes(controlPlane.currentAdmin?.role); }
 
 function clearProvisioning() {
@@ -2113,13 +2245,18 @@ function provisioningFormMarkup(job = null) {
   const field = (label, name, type, attributes = "") => `<label class="field"><span>${label}</span><input name="${name}" type="${type}" ${attributes}><small class="field-error"></small></label>`;
   return `<form class="drawer-form" id="provision-host-form" autocomplete="off" ${job ? `data-job-id="${escapeHtml(job.id)}"` : ""}>
     <div class="drawer-profile"><span class="avatar">${icon("terminal")}</span><div><strong>${job ? "重试原接入任务" : "SSH 自动接入 VPS"}</strong><small>安装 → 心跳 → 协议启用 → 连通与订阅验证</small></div></div>
-    <p class="field-hint">需要 Linux、systemd 与 root 或 sudo 权限；VPS 必须能访问控制面的公网 HTTPS 地址。默认启用 Shadowsocks 稳定协议，无需节点域名。</p>
+    <p class="field-hint">需要 Linux、systemd 与 root 或 sudo 权限；VPS 必须能访问控制面的公网 HTTPS 地址。始终启用 Shadowsocks 稳定协议；有节点域名时可自动配置 TLS 协议。</p>
     ${job ? `<div class="notice-card"><div><strong>${escapeHtml(job.input.name)}</strong><p>${escapeHtml(job.input.username)}@${escapeHtml(job.input.host)}:${job.input.port} · 保留原任务和 Host；节点已在线时可只继续配置验证。</p></div></div>` : `
       ${field("公网 IP", "host", "text", 'placeholder="203.0.113.10 或 IPv6" required spellcheck="false"')}
       <div class="field-grid">${field("SSH 端口", "port", "number", 'value="22" min="1" max="65535" required')}${field("登录用户", "username", "text", 'value="root" required autocomplete="off"')}</div>`}
     <label class="field"><span>${job ? "重试方式" : "登录方式"}</span><select name="authMethod" data-provision-auth><option value="password">密码</option><option value="privateKey">SSH 私钥</option>${job ? '<option value="resume">仅继续配置验证（节点已在线）</option>' : ""}</select></label>
     <div data-provision-password>${field("SSH 密码", "password", "password", 'required autocomplete="new-password"')}</div>
     <div data-provision-key hidden><label class="field"><span>SSH 私钥</span><textarea name="privateKey" rows="6" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><small class="field-error"></small></label>${field("私钥口令（可选）", "passphrase", "password", 'autocomplete="new-password"')}</div>
+    ${job ? "" : `<p class="drawer-section-label">节点域名与协议</p>
+      <label class="field"><span>域名方式</span><select name="domainMode" data-provision-domain><option value="auto">自动分配域名（推荐）</option><option value="existing">使用已解析域名</option><option value="none">仅 IP / Shadowsocks</option></select></label>
+      <div data-provision-domain-field hidden>${field("已解析到此 VPS 的域名", "endpointDomain", "text", 'placeholder="node.example.com" spellcheck="false"')}</div>
+      <label class="node-domain-option" data-provision-inherit><input name="inheritProtocols" type="checkbox" ${controlPlane.nodeDomains?.inheritProtocols !== false ? "checked" : ""}><span>继承本机可一键启用的公网协议</span></label>
+      <p class="field-hint">自动模式使用系统 DNS 设置；未配置或未启用自动域名时只启用 Shadowsocks。已有域名需先解析到此 VPS。TLS 签发依赖系统证书邮箱与公网验证条件；域名不会替换 SSH IP。</p>`}
     <details class="provision-options"><summary>sudo 密码${job ? "" : " / 名称 / 区域（可选）"}</summary>
       ${field("sudo 密码（需要时填写）", "sudoPassword", "password", 'autocomplete="new-password"')}
       ${job ? "" : `${field("名称", "hostname", "text", 'maxlength="80" placeholder="默认 VPS-IP"')}${field("区域标识", "region", "text", 'pattern="[A-Za-z0-9-]{2,32}" placeholder="默认 global"')}<p class="field-hint">仅向“全部节点”或该区域范围内的有效用户自动下发，不改变任何用户权益。</p>`}
@@ -2136,6 +2273,8 @@ async function submitProvisioningForm(form) {
   if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
   const body = form.dataset.jobId ? { requestId: form.dataset.requestId, ...credentials } : {
     requestId: form.dataset.requestId, host: field("host").trim(), port: Number(field("port")), username: field("username").trim(),
+    domainMode: field("domainMode") || "auto", inheritProtocols: (field("domainMode") || "auto") !== "none" && form.elements.inheritProtocols?.checked !== false,
+    ...(field("domainMode") === "existing" ? { endpointDomain: field("endpointDomain").trim() } : {}),
     ...(field("hostname").trim() ? { name: field("hostname").trim() } : {}), ...(field("region").trim() ? { region: field("region").trim() } : {}), ...credentials
   };
   const path = form.dataset.jobId ? `/api/hosts/provision/${encodeURIComponent(form.dataset.jobId)}/retry` : "/api/hosts/provision";
@@ -2164,9 +2303,11 @@ function provisioningProgressMarkup(job) {
     <h3>${escapeHtml(provisioningLabels[job.status] || job.status)}</h3>
     <progress class="provision-progress" max="100" value="${Number(job.progress) || 0}" aria-label="接入进度"></progress>
     <p role="status" aria-live="polite">${escapeHtml(job.message)} · ${Number(job.progress) || 0}%</p>
+    ${job.result?.endpointDomain ? `<p class="field-hint">节点域名：<strong>${escapeHtml(job.result.endpointDomain)}</strong></p>` : ""}
     ${job.errorCode ? `<p class="provision-error">${escapeHtml(job.errorCode)}</p>` : ""}
     ${job.hostKeyFingerprint ? `<p class="field-hint">SSH 指纹 <code class="provision-fingerprint">${escapeHtml(job.hostKeyFingerprint)}</code></p>` : ""}
     ${completed ? `<div class="notice-card"><div><strong>${job.result?.subscriptionStatus === "verified" ? `已验证 ${Number(job.result.verifiedUserCount) || 0} 位用户的订阅` : "等待有效用户"}</strong><p>${job.result?.subscriptionStatus === "verified" ? "有权限的用户刷新客户端订阅后可获得新节点。" : "尚无可用于验证的有效用户；创建或启用符合节点范围的用户后，刷新订阅获取节点。"}</p></div></div>` : ""}
+    ${job.result?.skippedProtocols?.length ? `<div class="notice-card"><div><strong>未自动启用的协议</strong>${job.result.skippedProtocols.map((entry) => `<p>${escapeHtml(entry.type)}：${entry.reason === "DOMAIN_REQUIRED" ? "需要节点域名才能启用 TLS" : "需要手动配置，请在主机入口协议中处理"}</p>`).join("")}</div></div>` : ""}
     ${job.result?.protocolChecks?.length ? `<div class="provision-checks">${job.result.protocolChecks.map((check) => `<p><strong>${escapeHtml(check.type)}</strong><span>${escapeHtml(check.state)}${check.latencyMs == null ? "" : ` · ${Number(check.latencyMs)} ms`}</span></p>`).join("")}</div>` : ""}
     ${["failed", "interrupted"].includes(job.status) ? `<button type="button" class="button primary" data-retry-provision="${escapeHtml(job.id)}">重试原任务</button>` : ""}
     ${job.hostId ? `<button type="button" class="button secondary" data-open-host="${escapeHtml(job.hostId)}">查看主机</button>` : ""}
@@ -2539,7 +2680,9 @@ function showDrawerFormError(form, error) {
     message = document.createElement("p");
     message.className = "auth-error";
     message.dataset.formError = "";
-    form.querySelector(".drawer-profile")?.after(message);
+    const profile = form.querySelector(".drawer-profile");
+    if (profile) profile.after(message);
+    else form.prepend(message);
   }
   message.textContent = error.message;
   message.classList.add("visible");
@@ -2740,6 +2883,10 @@ async function saveDrawer() {
   const form = elements.drawerContent.querySelector("form");
   if (!form) {
     closeDrawer();
+    return;
+  }
+  if (["account-profile-form", "account-password-form"].includes(form.id)) {
+    if (form.reportValidity()) await savePersonalAccountForm(form);
     return;
   }
   if (!validateDrawerForm(form)) return;
@@ -3139,12 +3286,16 @@ function openAdvancedConfig() {
 
 document.addEventListener("change", (event) => {
   if (event.target.matches("[data-provision-auth]")) syncProvisioningAuthentication(event.target.form);
+  if (event.target.matches("[data-provision-domain]")) syncProvisioningDomain(event.target.form);
 });
 document.addEventListener("submit", (event) => {
-  if (event.target.id === "provision-host-form") { event.preventDefault(); if (!elements.drawerSave.disabled) void saveDrawer(); }
+  if (event.target.id === "provision-host-form" || event.target.matches("[data-personal-account]")) { event.preventDefault(); if (!elements.drawerSave.disabled) void saveDrawer(); }
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-open-account]")) { openPersonalAccount(); return; }
+  const accountMode = event.target.closest("[data-account-mode]");
+  if (accountMode) { openPersonalAccount(accountMode.dataset.accountMode); return; }
   const logoutButton = event.target.closest("[data-logout]");
   if (logoutButton) {
     await logoutControlPlane(logoutButton);
@@ -3153,7 +3304,7 @@ document.addEventListener("click", async (event) => {
 
   if (event.target.closest("#profile-menu-trigger")) {
     setProfileMenu(elements.profileMenu.hidden);
-    if (!elements.profileMenu.hidden) elements.profileMenu.querySelector("[data-logout]").focus();
+    if (!elements.profileMenu.hidden) elements.profileMenu.querySelector("button").focus();
     return;
   }
 
@@ -3184,7 +3335,9 @@ document.addEventListener("click", async (event) => {
   }
 
   if (event.target.closest("[data-new-host]")) {
-    openNewHost();
+    const adminId = controlPlane.currentAdmin?.id;
+    await loadNodeDomainSettings();
+    if (adminId === controlPlane.currentAdmin?.id && canProvision()) openNewHost();
     return;
   }
 
@@ -3271,6 +3424,7 @@ document.addEventListener("click", async (event) => {
       await refreshReadiness(document.querySelector("[data-refresh-readiness]"));
     }
     if (systemTab.dataset.systemTab === "mcp") await loadMcpAccess();
+    if (systemTab.dataset.systemTab === "certificates") await loadNodeDomainSettings();
     if (systemTab.dataset.systemTab === "hosts") await loadProvisioningJobs();
     return;
   }
@@ -3434,7 +3588,7 @@ document.addEventListener("click", async (event) => {
       (target.value || target.textContent).trim(),
       target.id.includes("subscription")
         ? "订阅地址已复制，请通过安全渠道交付。"
-        : "用户中心入口已复制到剪贴板。"
+        : target.id === "mcp-endpoint" ? "MCP Server Endpoint 已复制。" : "内容已复制到剪贴板。"
     );
     return;
   }
@@ -3460,6 +3614,8 @@ elements.drawerCancel.addEventListener("click", closeDrawer);
 elements.drawerScrim.addEventListener("click", closeDrawer);
 elements.drawerSave.addEventListener("click", saveDrawer);
 document.querySelector("#certificate-settings-form").addEventListener("submit", saveCertificateSettings);
+document.querySelector("#node-domain-settings-form").addEventListener("submit", saveNodeDomainSettings);
+document.querySelector("#node-domain-provider").addEventListener("change", syncNodeDomainProvider);
 document.querySelector("#admin-create-form")?.addEventListener("submit", createAdministrator);
 document.querySelector("#mcp-create-form").addEventListener("submit", createMcpCredential);
 document.querySelector("#mcp-scope-list").addEventListener("change", () => {

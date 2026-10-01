@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
+import { normalizeNodeDomain } from "./node-domains.js";
 
 function failure(code, message, statusCode = 422) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -44,7 +45,18 @@ function settings(input = {}) {
     throw failure("INVALID_PROVISIONING_INPUT", "SSH 用户、区域或协议预设格式不正确");
   }
   // Never spread input: the caller holds credentials only for the active attempt.
-  return { ...target, username, name: text(input.name ?? `VPS-${target.host}`, "Host 名称", 80), region, preset };
+  const options = {};
+  if (input.domainMode !== undefined) {
+    if (!["auto", "existing", "none"].includes(input.domainMode)) throw failure("INVALID_PROVISIONING_INPUT", "请选择有效的域名配置方式");
+    options.domainMode = input.domainMode;
+    if (input.domainMode === "existing") options.endpointDomain = normalizeNodeDomain(input.endpointDomain);
+    else if (input.endpointDomain) throw failure("INVALID_PROVISIONING_INPUT", "手动域名需选择已解析域名模式");
+  } else if (input.endpointDomain) throw failure("INVALID_PROVISIONING_INPUT", "手动域名需选择已解析域名模式");
+  if (input.inheritProtocols !== undefined) {
+    if (typeof input.inheritProtocols !== "boolean") throw failure("INVALID_PROVISIONING_INPUT", "继承协议选项须为布尔值");
+    options.inheritProtocols = input.inheritProtocols;
+  }
+  return { ...target, username, name: text(input.name ?? `VPS-${target.host}`, "Host 名称", 80), region, preset, ...options };
 }
 
 function view(row) {
@@ -65,6 +77,11 @@ const terminal = new Set(["succeeded", "failed", "interrupted"]);
 function safeResult(input = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw failure("INVALID_PROVISIONING_INPUT", "任务结果格式不正确");
   const result = {};
+  if (input.endpointDomain) result.endpointDomain = normalizeNodeDomain(input.endpointDomain);
+  if (input.skippedProtocols !== undefined) {
+    if (!Array.isArray(input.skippedProtocols) || input.skippedProtocols.length > 32) throw failure("INVALID_PROVISIONING_INPUT", "跳过协议列表无效");
+    result.skippedProtocols = input.skippedProtocols.map((entry) => ({ type: text(entry.type, "协议", 64), reason: text(entry.reason, "原因", 64) }));
+  }
   for (const key of ["hostId", "deploymentId", "runtimeVersion", "nodeVersion", "usageMeteringStatus"]) {
     if (input[key] !== undefined) result[key] = text(input[key], key);
   }

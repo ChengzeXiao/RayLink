@@ -857,7 +857,19 @@ export class NodeRuntimeAdapter {
 
   async publish(task, privateKeyPem = null) {
     if (!task?.configText) throw new Error("发布任务缺少 sing-box 配置");
-    JSON.parse(task.configText);
+    const config = JSON.parse(task.configText);
+    const acmeProviders = [
+      ...(config.certificate_providers || []).filter((provider) => provider.type === "acme"),
+      ...(config.inbounds || []).flatMap((inbound) => inbound.tls?.acme ? [inbound.tls.acme]
+        : inbound.tls?.certificate_provider?.type === "acme" ? [inbound.tls.certificate_provider] : [])
+    ];
+    let storageAdapted = false;
+    for (const provider of acmeProviders) {
+      const directory = join(this.dataDir, "acme");
+      storageAdapted ||= provider.data_directory !== directory;
+      provider.data_directory = directory;
+    }
+    if (storageAdapted) task = { ...task, configText: JSON.stringify(config, null, 2) };
     await mkdir(this.dataDir, { recursive: true, mode: 0o750 });
     const tlsInstallation = await this.installTlsBundle(task, privateKeyPem);
     const temporaryPath = join(this.dataDir, `.config-${process.pid}-${Date.now()}.json`);
@@ -871,6 +883,20 @@ export class NodeRuntimeAdapter {
       hadConfig = await pathExists(this.configPath);
       if (task.activation && this.portVerifier.assertAvailable) {
         await this.portVerifier.assertAvailable(task.activation);
+      }
+      const challengePorts = new Map((task.activation?.challengePorts || []).map((challenge) => [`${challenge.port}/${challenge.network}`, challenge]));
+      for (const provider of acmeProviders) {
+        if (provider.disable_http_challenge || provider.dns01_challenge) continue;
+        const port = provider.alternative_http_port || 80;
+        challengePorts.set(`${port}/tcp`, { port, network: "tcp", purpose: "acme-http-01" });
+      }
+      for (const challenge of challengePorts.values()) {
+        try { await this.portVerifier.assertAvailable?.(challenge); }
+        catch (cause) {
+          throw Object.assign(new Error(`ACME HTTP-01 挑战端口 ${challenge.port}/${challenge.network} 不可用，请释放端口并确认云安全组允许访问`, { cause }), {
+            code: "ACME_CHALLENGE_PORT_OCCUPIED"
+          });
+        }
       }
       if (task.activation?.exposure === "public") {
         for (const rule of [
@@ -925,6 +951,7 @@ export class NodeRuntimeAdapter {
         configPath: this.configPath,
         version: task.version,
         checksum: task.checksum,
+        ...(storageAdapted ? { appliedChecksum: createHash("sha256").update(`${task.configText.trim()}\n`).digest("hex") } : {}),
         tlsAssetsInstalled: tlsInstallation.count,
         ...(activation ? { activation } : {})
       };

@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { ProvisioningState, normalizeProvisioningEndpoint } from "./node-provisioning-state.js";
 import { SshBootstrap } from "./ssh-bootstrap.js";
+import { protocolActivationPolicy } from "./protocol-activation.js";
 
 const fail = (code, message, statusCode = 422) => Object.assign(new Error(message), { code, statusCode });
 const messages = {
@@ -34,6 +35,16 @@ const messages = {
   PROVISIONING_METERING_TIMEOUT: "配置已发布，但运行状态或流量计量尚未就绪",
   PROVISIONING_CONNECTIVITY: "配置已发布，但协议公网验证未通过，请检查云安全组和网络后重试",
   PROVISIONING_SUBSCRIPTION: "节点已运行，但订阅内容验证未通过，请重试",
+  NODE_DNS_API_FAILED: "DNS 自动配置失败，请检查 Cloudflare Zone ID、Token 的 DNS 读写权限和网络后重试",
+  NODE_DNS_RECORD_CONFLICT: "域名已有不匹配或非本节点管理的 DNS 记录，未覆盖原记录",
+  NODE_DNS_ZONE_MISMATCH: "节点基础域名不属于配置的 Cloudflare Zone，请修正系统设置后重试",
+  NODE_DOMAIN_BINDING_CONFLICT: "域名与节点的绑定或 DNS Zone 已变化，请恢复配置后重试",
+  NODE_DOMAIN_DNS_PENDING: "域名尚未完全解析到节点 IP，请检查 A/AAAA、关闭 CDN 代理并等待解析生效后重试",
+  NODE_DNS_CREDENTIAL_UNAVAILABLE: "DNS 凭据不可用，请管理员重新保存 DNS Token",
+  ACME_EMAIL_REQUIRED: "请先在系统设置填写证书通知邮箱，再重试自动配置",
+  ACME_UNAVAILABLE: "节点 Runtime 缺少自动证书能力，请升级后重试",
+  PROTOCOL_UNAVAILABLE: "节点 Runtime 缺少继承协议需要的能力，请升级后重试",
+  ACME_CHALLENGE_PORT_OCCUPIED: "证书 HTTP 验证需要空闲的 TCP 80，请处理节点端口冲突后重试",
   PROVISIONING_FAILED: "接入未完成，请检查节点状态后重试",
   PROVISIONING_INTERRUPTED: "接入已中断；可继续同一任务，未完成 SSH 安装时需重新提供凭据"
 };
@@ -77,8 +88,8 @@ function eligible(user, host) {
 }
 
 export class NodeProvisioning {
-  constructor({ store, sshBootstrap = new SshBootstrap(), publicOrigin, activate, measure, buildClientConfig, acceptedNodeVersions, pollMs = 1000, waitMs = 5 * 60_000 }) {
-    Object.assign(this, { store, sshBootstrap, publicOrigin, activate, measure, buildClientConfig, acceptedNodeVersions, pollMs, waitMs });
+  constructor({ store, sshBootstrap = new SshBootstrap(), publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, pollMs = 1000, waitMs = 5 * 60_000 }) {
+    Object.assign(this, { store, sshBootstrap, publicOrigin, activate, measure, buildClientConfig, nodeDomains, acceptedNodeVersions, pollMs, waitMs });
     this.state = new ProvisioningState(store);
     this.state.interruptPending();
     this.running = new Map();
@@ -211,6 +222,37 @@ export class NodeProvisioning {
       if (activation?.state === "failed" && activation.errorCode !== "PROTOCOL_PORT_OCCUPIED") throw fail("PROVISIONING_APPLY_FAILED", messages.PROVISIONING_APPLY_FAILED);
       return ["public-ready", "port-listening"].includes(activation?.state) && current.appliedProtocols.some((profile) => profile.type === "shadowsocks" && profile.enabled && profile.port === activation.port);
     }, "PROVISIONING_APPLY_TIMEOUT", signal);
+    update({ stage: "domain", progress: 72, message: "配置节点业务域名并检查 DNS 解析" });
+    await this.nodeDomains?.configure(this.store.getHost(host.id), job.input, signal);
+    host = this.store.getHost(host.id);
+    const protocols = ["shadowsocks"], skippedProtocols = [];
+    const inherit = job.input.inheritProtocols ?? this.nodeDomains?.settings().inheritProtocols ?? true;
+    if (inherit) {
+      for (const template of this.store.listHostProtocolConfigs("local").filter((profile) => profile.enabled && profile.type !== "shadowsocks")) {
+        const policy = protocolActivationPolicy(template.type);
+        if (policy.exposure !== "public" || (policy.tls !== "none" && !host.endpointDomain)) {
+          skippedProtocols.push({ type: template.type, reason: policy.exposure !== "public" ? "MANUAL_CONFIGURATION_REQUIRED" : "DOMAIN_REQUIRED" });
+          continue;
+        }
+        update({ stage: "protocols", progress: 76, message: `继承主机协议 ${template.type}，自动配置节点证书和端口` });
+        await this.waitFor(async () => {
+          try {
+            deployment = await this.activate({ hostId: host.id, type: template.type, adminId, template,
+              preferredPort: template.port === job.input.port || template.port === 80 ? (template.port === 65535 ? 8443 : template.port + 1) : template.port });
+            return true;
+          } catch (error) { if (error.code === "RUNTIME_OPERATION_IN_PROGRESS") return false; throw error; }
+        }, "PROVISIONING_APPLY_TIMEOUT", signal);
+        await this.waitFor(() => {
+          const current = this.store.getHost(host.id);
+          const activation = current.protocolActivations.find((entry) => entry.type === template.type);
+          if (activation?.state === "failed" && activation.errorCode !== "PROTOCOL_PORT_OCCUPIED") {
+            throw fail(Object.hasOwn(messages, activation.errorCode) ? activation.errorCode : "PROVISIONING_APPLY_FAILED", messages.PROVISIONING_APPLY_FAILED);
+          }
+          return ["public-ready", "port-listening"].includes(activation?.state) && current.appliedProtocols.some((profile) => profile.type === template.type && profile.enabled && profile.port === activation.port);
+        }, "PROVISIONING_APPLY_TIMEOUT", signal);
+        protocols.push(template.type);
+      }
+    }
     update({ stage: "verifying", progress: 80, message: "检查运行状态、流量计量和公网协议连接" });
     host = await this.waitFor(() => {
       const current = this.store.getHost(host.id);
@@ -221,19 +263,19 @@ export class NodeProvisioning {
       try { measurement = await this.measure({ hostId: host.id }); return true; }
       catch (error) { if (error.code === "PROTOCOL_LATENCY_IN_PROGRESS") return false; throw error; }
     }, "PROVISIONING_CONNECTIVITY", signal);
-    const check = measurement.results.find((entry) => entry.type === "shadowsocks");
-    if (check?.status !== "available") throw fail("PROVISIONING_CONNECTIVITY", messages.PROVISIONING_CONNECTIVITY);
+    const checks = protocols.map((type) => measurement.results.find((entry) => entry.type === type));
+    if (checks.some((check) => check?.status !== "available")) throw fail("PROVISIONING_CONNECTIVITY", messages.PROVISIONING_CONNECTIVITY);
     update({ stage: "subscription", progress: 95, message: "验证用户订阅中的节点与协议" });
     const users = this.store.listUsers().filter((user) => eligible(user, host));
     for (const user of users) {
       signal.throwIfAborted();
       const { singBoxConfig } = await this.buildClientConfig(user.id);
-      if (!singBoxConfig.outbounds.some((outbound) => outbound.type === "shadowsocks" && outbound.server === host.address && outbound.tag === `raylink-${host.id}-shadowsocks`)) throw fail("PROVISIONING_SUBSCRIPTION", messages.PROVISIONING_SUBSCRIPTION);
+      if (!protocols.every((type) => singBoxConfig.outbounds.some((outbound) => outbound.type === type && outbound.server === (host.endpointDomain || host.address) && outbound.tag === `raylink-${host.id}-${type}`))) throw fail("PROVISIONING_SUBSCRIPTION", messages.PROVISIONING_SUBSCRIPTION);
     }
     signal.throwIfAborted();
     update({ status: "succeeded", stage: "complete", progress: 100, message: users.length ? "节点接入完成，协议和用户订阅已验证" : "节点已就绪，创建有权限的用户后自动进入订阅", errorCode: null,
       result: { hostId: host.id, ...(deployment?.deployment?.id ? { deploymentId: deployment.deployment.id } : {}), runtimeVersion: host.runtimeVersion, nodeVersion: host.agentVersion,
-        protocols: ["shadowsocks"], protocolChecks: [{ type: "shadowsocks", state: check.status, latencyMs: check.latencyMs }], usageMeteringStatus: host.usageMetering.status,
+        endpointDomain: host.endpointDomain, protocols, skippedProtocols, protocolChecks: checks.map((check) => ({ type: check.type, state: check.status, latencyMs: check.latencyMs })), usageMeteringStatus: host.usageMetering.status,
         subscriptionVerified: users.length > 0, subscriptionStatus: users.length ? "verified" : "awaiting-users", eligibleUserCount: users.length, verifiedUserCount: users.length } });
   }
 

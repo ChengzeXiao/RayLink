@@ -432,7 +432,7 @@ export function buildMultiHostProtocolClientConfig({
       ) {
         smartExcludedTags.add(tag);
       }
-      return buildClientOutbound(profile, credential, host.address, tag);
+      return buildClientOutbound(profile, credential, host.endpointDomain || host.address, tag);
     });
   });
   return clientConfigForOutbounds(protocolOutbounds, {
@@ -848,7 +848,8 @@ function buildServerTls(profile, runtimeVersion) {
         domain: [profile.tls.serverName],
         default_server_name: profile.tls.serverName,
         email: profile.tls.acmeEmail,
-        data_directory: profile.tls.acmeDataDirectory
+        data_directory: profile.tls.acmeDataDirectory,
+        disable_tls_alpn_challenge: true
       }
     };
   }

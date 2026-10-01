@@ -58,3 +58,18 @@ test("an online-node continuation sends only retry identity without stale SSH cr
   await context.submitProvisioningForm(target);
   assert.deepEqual(body, { requestId: "continue-online" });
 });
+
+test("provisioning an existing domain sends protocol inheritance and keeps SSH IP separate", async () => {
+  let body;
+  const context = { AbortSignal, crypto: { randomUUID: () => "domain-request" }, clearProvisioningSecrets() {}, api: async (_path, options) => { body = JSON.parse(options.body); return { job: { id: "domain-job" } }; } };
+  vm.runInNewContext(handler("submitProvisioningForm"), context);
+  const target = form();
+  target.elements.domainMode = { value: "existing" };
+  target.elements.endpointDomain = { value: " node.example.com " };
+  target.elements.inheritProtocols = { checked: true };
+  await context.submitProvisioningForm(target);
+  assert.equal(body.host, "203.0.113.10");
+  assert.equal(body.domainMode, "existing");
+  assert.equal(body.endpointDomain, "node.example.com");
+  assert.equal(body.inheritProtocols, true);
+});

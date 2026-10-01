@@ -1,10 +1,10 @@
-# HTTP MCP Server
+# MCP Server — Streamable HTTP
 
 RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Streamable HTTP 的 Agent 管理现有系统。生产环境沿用控制面的 HTTPS 反向代理；本地可以使用 `http://127.0.0.1:4199/mcp`。
 
 ## 接入
 
-1. Owner 登录控制面，打开 **系统 → MCP / Agent**。
+1. Owner 登录控制面，打开 **系统 → MCP Server**。
 2. 创建有名称和有效期的凭据，勾选需要的权限。默认只读；读取密钥、管理管理员分别显式授权。
 3. 复制只显示一次的令牌和连接配置，填入 Agent 的 MCP 设置。后续列表仅显示凭据元数据，无法找回令牌；需要时撤销并重新签发。
 4. Agent 先调用 `system_overview`、`users_list`、`hosts_list`、`readiness_get` 了解现状，再执行具体管理动作。
@@ -23,7 +23,15 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 }
 ```
 
-支持静态 Bearer Header 的客户端可直接接入。本版本没有 OAuth 授权服务器，不适用于仅允许 OAuth 登录且不能配置 Header 的客户端。
+界面展示 Streamable HTTP、Endpoint 和 Bearer Token；通用 JSON 中 `type` 保持客户端通用的 `http`。支持静态 Bearer Header 的客户端可直接接入。本版本没有 OAuth 授权服务器，不适用于仅允许 OAuth 登录且不能配置 Header 的客户端。
+
+## 管理员账号
+
+右上角个人菜单的「账号设置」向全部管理员角色开放。修改登录名或密码须输入当前密码，新密码为 12–1024 位、不能与旧密码相同或全为空白；成功后清除当前 Cookie 并撤销该账号全部浏览器会话，须重新登录。用户名更改保留 MCP Token，密码修改及 Owner 重置密码会立即撤销该账号未撤销的 MCP Token；需要重新签发 Agent 凭据。
+
+Owner 在管理员列表可修改其他管理员登录名、角色、密码。本人登录名/密码只通过账号设置修改，REST 管理员 PATCH 和 `admins_update` 均不能绕过当前密码校验。保留最后一位 Owner，拒绝重复登录名，异步登录/账号更新并发时以当前凭据为准。
+
+个人 REST：`PATCH /api/account/profile {currentPassword,username}`、`POST /api/account/password {currentPassword,newPassword}`。不提供读取现有密码的接口。
 
 ## 功能覆盖
 
@@ -37,12 +45,13 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 | 入口协议 | `hosts_protocol_get`, `hosts_protocol_update`, `hosts_protocol_activate`, `hosts_protocol_measure` |
 | 智能分流 | `routing_get`, `routing_update`, `routing_diagnose` |
 | 证书设置 | `certificate_get`, `certificate_update` |
+| 节点域名自动化 | `node_domains_get`, `node_domains_update` |
 | 本地 Runtime | `runtime_status`, `runtime_installation`, `runtime_update_check`, `runtime_install`, `runtime_upgrade`, `runtime_reality_keypair` |
 | 配置发布 | `deployments_list`, `deployments_preview`, `deployments_publish`, `deployments_rollback` |
 | 备份 | `backups_list`, `backups_create`, `backups_verify` |
 | 管理员与审计 | `admins_list`, `admins_create`, `admins_update`, `audit_list` |
 
-共 46 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。SSH 接入只执行固定的安装流程，没有任意 HTTP 转发、Shell 命令、数据库 SQL 或文件读写工具。
+共 48 个工具，覆盖当前已存在的管理员业务操作。初始化、登录会话、MCP 凭据签发/撤销保留在可信的控制面界面；Node 心跳、任务回执属于 Node 自己的认证协议。SSH 接入只执行固定的安装流程，没有任意 HTTP 转发、Shell 命令、数据库 SQL 或文件读写工具。
 
 `hosts_create` 返回手动接入的 Host、一次性 enrollment token 和 VPS 安装命令。使用 `hosts_provision_start` 可[通过 SSH 自动安装、配置协议并验证订阅](ssh-node-provisioning.md)，传入 IP、SSH 用户与密码或私钥即可。启动调用返回持久任务，随后使用 `hosts_provision_get` 检查结果；安装成功、心跳上线、协议探测通过、流量计量正常分别验证。没有有效用户时结果明确标为 `awaiting-users`。
 
@@ -54,7 +63,7 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 - `users.manage`：创建/修改用户、服务权益和门户密码。
 - `runtime.manage`：Host、协议、分流、发布、Runtime 运维。
 - `hosts.provision`：SSH 自动接入和重试；同时需要 `runtime.manage`。此权限需单独勾选，不进入现有预设。
-- `system.manage`：证书设置、备份创建与校验。
+- `system.manage`：证书、节点 DNS 自动化设置、备份创建与校验。
 - `admins.manage`：管理员管理；具有此权限的 Owner Agent 可创建新的高权限管理员，应仅为此类任务授予。
 - `audit.read`：审计查询。
 - `secrets.read`：在对应业务权限基础上返回订阅地址、节点注册令牌、完整协议配置或 Reality 私钥。Auditor 不获得此能力。
@@ -109,3 +118,5 @@ RayLink 的 `/mcp` 与控制面共用 HTTP 服务和业务操作，供支持 Str
 验证命令：`node --test tests/mcp.test.js tests/mcp-tools.test.js tests/mcp-credentials.test.js`，完整回归 `npm run check`。发布包测试验证离线依赖加载和依赖异常时不切换服务。2026-10-01 本地验收：`npm run check` **353/353 通过**（含完整既有 API 回归）。官方 MCP SDK 客户端、2025 HTTP 握手、令牌撤销/降权、跨重启密文重放、真实 SIGKILL 和 HTTP 断线恢复、SSE 关停、错误脱敏均通过。MCP 工作流实际覆盖用户及订阅、Host 登记、路由与证书、协议配置、dry-run 发布/回滚、备份校验、管理员及体检查询。桌面界面完成创建/一次性显示/清除/撤销，390px 视口无横向溢出。
 
 初始 MCP 审查以 `c0e2373` 为基线，独立 Standards 与 Spec 复核完成；本次 SSH 扩展以 `e5ef11d` 为基线。SSH 扩展新增了真实 SDK 的启动/查询/重放和单独 scope 验证，以及 Node 注册、发布、计量和订阅的模拟闭环。真实公网 VPS 安装、生产服务切换和移动网络质量仍需环境实测；工具的 schema/映射覆盖不等于每个外部运维动作都完成了生产验收。
+
+2026-10-01 MCP Server / 账号 / 域名自动化验收（基线 `8b49e2d`）：`npm run check` 共 451 项，450 通过、0 失败、1 项原生环境检查默认跳过；该项已另以真实 sing-box 1.14.2 运行并通过。覆盖密码/登录并发、会话与 MCP Token 撤销、DNS 设置作用域和幂等、Cloudflare A/AAAA 与错误 Zone 恢复、DNS 传播失败续接、协议继承及五种订阅格式；QUIC 的 UDP 激活、监听、防火墙和测量经过专项回归。Standards / Spec 复核发现的问题已修复，无剩余已确认 P1/P2。桌面 UI 完成只读验收，表单提交由公开 handler 和 HTTP 测试覆盖；本轮未进行公网 DNS/CA/VPS 写入、生产部署或移动网络实测。

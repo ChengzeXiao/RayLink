@@ -138,7 +138,8 @@ test("ACME TLS profiles compile a node-bound certificate provider for sing-box 1
       domain: ["node.example.com"],
       default_server_name: "node.example.com",
       email: "ops@example.com",
-      data_directory: "/var/lib/raylink/acme"
+      data_directory: "/var/lib/raylink/acme",
+      disable_tls_alpn_challenge: true
     }
   });
 });

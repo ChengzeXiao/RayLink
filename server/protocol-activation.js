@@ -48,6 +48,7 @@ function measurementFingerprint(host, configuredProfiles, type) {
   const appliedProfiles = host.appliedProtocols?.length ? host.appliedProtocols : configuredProfiles;
   return createHash("sha256").update(JSON.stringify({
     address: host.address,
+    endpointDomain: host.endpointDomain || null,
     configured: configuredProfiles.find((profile) => profile.type === type),
     applied: appliedProfiles.find((profile) => profile.type === type)
   })).digest("hex");
@@ -122,6 +123,10 @@ export function protocolActivationPolicy(type) {
   const policy = policies.get(type);
   if (!policy) throw activationError("PROTOCOL_NOT_FOUND", "sing-box 入站协议不存在", 404);
   return { ...policy };
+}
+
+function protocolNetwork(profile, policy) {
+  return profile.transport?.type === "quic" ? "udp" : policy.network;
 }
 
 function isDomain(value) {
@@ -495,6 +500,7 @@ export class ProtocolActivationManager {
           continue;
         }
         const policy = protocolActivationPolicy(profile.type);
+        const network = protocolNetwork(profile, policy);
         if (policy.exposure !== "public" || !profile.port) {
           const unsupportedReason = policy.exposure === "private"
             ? "仅本机协议不执行公网延迟测试"
@@ -513,7 +519,7 @@ export class ProtocolActivationManager {
             ...(existing || {}),
             state: existing?.state || "port-listening",
             port: profile.port || null,
-            network: policy.network,
+            network,
             publicCheck,
             updatedAt: checkedAt
           });
@@ -535,9 +541,9 @@ export class ProtocolActivationManager {
             try {
               const probe = await this.probePublicProtocol({
                 type: profile.type,
-                address: host.address,
+                address: host.endpointDomain || host.address,
                 port: profile.port,
-                network: policy.network,
+                network,
                 serverConfig,
                 attempts: 1,
                 timeoutMs: 10_000
@@ -660,7 +666,7 @@ export class ProtocolActivationManager {
           ...(existing || {}),
           state: existing?.state || "port-listening",
           port: profile.port,
-          network: policy.network,
+          network,
           publicCheck,
           updatedAt: checkedAt
         });
@@ -675,6 +681,7 @@ export class ProtocolActivationManager {
   async prepare(host, type, policy, catalog, profiles) {
     const current = profiles.find((profile) => profile.type === type);
     if (!current) throw activationError("PROTOCOL_NOT_FOUND", "sing-box 入站协议不存在", 404);
+    const network = protocolNetwork(current, policy);
     const listen = policy.exposure === "private" ? "127.0.0.1"
       : net.isIP(host.address) === 4 ? "0.0.0.0" : "::";
     const usedPorts = profiles
@@ -696,14 +703,14 @@ export class ProtocolActivationManager {
             }
             throw activationError(
               "NO_AVAILABLE_PROTOCOL_PORT",
-              `从 ${preferredPort} 开始未找到可用的 ${policy.network.toUpperCase()} 端口`,
+              `从 ${preferredPort} 开始未找到可用的 ${network.toUpperCase()} 端口`,
               409
             );
           })()
         : await this.portManager.findAvailable({
             preferredPort,
             listen,
-            network: policy.network,
+            network: network,
             usedPorts
           });
     const tls = { ...current.tls, mode: "none" };
@@ -720,7 +727,8 @@ export class ProtocolActivationManager {
       });
     } else if (policy.tls === "managed-certificate") {
       const email = String(this.certificateEmail() || "").trim();
-      if (!isDomain(host.address)) {
+      const domain = host.endpointDomain || host.address;
+      if (!isDomain(domain)) {
         throw activationError(
           "NODE_DOMAIN_REQUIRED",
           `${catalog.name} 自动证书需要先为该节点设置已解析的独立域名`
@@ -733,11 +741,11 @@ export class ProtocolActivationManager {
         );
       }
       if (host.kind === "local" && this.certificateProvider) {
-        const certificate = await this.prepareLocalCertificate(host.address);
+        const certificate = await this.prepareLocalCertificate(domain);
         if (certificate) {
           Object.assign(tls, {
             mode: "certificate",
-            serverName: certificate.serverName || host.address,
+            serverName: certificate.serverName || domain,
             certificatePath: certificate.certificatePath,
             keyPath: certificate.keyPath
           });
@@ -755,7 +763,7 @@ export class ProtocolActivationManager {
       }
       Object.assign(tls, {
         mode: "acme",
-        serverName: host.address,
+        serverName: domain,
         acmeEmail: email
       });
     }
@@ -803,6 +811,7 @@ export class ProtocolActivationManager {
       this.record(hostId, type, "configuring", { progress: 10 });
       const prepared = await this.prepare(host, type, policy, catalog, profiles);
       const candidate = prepared.candidate;
+      const network = protocolNetwork(candidate, policy);
       certificate = prepared.certificate;
       if (candidate.tls.mode === "acme" && !installation.tags?.includes("with_acme")) {
         throw activationError(
@@ -810,11 +819,14 @@ export class ProtocolActivationManager {
           "当前 sing-box 构建缺少自动证书所需的 with_acme"
         );
       }
+      if (candidate.tls.mode === "acme" && host.kind === "local" && this.runtimeMode !== "dry-run"
+        && this.portManager.available && !await this.portManager.available({ listen: candidate.listen, port: 80, network: "tcp" })) {
+        throw activationError("ACME_CHALLENGE_PORT_OCCUPIED", "ACME HTTP-01 挑战需要空闲的 TCP80，请释放端口并确认云安全组允许访问", 409);
+      }
       const saved = this.store.updateHostProtocolConfig(hostId, type, candidate);
       const challengePorts = saved.tls.mode === "acme"
         ? [
-            { port: 80, network: "tcp", purpose: "acme-http-01" },
-            { port: 443, network: "tcp", purpose: "acme-tls-alpn-01" }
+            { port: 80, network: "tcp", purpose: "acme-http-01" }
           ]
         : [];
       this.record(hostId, type, "pending-publish", { progress: 35, port: saved.port });
@@ -824,9 +836,9 @@ export class ProtocolActivationManager {
           activation: {
             hostId,
             type,
-            network: policy.network,
+            network,
             exposure: policy.exposure,
-            address: host.address,
+            address: host.endpointDomain || host.address,
             port: saved.port,
             listen: saved.listen,
             challengePorts,
@@ -845,14 +857,14 @@ export class ProtocolActivationManager {
             state: "deploying",
             asynchronous: true,
             port: saved.port,
-            network: policy.network
+            network
           }
         };
       }
 
       if (policy.exposure === "public") {
         for (const rule of [
-          { port: saved.port, network: policy.network },
+          { port: saved.port, network },
           ...challengePorts
         ]) {
           firewalls.push(await this.firewallManager.open(rule));
@@ -867,7 +879,7 @@ export class ProtocolActivationManager {
         await this.portManager.waitForListening({
           listen: saved.listen,
           port: saved.port,
-          network: policy.network
+          network
         });
       }
       this.record(hostId, type, "port-listening", { progress: 85, port: saved.port });
@@ -875,9 +887,9 @@ export class ProtocolActivationManager {
       if (policy.exposure === "public" && this.runtimeMode !== "dry-run") {
         publicCheck = await this.probePublicProtocol({
           type,
-          address: host.address,
+          address: host.endpointDomain || host.address,
           port: saved.port,
-          network: policy.network
+          network
         });
       } else if (policy.exposure === "public") {
         publicCheck = { reachable: true, simulated: true };
@@ -895,7 +907,7 @@ export class ProtocolActivationManager {
       const activation = this.record(hostId, type, state, {
         progress: 100,
         port: saved.port,
-        network: policy.network,
+        network,
         firewallManaged: firewalls.some((item) => item.managed === true),
         publicCheck
       });

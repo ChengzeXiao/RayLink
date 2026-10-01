@@ -21,7 +21,7 @@ async function fixture(t, overrides = {}) {
         node = new RayLinkNode({ serverUrl: base, enrollmentToken: input.enrollmentToken,
           statePath: join(dataDir, "test-node.json"),
           metadataProvider: async () => ({ hostname: "test-vps", platform: "linux", architecture: "x64", agentVersion: "0.7.0",
-            runtimeVersion: "1.14.2", buildTags: ["with_v2ray_api"], runtimeState: published ? "running" : "stopped",
+            runtimeVersion: "1.14.2", buildTags: overrides.buildTags || ["with_v2ray_api"], runtimeState: published ? "running" : "stopped",
             telemetry: { serviceStatus: published ? "running" : "stopped" } }),
           usageCollector: { async collect() { return { sampleId: randomUUID(), runtimeInstanceId: "test-runtime", observedAt: new Date().toISOString(), users: [] }; } },
           runtimeAdapter: { async publish(payload) {
@@ -41,6 +41,7 @@ async function fixture(t, overrides = {}) {
     backupIntervalMs: 0, alertIntervalMs: 0, runtimeUpdateCheckIntervalMs: 0, entitlementReconcileIntervalMs: 0,
     ruleSetCache: { prepare: async () => {}, available: () => false, get: async () => null },
     installer: { async status() { return { installed: false, tags: [] }; } },
+    endpointResolver: { async resolve({ fallbackAddress }) { return fallbackAddress ? { address: fallbackAddress } : null; } },
     protocolProbe: async () => ({ reachable: true, latencyMs: 12, probe: "sing-box-tools-fetch" }),
     sshBootstrap, provisioningPollMs: 15, provisioningWaitMs: 3000, nodeHeartbeatMinIntervalMs: 0, ...overrides });
   // Model a configured control plane that explicitly allows its local test listener.
@@ -192,4 +193,84 @@ test("HTTP MCP requires explicit SSH scope and completes onboarding through the 
   const replay = await agent.callTool(input);
   assert.equal(replay.structuredContent.job.id, job.id);
   assert.equal(f.installations.length, 1);
+});
+
+test("automatic node domain inherits main-host public protocols with independent shared ACME and five subscriptions", async (t) => {
+  const records = [], dnsWrites = [];
+  const f = await fixture(t, {
+    buildTags: ["with_v2ray_api", "with_acme"], nodeDomainPollMs: 1, nodeDomainWaitMs: 30,
+    nodeDomainLookup: async () => [{ address: "203.0.113.42" }],
+    nodeDomainFetch: async (url, init) => {
+      if (!url.includes("/dns_records")) return Response.json({ success: true, result: { name: "example.com" } });
+      if (init.method === "POST") { records.push({ id: "cf-one", ...JSON.parse(init.body) }); dnsWrites.push(init.body); }
+      return Response.json({ success: true, result: init.method === "POST" ? records[0] : records });
+    }
+  });
+  const user = await (await f.api("/api/users", "POST", { name: "Domain user", email: "domain@example.com", quotaGb: 100, nodeScope: ["all"], expiresAt: "2099-01-01", portalStatus: "active", state: "active" })).json();
+  const subscription = await (await f.api(`/api/users/${user.id}/subscription/rotate`, "POST", {})).json();
+  await f.api("/api/settings/certificate", "PATCH", { email: "ops@example.com" });
+  const settings = await f.api("/api/settings/node-domains", "PATCH", { provider: "cloudflare", zoneId: "a".repeat(32), baseDomain: "nodes.example.com", apiToken: "CF-private-fixture", autoProvision: true, inheritProtocols: true });
+  assert.equal(settings.status, 200);
+  for (const [type, port] of [["vless", 8443], ["trojan", 9443]]) {
+    f.app.store.updateHostProtocolConfig("local", type, { enabled: true, port,
+      tls: { mode: "certificate", serverName: "main.example.com", certificatePath: "/main-only/fullchain.pem", keyPath: "/main-only/private.key" },
+      ...(type === "vless" ? { transport: { type: "ws", path: "/access" } } : {}) });
+  }
+  const { job } = await (await f.start({ domainMode: "auto", inheritProtocols: true })).json();
+  const finished = await f.finish(job.id);
+  assert.equal(finished.status, "succeeded", JSON.stringify(finished));
+  assert.deepEqual([...finished.result.protocols].sort(), ["shadowsocks", "trojan", "vless"]);
+  assert.equal(finished.result.subscriptionStatus, "verified");
+  assert.equal(finished.result.protocolChecks.length, 3);
+  const host = f.app.store.getHost(finished.hostId);
+  assert.equal(host.address, "203.0.113.42");
+  assert.match(host.endpointDomain, /^node-.*\.nodes\.example\.com$/);
+  assert.equal(dnsWrites.length, 1);
+  assert.equal(records[0].proxied, false);
+  const config = JSON.parse(f.publications.at(-1).configText);
+  assert.equal(config.certificate_providers.length, 1);
+  assert.equal(config.certificate_providers[0].disable_tls_alpn_challenge, true);
+  assert.deepEqual(config.certificate_providers[0].domain, [host.endpointDomain]);
+  assert.doesNotMatch(f.publications.at(-1).configText, /main-only|main\.example|CF-private-fixture/);
+  assert.equal(config.inbounds.find((entry) => entry.type === "vless").transport.path, "/access");
+  for (const format of ["sing-box", "mihomo", "loon", "egern", "egern-profile"]) {
+    const response = await fetch(`${f.base}${new URL(subscription.subscriptionUrl).pathname}?format=${format}`);
+    assert.equal(response.status, 200, format);
+    const body = await response.text();
+    assert.ok(body.includes(host.endpointDomain), `${format}: preserves endpoint domain or TLS server_name`);
+    assert.doesNotMatch(body, /main-only|CF-private-fixture/);
+  }
+  assert.equal((await (await f.api(`/api/users/${user.id}/subscription`)).json()).subscriptionUrl, subscription.subscriptionUrl);
+});
+
+test("DNS propagation failure keeps Shadowsocks working and resumes the same node without SSH credentials", async (t) => {
+  let resolved = false;
+  const f = await fixture(t, { nodeDomainPollMs: 1, nodeDomainWaitMs: 20,
+    nodeDomainLookup: async () => [{ address: resolved ? "203.0.113.42" : "203.0.113.99" }] });
+  const { job } = await (await f.start({ domainMode: "existing", endpointDomain: "retry.example.com", inheritProtocols: false })).json();
+  const failed = await f.finish(job.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.errorCode, "NODE_DOMAIN_DNS_PENDING");
+  const before = f.app.store.getHost(failed.hostId);
+  assert.ok(before.appliedProtocols.some((profile) => profile.type === "shadowsocks" && profile.enabled));
+  assert.equal(before.endpointDomain, null);
+  resolved = true;
+  const retry = await f.api(`/api/hosts/provision/${job.id}/retry`, "POST", { requestId: "dns-fixed" });
+  assert.equal(retry.status, 202);
+  const finished = await f.finish(job.id);
+  assert.equal(finished.status, "succeeded", JSON.stringify(finished));
+  assert.equal(finished.hostId, failed.hostId);
+  assert.equal(finished.result.endpointDomain, "retry.example.com");
+  assert.equal(f.installations.length, 1);
+  assert.equal(f.app.store.getHost(failed.hostId).address, "203.0.113.42");
+});
+
+test("IP-only provisioning reports skipped domain protocols and retains the default usable Shadowsocks", async (t) => {
+  const f = await fixture(t);
+  f.app.store.updateHostProtocolConfig("local", "vless", { enabled: true, tls: { mode: "certificate", serverName: "main.example.com", certificatePath: "/cert", keyPath: "/key" } });
+  const { job } = await (await f.start({ domainMode: "none", inheritProtocols: true })).json();
+  const finished = await f.finish(job.id);
+  assert.equal(finished.status, "succeeded", JSON.stringify(finished));
+  assert.deepEqual(finished.result.protocols, ["shadowsocks"]);
+  assert.deepEqual(finished.result.skippedProtocols, [{ type: "vless", reason: "DOMAIN_REQUIRED" }]);
 });

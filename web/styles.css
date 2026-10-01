@@ -2066,3 +2066,21 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
 .provision-fingerprint { display: block; margin-top: 8px; font-size: 11px; overflow-wrap: anywhere; }
 .provision-checks p { display: flex; justify-content: space-between; gap: 12px; }
 @media (max-width: 600px) { .provision-job { align-items: flex-start; flex-direction: column; } }
+
+.account-mode-switch { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.mcp-connection-facts { display: flex; flex-wrap: wrap; gap: 16px 32px; margin: 20px 0 0; }
+.mcp-connection-facts div { min-width: 0; }
+.mcp-connection-facts dt { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.mcp-connection-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.admin-access-row > .field { margin: 10px 0; }
+@media (max-width: 720px) {
+  .admin-access-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 10px 0; }
+  .admin-access-row > .field { margin: 0; }
+  .admin-access-row [data-admin-password] { min-width: 0; }
+}
+
+.node-domain-card { grid-column: 1 / -1; }
+.node-domain-card > div { min-width: 0; width: 100%; }
+.node-domain-card .certificate-settings-form { max-width: 720px; }
+.node-domain-option { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--text-soft); margin: 12px 0; }
+.node-domain-option input { flex: 0 0 auto; width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); }

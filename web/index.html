@@ -80,6 +80,7 @@
       <div class="rail-footer">
         <div class="profile-menu-wrap">
           <div class="profile-menu" id="profile-menu" hidden>
+            <button type="button" data-open-account><svg><use href="#i-users"/></svg><span>个人登录信息</span></button>
             <button type="button" data-logout>
               <svg><use href="#i-logout"/></svg><span>退出登录</span>
             </button>
@@ -330,7 +331,7 @@
             <button data-system-tab="certificates" role="tab" aria-selected="false">证书</button>
             <button data-system-tab="maintenance" role="tab" aria-selected="false">版本与备份</button>
             <button data-system-tab="access" data-owner-only role="tab" aria-selected="false">权限与审计</button>
-            <button data-system-tab="mcp" data-owner-only role="tab" aria-selected="false" hidden>MCP / Agent</button>
+            <button data-system-tab="mcp" data-owner-only role="tab" aria-selected="false" hidden>MCP Server</button>
             <button data-system-tab="advanced" role="tab" aria-selected="false">高级</button>
           </div>
           <div data-system-panel="hosts">
@@ -375,6 +376,20 @@
             <div id="readiness-limitations" class="readiness-limitations"></div>
           </section>
           <section class="system-card-grid" data-system-panel="certificates" hidden>
+            <article class="panel system-card node-domain-card"><span class="resource-icon"><svg><use href="#i-globe"/></svg></span><div><p class="eyebrow">节点 DNS 自动化</p><h2>自动分配节点域名</h2><p>配置 Cloudflare 后，新主机可以自动生成子域名和 DNS 解析，再通过 ACME 签发证书。也可在接入时填写已解析域名；控制面的访问域名不会被修改。</p>
+              <form id="node-domain-settings-form" class="certificate-settings-form" autocomplete="off">
+                <label class="field"><span>DNS 服务</span><select id="node-domain-provider" name="provider" disabled><option value="disabled">未启用</option><option value="cloudflare">Cloudflare</option></select></label>
+                <div data-cloudflare-fields hidden>
+                  <label class="field"><span>Cloudflare Zone ID</span><input name="zoneId" autocomplete="off" spellcheck="false" disabled></label>
+                  <label class="field"><span>节点域名后缀</span><input name="baseDomain" placeholder="nodes.example.com" autocomplete="off" spellcheck="false" disabled><small>需属于上方 Zone；系统只管理新节点的 DNS 记录。</small></label>
+                  <label class="field"><span>Cloudflare API Token</span><input name="apiToken" type="password" autocomplete="new-password" placeholder="留空保留已配置的 Token" disabled><small>仅授予目标 Zone 的 Zone Read + DNS Edit 权限；保存后不回显。</small></label>
+                </div>
+                <label class="node-domain-option"><input name="autoProvision" type="checkbox" disabled><span>新接入主机自动分配域名</span></label>
+                <label class="node-domain-option"><input name="inheritProtocols" type="checkbox" checked disabled><span>默认继承本机可一键启用的公网协议</span></label>
+                <p class="field-hint">TLS 协议还需要系统证书通知邮箱以及公网 ACME 验证条件。未配置 DNS 自动化时，“自动”接入将使用 IP 和 Shadowsocks。</p>
+                <div class="heading-actions"><button type="submit" class="button primary" disabled>保存 DNS 设置</button><span id="node-domain-status" role="status" class="field-hint">打开证书页后读取；仅 Owner 可修改。</span></div>
+              </form>
+            </div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">ACME 账户</p><h2>证书通知邮箱</h2><p>用于自动签发证书和接收证书到期通知。Naive、Hysteria、TUIC 与 Hysteria 2 一键启用时会自动读取这里的邮箱。</p><form class="certificate-settings-form" id="certificate-settings-form"><label class="field"><span>通知邮箱</span><input id="certificate-email" name="email" type="email" autocomplete="email" placeholder="ops@example.com" required><small class="field-error"></small></label><div class="heading-actions"><button class="button primary" type="submit">保存邮箱</button><span class="status-badge neutral" id="certificate-mode"><i></i>未配置</span></div></form></div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">TLS 资产</p><h2>证书路径由主机协议管理</h2><p>一键启用会优先使用主机域名自动签发证书；手动证书仍可在主机的“入口协议”中配置。</p><button class="text-button" data-system-tab="hosts">查看主机 <svg><use href="#i-arrow"/></svg></button></div></article>
             <article class="panel system-card"><span class="resource-icon">R</span><div><p class="eyebrow">Reality</p><h2>密钥按协议生成</h2><p>VLESS 等协议可在编辑抽屉中一键生成 Reality 密钥对。</p></div></article>
@@ -449,36 +464,38 @@
           </section>
           <section class="mcp-access" data-system-panel="mcp" hidden>
             <section class="resource-panel mcp-panel">
-              <div class="resource-panel-heading"><div><p class="eyebrow">Agent 访问</p><h2>将 RayLink 接入你的 Agent</h2><p>为每个 Agent 创建独立凭据，按需授予权限；只有 Owner 可以管理。操作同时受凭据范围和管理员当前角色约束。</p></div><button type="button" class="button secondary" data-refresh-mcp><svg><use href="#i-refresh"/></svg>刷新列表</button></div>
-              <label class="field mcp-endpoint"><span>HTTP MCP 地址</span><input id="mcp-endpoint" readonly placeholder="打开此页后读取" aria-label="HTTP MCP 地址"></label>
+              <div class="resource-panel-heading"><div><p class="eyebrow">MCP Server</p><h2>连接 RayLink MCP Server</h2><p>为每个客户端创建独立 Token，按需授予权限；只有 Owner 可以管理。操作同时受 Token 范围和管理员当前角色约束。</p></div><button type="button" class="button secondary" data-refresh-mcp><svg><use href="#i-refresh"/></svg>刷新列表</button></div>
+              <dl class="mcp-connection-facts"><div><dt>Transport</dt><dd>Streamable HTTP</dd></div><div><dt>Authentication</dt><dd>Authorization: Bearer Token</dd></div></dl>
+              <label class="field mcp-endpoint"><span>Endpoint</span><input id="mcp-endpoint" readonly placeholder="打开此页后读取" aria-label="MCP Server Endpoint"></label>
+              <button type="button" class="button secondary" data-copy-target="mcp-endpoint">复制 Endpoint</button>
               <p id="mcp-access-status" class="field-hint" role="status" aria-live="polite">正在等待加载凭据。</p>
               <form id="mcp-create-form" class="mcp-create-form" autocomplete="off">
                 <div class="mcp-form-grid">
-                  <label class="field"><span>凭据名称</span><input name="name" maxlength="80" placeholder="例如：日常运维 Agent" required></label>
+                  <label class="field"><span>Token 名称</span><input name="name" maxlength="80" placeholder="例如：日常运维 Agent" required></label>
                   <label class="field"><span>有效期</span><select name="expiresInDays"><option value="7">7 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="365">365 天</option></select></label>
                 </div>
                 <fieldset class="mcp-permissions"><legend>权限范围</legend>
                   <div class="mcp-presets" aria-label="权限预设"><button type="button" class="button secondary" data-mcp-preset="read" aria-pressed="true">只读</button><button type="button" class="button secondary" data-mcp-preset="operator" aria-pressed="false">运维</button><button type="button" class="button secondary" data-mcp-preset="full" aria-pressed="false">完整常规权限</button></div>
                   <div id="mcp-scope-list" class="mcp-scope-grid"></div>
-                  <p class="field-hint">“读取密钥”和“管理管理员”需要单独勾选，任何预设都不会自动启用。</p>
+                  <p class="field-hint">“读取密钥”、“管理管理员”和“SSH 自动接入”需要单独勾选，任何预设都不会自动启用。</p>
                 </fieldset>
-                <div class="heading-actions"><button class="button primary" type="submit" id="mcp-create-submit" disabled><svg><use href="#i-plus"/></svg>创建凭据</button><span class="field-hint">令牌只显示一次，不会保存在浏览器存储中。</span></div>
+                <div class="heading-actions"><button class="button primary" type="submit" id="mcp-create-submit" disabled><svg><use href="#i-plus"/></svg>创建 Token</button><span class="field-hint">Token 只显示一次，不会保存在浏览器存储中。</span></div>
               </form>
             </section>
             <section id="mcp-issued" class="resource-panel mcp-panel mcp-issued" hidden aria-labelledby="mcp-issued-title">
-              <div class="resource-panel-heading"><div><p class="eyebrow">一次性显示</p><h2 id="mcp-issued-title">保存你的 Agent 连接凭据</h2><p>关闭后无法再次查看令牌。连接配置同样包含密钥，请仅放入受信任客户端。</p></div><button type="button" class="button secondary" data-dismiss-mcp>已保存，关闭</button></div>
-              <label class="field"><span>访问令牌</span><input id="mcp-issued-token" readonly autocomplete="off" spellcheck="false"></label>
-              <div class="heading-actions"><button type="button" class="button secondary" data-copy-mcp="token">复制令牌</button><button type="button" class="button secondary" data-copy-mcp="config">复制连接配置</button></div>
+              <div class="resource-panel-heading"><div><p class="eyebrow">一次性显示</p><h2 id="mcp-issued-title">保存 MCP Server Token</h2><p>关闭后无法再次查看 Token。连接配置同样包含密钥，请仅放入受信任客户端。</p></div><button type="button" class="button secondary" data-dismiss-mcp>已保存，关闭</button></div>
+              <label class="field"><span>Bearer Token</span><input id="mcp-issued-token" readonly autocomplete="off" spellcheck="false"></label>
+              <div class="heading-actions"><button type="button" class="button secondary" data-copy-mcp="token">复制 Token</button><button type="button" class="button secondary" data-copy-mcp="config">复制连接配置</button></div>
               <label class="field"><span>通用 JSON 配置示例</span><textarea id="mcp-issued-config" readonly rows="12" autocomplete="off" spellcheck="false"></textarea></label>
-              <p class="field-hint">示例使用 HTTP 连接和 Bearer 请求头；不同客户端的配置位置及字段可能不同，请按其 MCP 设置填写。</p>
+              <p class="field-hint">Streamable HTTP 在本示例中使用标准字段 <code>type: "http"</code>，配合 Bearer 请求头；不同客户端的配置位置及字段可能不同，请按其 MCP 设置填写。</p>
             </section>
             <section class="resource-panel mcp-panel">
-              <div class="resource-panel-heading"><div><p class="eyebrow">凭据记录</p><h2>已授权的 Agent</h2><p>撤销后令牌立即失效；列表不包含令牌明文。</p></div></div>
+              <div class="resource-panel-heading"><div><p class="eyebrow">Token 记录</p><h2>MCP Server 访问授权</h2><p>撤销后 Token 立即失效；列表只保存名称、范围和有效期等信息，无法找回明文。</p></div></div>
               <div id="mcp-token-list" class="mcp-token-list"><div class="empty-state">加载后显示凭据。</div></div>
             </section>
             <section class="resource-panel mcp-panel mcp-guide">
               <div class="resource-panel-heading"><div><p class="eyebrow">使用指南</p><h2>让 Agent 开始工作</h2></div></div>
-              <ol><li>在客户端添加 HTTP MCP 服务，填写上方地址，并设置 <code>Authorization: Bearer &lt;令牌&gt;</code> 请求头。</li><li>先让 Agent 获取可用工具和系统状态，再执行权限范围内的用户管理或运维操作。</li><li>写入工具需要 <code>requestId</code>。同一次操作因超时而重试时复用原 ID；新的操作使用新的 ID，避免重复执行。</li><li>可从只读权限开始，为不同 Agent 分别创建凭据；不再使用时，在此撤销。</li></ol>
+              <ol><li>在客户端添加 MCP Server，传输方式选择 Streamable HTTP，填写上方 Endpoint，并设置 <code>Authorization: Bearer &lt;Token&gt;</code> 请求头。</li><li>先让 Agent 获取可用工具和系统状态，再执行权限范围内的用户管理或运维操作。</li><li>写入工具需要 <code>requestId</code>。同一次操作因超时而重试时复用原 ID；新的操作使用新的 ID，避免重复执行。</li><li>可从只读权限开始，为不同 Agent 分别创建凭据；不再使用时，在此撤销。</li></ol>
             </section>
           </section>
           <section class="resource-panel" data-system-panel="advanced" hidden>

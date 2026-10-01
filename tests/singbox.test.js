@@ -136,7 +136,7 @@ test("rolling deployments select ACME syntax using the Host Runtime version", ()
       masterPassword: "AAAAAAAAAAAAAAAAAAAAAA=="
     });
     const tls = config.inbounds[0].tls;
-    const provider = runtimeVersion === "1.14.2" ? tls.certificate_provider : tls.acme;
+    const provider = runtimeVersion === "1.14.2" ? config.certificate_providers.find((entry) => entry.tag === tls.certificate_provider) : tls.acme;
     assert.deepEqual(provider.domain, ["node.example.com"]);
     assert.equal(provider.data_directory, "/var/lib/raylink/acme");
     assert.equal(provider.type, runtimeVersion === "1.14.2" ? "acme" : undefined);

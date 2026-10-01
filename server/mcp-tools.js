@@ -9,7 +9,7 @@ const runtimeView = (value) => pick(value, ["state", "mode", "runtimeVersion", "
 const previewView = (value) => pick(value, ["checksum", "eligibleUsers", "inboundCount", "listenPort", "protocols"]);
 const profileView = (value) => pick(value, ["type", "enabled", "listen", "port", "tls", "transport"]);
 const hostView = (value) => ({
-  ...pick(value, ["id", "name", "address", "region", "status", "kind", "hostname", "platform", "architecture", "agentVersion", "runtimeVersion", "buildTags", "assetEncryptionReady", "usageMetering", "lastSeenAt", "enrolledAt", "telemetry", "deploymentSync", "runtimeUpgrade", "protocolActivations", "protocolCatalog"]),
+  ...pick(value, ["id", "name", "address", "endpointDomain", "region", "status", "kind", "hostname", "platform", "architecture", "agentVersion", "runtimeVersion", "buildTags", "assetEncryptionReady", "usageMetering", "lastSeenAt", "enrolledAt", "telemetry", "deploymentSync", "runtimeUpgrade", "protocolActivations", "protocolCatalog"]),
   ...(value?.protocols ? { protocols: value.protocols.map(profileView) } : {}),
   ...(value?.appliedProtocols ? { appliedProtocols: value.appliedProtocols.map(profileView) } : {})
 });
@@ -31,6 +31,7 @@ function safeOutput(value) {
   return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
     const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
     if (key === "passwordReset" && typeof child === "boolean") return [[key, child]];
+    if (key === "tokenConfigured" && typeof child === "boolean") return [[key, child]];
     if (key === "subscriptionVerified" && typeof child === "boolean") return [[key, child]];
     if (key === "subscriptionStatus" && ["verified", "awaiting-users"].includes(child)) return [[key, child]];
     if (/password|secret|token|privatekey|runtimeuuid|subscription|authorization|cookie|credential|configtext|configjson|sealedtlsbundle/.test(normalized)
@@ -125,7 +126,8 @@ export const mcpTools = [
   defineTool({ name: "hosts_provision_start", description: "Automatically install a Linux/systemd Node over SSH, enroll it, activate Shadowsocks, publish configuration and verify eligible subscriptions. Requires a reachable HTTPS control plane and root/sudo on the supplied IP. Returns a durable job; poll hosts_provision_get until succeeded. SSH credentials are not stored. Reuse requestId for transport retries.",
     permission: "runtime.manage", additionalScopes: ["hosts.provision"], mutating: true, preserveRequestId: true,
     fields: { host: z.union([z.ipv4(), z.ipv6()]), port: port.optional(), username: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/).optional(),
-      name: hostFields.name.optional(), region: hostFields.region.optional(), ...sshCredentialFields },
+      name: hostFields.name.optional(), region: hostFields.region.optional(), domainMode: z.enum(["auto", "existing", "none"]).optional(),
+      endpointDomain: z.string().trim().min(1).max(253).optional(), inheritProtocols: z.boolean().optional(), ...sshCredentialFields },
     method: "POST", path: "/api/hosts/provision", body: true }),
   defineTool({ name: "hosts_provision_list", description: "List durable SSH onboarding jobs and safe progress, including interrupted attempts.", path: "/api/hosts/provision" }),
   defineTool({ name: "hosts_provision_get", description: "Read onboarding status and evidence. succeeded verifies node, protocol and metering; subscriptionStatus awaiting-users means no entitled user exists yet.", fields: { jobId: id }, path: provisioningPath }),
@@ -176,6 +178,11 @@ export const mcpTools = [
   defineTool({ name: "routing_diagnose", description: "Diagnose a domain using current routing policy and rule sets without changing settings. This may perform DNS/rule matching; it does not prove the user's final network path.",
     permission: "runtime.manage", fields: { domain: z.string().trim().min(1).max(253) }, method: "POST", path: "/api/routing/diagnose", body: true }),
   defineTool({ name: "certificate_get", description: "Read automatic-certificate notification settings, not certificate private keys.", path: "/api/bootstrap", select: (value) => pick(value.certificate, ["mode", "email"]) }),
+  defineTool({ name: "node_domains_get", description: "Read node DNS automation settings and whether a credential is configured; never returns the DNS API Token.", path: "/api/settings/node-domains" }),
+  defineTool({ name: "node_domains_update", description: "Configure Cloudflare node subdomain automation. Token needs Zone Read and DNS Edit for the selected zone; blank apiToken preserves it. Existing resolved domains work without Cloudflare. DNS changes occur during onboarding, not while saving settings.",
+    permission: "system.manage", mutating: true, fields: { provider: z.enum(["disabled", "cloudflare"]).optional(), zoneId: z.string().max(32).optional(), baseDomain: z.string().max(253).optional(),
+      apiToken: z.string().max(4096).optional(), clearToken: z.boolean().optional(), autoProvision: z.boolean().optional(), inheritProtocols: z.boolean().optional() },
+    method: "PATCH", path: "/api/settings/node-domains", body: true }),
   defineTool({ name: "certificate_update", description: "Update the ACME notification email. Does not issue or replace certificates by itself.",
     permission: "system.manage", mutating: true, fields: { email: z.email() }, method: "PATCH", path: "/api/settings/certificate", body: true, select: (value) => pick(value, ["mode", "email"]) }),
   defineTool({ name: "runtime_status", description: "Inspect the local managed Runtime service. Staged configuration does not mean the service is running.", path: "/api/runtime/status", select: runtimeView }),
@@ -203,7 +210,7 @@ export const mcpTools = [
   defineTool({ name: "admins_list", description: "List administrator identities and roles; requires the same administrator-management role permission as the HTTP endpoint.", permission: "admins.manage", path: "/api/admins", select: (value) => ({ admins: value.admins.map(adminView) }) }),
   defineTool({ name: "admins_create", description: "Create an administrator with an explicit role. Only the existing admins.manage role can do this; token scope cannot elevate that role.",
     permission: "admins.manage", mutating: true, fields: adminFields, method: "POST", path: "/api/admins", body: true, select: adminView }),
-  defineTool({ name: "admins_update", description: "Update an administrator identity, password or role. Existing last-owner and session-revocation protections apply.",
+  defineTool({ name: "admins_update", description: "Update another administrator's username, password or role. Password reset revokes their browser sessions and MCP tokens. Self username/password changes require the browser account workflow and current password. Last-owner protections apply.",
     permission: "admins.manage", mutating: true, fields: { adminId: id, ...optionalFields(adminFields) }, method: "PATCH", path: ({ adminId }) => `/api/admins/${encodeURIComponent(adminId)}`, params: ["adminId"], body: true, select: adminView }),
   defineTool({ name: "audit_list", description: "Read recent audit event identities, actions and status codes. Raw metadata and secrets are excluded.", permission: "audit.read", fields: { limit: z.number().int().min(1).max(500).optional() }, path: ({ limit }) => `/api/audit${limit === undefined ? "" : `?limit=${limit}`}`,
     select: (value) => ({ events: value.events.map((event) => ({ ...pick(event, ["id", "adminId", "actorUsername", "actorRole", "action", "resourceType", "resourceId", "createdAt"]), metadata: pick(event.metadata, ["statusCode", "tool", "requestId", "replayed", "durationMs"]) })) }) })

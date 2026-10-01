@@ -57,6 +57,7 @@ function fixture(type, overrides = {}) {
       id: "local",
       kind: overrides.kind || "local",
       address: overrides.address || "node.example.com",
+      endpointDomain: overrides.endpointDomain,
       runtimeVersion: "1.13.14",
       platform: "linux",
       buildTags: ["with_utls", "with_acme", "with_quic"],
@@ -82,6 +83,7 @@ function fixture(type, overrides = {}) {
     }
   };
   const portManager = {
+    available: async () => !overrides.challengePortOccupied,
     findAvailable: async ({ preferredPort, network, listen }) => {
       events.push(["port", preferredPort, network, listen]);
       return overrides.port || preferredPort;
@@ -180,6 +182,21 @@ test("protocol policies separate public, TLS, private and advanced behavior", ()
   assert.equal(protocolActivationPolicy("direct").group, "advanced");
 });
 
+test("remote TLS activation keeps the management IP and uses the endpoint domain with only HTTP-01 challenge", async () => {
+  const f = fixture("hysteria2", { kind: "remote", address: "203.0.113.42", endpointDomain: "edge.example.com" });
+  await f.manager.enable({ hostId: "local", type: "hysteria2" });
+  assert.equal(f.profiles.find((profile) => profile.type === "hysteria2").tls.serverName, "edge.example.com");
+  const publication = f.events.find(([event]) => event === "publish")[1];
+  assert.equal(publication.activation.address, "edge.example.com");
+  assert.deepEqual(publication.activation.challengePorts, [{ port: 80, network: "tcp", purpose: "acme-http-01" }]);
+});
+
+test("local ACME activation rejects an occupied HTTP-01 port without publishing", async () => {
+  const f = fixture("hysteria2", { challengePortOccupied: true });
+  await assert.rejects(f.manager.enable({ hostId: "local", type: "hysteria2" }), (error) => error.code === "ACME_CHALLENGE_PORT_OCCUPIED");
+  assert.equal(f.events.some(([name]) => name === "publish" || name === "firewall-open"), false);
+});
+
 test("one-click Shadowsocks activation reserves a port, opens TCP, publishes and probes", async () => {
   const { manager, events, profiles } = fixture("shadowsocks", { port: 18388 });
 
@@ -229,7 +246,7 @@ test("Host latency measurement records TCP and UDP protocol results without chan
   assert.equal(activations.get("hysteria2").publicCheck.latencyMs, 61);
 });
 
-for (const change of ["endpoint", "port"]) {
+for (const change of ["endpoint", "endpoint-domain", "port"]) {
 test(`Host measurement discards an in-flight result after the ${change} changes`, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "raylink-probe-endpoint-"));
   const store = new RayLinkStore({ dbPath: join(directory, "raylink.db"), adminUsername: "admin", adminPassword: "test-password" });
@@ -252,6 +269,7 @@ test(`Host measurement discards an in-flight result after the ${change} changes`
   const pending = manager.measureHost({ hostId: "local" });
   await probing;
   if (change === "endpoint") store.updateHost("local", { address: "changed.example.com" });
+  else if (change === "endpoint-domain") store.setHostEndpointDomain("local", "changed.example.com");
   else store.updateHostProtocolConfig("local", "shadowsocks", { port: 18388 });
   release();
   const result = await pending;
@@ -264,7 +282,7 @@ test(`Host measurement discards an in-flight result after the ${change} changes`
   }
   const retried = await manager.measureHost({ hostId: "local" });
   assert.equal(retried.results[0].status, "available");
-  assert.equal(probed.at(-1).address, store.getHost("local").address);
+  assert.equal(probed.at(-1).address, store.getHost("local").endpointDomain || store.getHost("local").address);
   assert.equal(probed.at(-1).port, store.listHostProtocolConfigs("local").find((entry) => entry.type === "shadowsocks").port);
   assert.equal(store.getHost("local").protocolActivations.find((entry) => entry.type === "shadowsocks").publicCheck.reachable, true);
 });
@@ -481,8 +499,7 @@ test("one-click Hysteria 2 binds node domain to ACME and opens UDP", async () =>
   assert.equal(enabled.tls.acmeEmail, "ops@example.com");
   assert.deepEqual(events.filter(([name]) => name === "firewall-open"), [
     ["firewall-open", "udp", 8448],
-    ["firewall-open", "tcp", 80],
-    ["firewall-open", "tcp", 443]
+    ["firewall-open", "tcp", 80]
   ]);
   assert.deepEqual(
     events.filter(([name]) => name === "protocol-probe"),
@@ -622,4 +639,52 @@ test("UFW activation preserves an equivalent rule that existed before RayLink", 
   assert.equal(opened.managed, false);
   assert.equal(opened.preexisting, true);
   assert.deepEqual(commands, [["ufw", "status"]]);
+});
+
+for (const type of ["vmess", "vless"]) {
+  test(`inherited ${type} QUIC activation dispatches UDP to a real enrolled Host`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "raylink-quic-activation-"));
+    const store = new RayLinkStore({ dbPath: join(directory, "raylink.db"), adminUsername: "admin", adminPassword: "fixture-password" });
+    t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+    const created = store.createRemoteHost({ name: "QUIC remote", address: "203.0.113.42", region: "global" });
+    store.enrollNode(created.enrollmentToken, { platform: "linux", runtimeVersion: "1.14.2", buildTags: ["with_quic", "with_acme", "with_utls"], agentVersion: "0.8.0" });
+    store.setHostEndpointDomain(created.host.id, "quic.example.com");
+    store.updateHostProtocolConfig(created.host.id, type, { transport: { type: "quic" } });
+    let dispatched;
+    const manager = new ProtocolActivationManager({ store, installer: {}, certificateEmail: () => "ops@example.com", runtimeManager: {
+      publish: async (_adminId, options) => { dispatched = options.activation; return { id: "quic-deployment", status: "active" }; }
+    } });
+    const result = await manager.enable({ hostId: created.host.id, type });
+    assert.equal(result.profile.transport.type, "quic");
+    assert.equal(dispatched.network, "udp");
+    assert.equal(result.activation.network, "udp");
+    assert.deepEqual(dispatched.challengePorts, [{ port: 80, network: "tcp", purpose: "acme-http-01" }]);
+    assert.equal(store.listHostProtocolConfigs(created.host.id).find(profile => profile.type === type).enabled, true);
+  });
+}
+
+test("local QUIC activation and subsequent measurements consistently use UDP", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-quic-local-"));
+  const store = new RayLinkStore({ dbPath: join(directory, "raylink.db"), adminUsername: "admin", adminPassword: "fixture-password" });
+  t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+  store.setHostEndpointDomain("local", "quic.example.com");
+  store.updateHostProtocolConfig("local", "shadowsocks", { enabled: false });
+  store.updateHostProtocolConfig("local", "vmess", { transport: { type: "quic" } });
+  const ports = []; const firewall = []; const probes = [];
+  const manager = new ProtocolActivationManager({ store, certificateEmail: () => "ops@example.com",
+    installer: { status: async () => ({ installed: true, version: "1.14.2", platform: "linux", tags: ["with_quic", "with_acme", "with_utls"] }) },
+    runtimeManager: { publish: async () => ({ id: "local-quic", status: "active" }) },
+    portManager: { available: async () => true, findAvailable: async options => { ports.push(options); return 24443; }, waitForListening: async options => { ports.push(options); return true; } },
+    firewallManager: { open: async rule => { firewall.push(rule); return { managed: true, rollback: async () => {} }; } },
+    protocolProbe: async options => { probes.push(options); return { reachable: true, latencyMs: 12, probe: "sing-box-tools-fetch" }; }
+  });
+  const enabled = await manager.enable({ hostId: "local", type: "vmess" });
+  assert.equal(enabled.activation.network, "udp");
+  assert.deepEqual(ports.map(input => input.network), ["udp", "udp"]);
+  assert.deepEqual(firewall.map(({ port, network }) => ({ port, network })), [{ port: 24443, network: "udp" }, { port: 80, network: "tcp" }]);
+  store.markHostProtocolsApplied("local", store.listHostProtocolConfigs("local"));
+  await manager.measureHost({ hostId: "local" });
+  assert.equal(probes.length, 6);
+  assert.ok(probes.every(input => input.network === "udp"), "activation and all five measurement probes must use UDP");
+  assert.equal(store.getHost("local").protocolActivations.find(item => item.type === "vmess").network, "udp");
 });
