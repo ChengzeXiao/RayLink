@@ -3,9 +3,9 @@
   <h1>RayLink</h1>
   <p><strong>把多用户、多 Host sing-box 服务变成一套可安装、可配置、可发布、可计量的控制面。</strong></p>
   <p>
-    <a href="https://github.com/Zanetach/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Zanetach/RayLink?display_name=tag&style=flat-square"></a>
+    <a href="https://github.com/ChengzeXiao/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/ChengzeXiao/RayLink?display_name=tag&style=flat-square"></a>
     <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-%E2%89%A522.5-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white">
-    <img alt="sing-box 1.13.x" src="https://img.shields.io/badge/sing--box-1.13.x-7BE495?style=flat-square">
+    <img alt="sing-box 1.14.x" src="https://img.shields.io/badge/sing--box-1.14.x-7BE495?style=flat-square">
     <img alt="Linux AMD64 and ARM64" src="https://img.shields.io/badge/Release-Linux%20AMD64%20%7C%20ARM64-2F3337?style=flat-square&logo=linux&logoColor=white">
   </p>
 </div>
@@ -29,6 +29,8 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 | 安全发布 | `sing-box check`、原子替换、版本快照、失败恢复和历史回滚 |
 | 真实流量计量 | 使用 sing-box 用户级统计，不以 Host 网卡总流量估算用户配额 |
 | Host 可观测性 | 汇总 CPU、内存、上下行速率、服务状态、心跳和 Runtime 版本 |
+| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 52 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
+| 自动接入 VPS | [SSH 一键接入](docs/ssh-node-provisioning.md)：填写 IP 和登录凭据，自动安装、注册、配置协议、发布并验证订阅 |
 | 在线升级 | 发现已验证的 sing-box 新版本后提示升级，失败自动恢复旧二进制和服务状态 |
 
 ## 界面预览
@@ -41,7 +43,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 
 ### 协议绑定 Host
 
-每台 Host 独立维护入口协议和 Runtime 状态。新 VPS 通过一次性接入令牌安装 RayLink Node，在线后即可参与客户端配置编译和 Deployment。
+每台 Host 独立维护入口协议和 Runtime 状态。新 VPS 可通过 SSH 一键接入，自动安装 RayLink Node、启用无需域名的稳定协议并发布；进度和验证结果保存在主机页。也可通过一次性接入令牌手动安装。
 
 ![RayLink Host 与系统管理](docs/assets/readme/system.png)
 
@@ -49,6 +51,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 
 ```mermaid
 flowchart LR
+  Agent["管理 Agent"] -->|"HTTP MCP / Bearer Token"| Control
   Admin["管理员浏览器"] -->|"HTTPS / Cookie Session"| Control["RayLink Control Plane<br/>Node.js + SQLite"]
   Portal["用户中心"] -->|"登录 / 获取专属配置 URL"| Control
 
@@ -78,6 +81,14 @@ flowchart LR
 4. 用户客户端配置按当前 User Entitlement 聚合多个 Host 与协议，自动加入智能路由、测速和故障切换。
 5. RayLink Node 回传心跳、Host 资源遥测、Runtime 状态和用户级流量增量。
 
+## 本机持久入口
+
+运行 `npm run local`，访问 `http://127.0.0.1:4199`。该入口使用真实后端和 SQLite，初始不生成模拟用户或 VPS；数据保存在忽略版本控制的 `.raylink-local/`，重启后仍保留。首次随机生成的登录信息见 `.raylink-local/initial-login.txt`（仅当前用户可读）；界面改名或改密后使用新凭据，初始文件不会自动更新。服务端加密密钥保存在同目录的 `local-credentials.json`，备份时保留整个目录。Ctrl-C 停止，重新运行同一命令启动；无需沿用验收时的临时端口。
+
+该模式的本机 Runtime 只校验和暂存配置，不宣称代理已运行。远程 VPS 无法通过你的 `127.0.0.1` 访问控制面；真实 SSH 自动接入必须先部署服务器可访问的 HTTPS 控制面。界面会提前显示此条件并阻止提交 SSH 凭据。服务断开时显示当前地址、过期数据提示和重连入口，读取请求逐步退避；不会自动重放创建用户/节点等写操作。
+
+可通过 `RAYLINK_LOCAL_DATA_DIR` 指定专用的本地数据目录、`RAYLINK_PORT` 指定端口。不要把生产数据库直接交给本地开发进程。
+
 ## 一键安装
 
 当前发布安装包面向 **Debian/Ubuntu + systemd + AMD64（x86_64）或 ARM64（aarch64）**。在生产验收清单全部通过前，应视为候选版本。准备一台全新 VPS，并开放：
@@ -89,37 +100,35 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
 
 - 安装并校验 Node.js 22
-- 安装预编译的 sing-box 1.13.14 计量版 Runtime
+- 安装预编译的 sing-box 1.14.2 计量版 Runtime
 - 配置 RayLink、HTTPS 入口与 systemd 自启动
 - 为 IP 首次访问生成本机证书
-- 输出仅显示一次、30 分钟有效的初始化地址
+- 自动创建管理员、启用无需域名证书的 Shadowsocks、发布配置并检查服务与监听端口
+- 检测并配置 Linux BBR，显示实际内核状态；不支持时保留明确待处理项
+- 将初始登录信息保存到服务器 `/etc/raylink/initial-login.json`（仅 root 可读）
 
-打开安装器输出的 `https://服务器IP/setup#token=...`。域名模式将控制台、订阅服务和
-Host 节点连接地址拆开，例如 `panel.example.com`、`sub.example.com` 和
-`node.example.com`，三个域名可以同时解析到同一个公网 IP。初始化时不要为节点域名启用
-CDN 代理。RayLink 会检查控制台和订阅域名的解析目标，由 Caddy 分别申请并续期证书；
-订阅域名只开放 `/sub/*` 和 `/rule-sets/*`。节点域名保存在 Host 上，用于生成 sing-box
-客户端连接配置。系统同时保留 IP 恢复入口。没有域名时继续使用 IP HTTPS；首次使用 IP
-证书时，请核对安装器打印的 SHA-256 证书指纹。
+安装完成后直接打开输出的 HTTPS 控制台地址。默认使用 IP；SSH 自动接入会将主控证书经受信任 SSH 通道传到节点并严格校验 HTTPS。浏览器、MCP 和订阅客户端仍需信任该自签名证书。已有域名时，设置 `RAYLINK_DOMAIN` 和 `RAYLINK_ACME_EMAIL`，即可自动检查解析并通过 Caddy 申请、续期公网可信证书。
+
+如需分别配置控制台、订阅和节点域名，可设置 `RAYLINK_INTERACTIVE_SETUP=true` 使用初始化向导。域名须事先解析到对应 VPS，初始化时关闭 CDN 代理。自动化流程、BBR 状态和更新边界见 [自动安装与维护](docs/automatic-installation.md)。以上功能包含在 v0.2.33 中；已有安装需升级后生效。
 
 完整部署、Caddy、手动安装和令牌轮换说明见 [部署手册](deploy/README.md)。
 
@@ -127,11 +136,11 @@ CDN 代理。RayLink 会检查控制台和订阅域名的解析目标，由 Cadd
 
 第一台 Host 同时运行控制面和本机 Runtime。新增 Host 不需要再次安装完整控制台：
 
-1. 打开「系统 → 主机 → 添加 Host」。
-2. 填写 Host 名称、公网地址和区域，生成一次性安装命令。
-3. 在新 VPS 上执行该命令；它会安装 RayLink Node 和审批版本的 sing-box Runtime。
-4. 等待 RayLink Node 显示在线，在 Host 详情中启用所需协议。
-5. 前往「运维」检查候选配置并发布。
+1. 打开「系统 → 主机 → SSH 一键接入」。
+2. 填写 IP、SSH 端口、用户名及密码或私钥。
+3. 自动安装依赖、RayLink Node、审批版本 Runtime，并尝试启用 BBR。
+4. 自动注册、配置 Shadowsocks、按设置配置节点域名及兼容协议、发布并验证已有用户订阅。
+5. 在主机列表和详情查看安装进度、实际 BBR 状态及失败后的续接入口。手动安装命令仍然保留。
 
 接入令牌只能使用一次。RayLink Node 身份、加密私钥和受管配置分别保存在受限目录中；控制面不会以明文任务或日志下发 TLS 私钥。
 
@@ -172,9 +181,11 @@ RayLink 的协议目录来自安装 Runtime 的 `version + platform + build tags
 | 组合与传输 | 证书 TLS、Reality、HTTP、WebSocket、QUIC、gRPC、HTTPUpgrade |
 | 私有入口 | SOCKS、HTTP Proxy、Mixed |
 | 高级/系统入口 | ShadowTLS、Direct、TUN、Redirect、TProxy |
-| 客户端策略 | TUN、DNS 劫持、CN/局域网直连、健康 UDP 准入、TCP 自动回退、URLTest 自动测速和 Selector 手选 |
+| 客户端策略 | TUN、DNS 劫持、完整 CN/局域网分流、TCP 默认选择、独立 AI 稳定出口、客户端故障切换和手选 |
 
 完整的 inbound、outbound、endpoint、构建标签与平台限制见 [sing-box 协议支持矩阵](docs/sing-box-protocol-support.md)。
+
+智能分流的 DNS/规则顺序、完整离线数据、更新方式和原生模拟结果见 [智能分流修复与验收](docs/smart-routing-implementation.md)。
 
 ## 项目结构
 
@@ -193,8 +204,9 @@ docs/     架构决策、协议支持矩阵和生产落地资料
 要求 Node.js 22.5+。没有 sing-box 也可以使用 `dry-run` 查看和开发控制台；安装 sing-box 后可执行真实配置校验。
 
 ```bash
-git clone https://github.com/Zanetach/RayLink.git
+git clone https://github.com/ChengzeXiao/RayLink.git
 cd RayLink
+npm ci --ignore-scripts
 npm start
 ```
 
@@ -227,7 +239,7 @@ Loon/Egern 使用已解析 IP 拨号但保留 TLS SNI 域名，从而避开 Fake
 可用 `RAYLINK_ENDPOINT_PROBE_TIMEOUT_MS` 调整。可信 DNS 查询本身最多等待 2000ms，可用
 `RAYLINK_ENDPOINT_DNS_TIMEOUT_MS` 调整，确保更新请求能及时进入持久缓存或公网 IP 回退。
 
-运行自动化生产前检查。`check:production` 需要 PATH 中有 sing-box 1.13.14 与 OpenSSL；
+运行自动化生产前检查。`check:production` 需要 PATH 中有带 `with_v2ray_api` 的 sing-box 1.14.2、OpenSSL 与 curl；
 它覆盖代码回归、协议语法和短时内存烟测，但不替代干净 VPS、真实客户端、故障注入与
 72 小时运行验收：
 
@@ -259,7 +271,7 @@ npm run check:production
 
 当前代码已覆盖单控制面、多 Host、用户客户端配置、安全发布、真实流量计量，以及由 Caddy 管理的首次初始化与域名配置。以下功能仍在后续范围：
 
-- TLS 证书到期告警与 DNS 提供商 API 集成
+- TLS 证书到期告警与更多 DNS 提供商 API 集成
 - 财务账单、周期重置、退款和人工调账
 - 多 Host 灰度升级与维护窗口
 - 同一种协议的多个独立 inbound 实例
@@ -268,6 +280,8 @@ npm run check:production
 
 ## 项目资料
 
+- [本轮系统审查、修复与验证](docs/system-review-2026-10-01.md)
+- [运行体检与实用功能设计](docs/practical-features.md)
 - [应用源码说明](docs/application.md)
 - [生产部署手册](deploy/README.md)
 - [sing-box 协议支持矩阵](docs/sing-box-protocol-support.md)
@@ -279,3 +293,10 @@ npm run check:production
 - [领域模型](CONTEXT.md)
 - [架构决策记录](docs/adr/)
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
+
+
+### v0.2.33 / sing-box 1.14.2 迁移
+
+当前源码的发布目标为 v0.2.33；上面的 Release 下载命令需等对应版本发布后使用。
+服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
+证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

@@ -7,9 +7,20 @@ import { dirname } from "node:path";
 import { protocolActivationPolicy } from "../protocol-activation.js";
 
 function trustedDnsLookup(servers) {
-  const resolver = new Resolver();
-  resolver.setServers(servers);
-  return (hostname) => resolver.resolve4(hostname, { ttl: true });
+  return async (hostname, { signal } = {}) => {
+    // Resolver.cancel() cancels all its queries, so each lookup needs its own
+    // instance: one timed-out Host must not cancel another Host's resolution.
+    const resolver = new Resolver();
+    resolver.setServers(servers);
+    const cancel = () => resolver.cancel();
+    signal?.throwIfAborted();
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      return await resolver.resolve4(hostname, { ttl: true });
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+    }
+  };
 }
 
 function tcpProbe({ address, port, timeoutMs }) {
@@ -56,14 +67,19 @@ function normalizeAnswers(answers) {
   });
 }
 
-async function withDeadline(promise, timeoutMs) {
+async function withDeadline(operation, timeoutMs) {
   let timer;
+  const controller = new AbortController();
   try {
     return await Promise.race([
-      promise,
+      Promise.resolve().then(() => operation(controller.signal)),
       new Promise((_, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`trusted DNS lookup timed out after ${timeoutMs}ms`)),
+          () => {
+            const error = new Error(`trusted DNS lookup timed out after ${timeoutMs}ms`);
+            controller.abort(error);
+            reject(error);
+          },
           timeoutMs
         );
       })
@@ -116,7 +132,7 @@ export class EndpointResolver {
     let answers = [];
     try {
       answers = normalizeAnswers(await withDeadline(
-        this.lookup(hostname),
+        (signal) => this.lookup(hostname, { signal }),
         this.lookupTimeoutMs
       ));
     } catch {

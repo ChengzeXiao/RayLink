@@ -1,5 +1,43 @@
 # RayLink Changelog
 
+## 0.2.33 - 2026-10-02
+
+- Fix Linux Node installer/updater preflight imports inadvertently starting the daemon and blocking completion.
+
+- Fix whole-client startup on sing-box 1.14.2 by removing the empty direct DNS detour; embed complete routing rules for IP self-signed deployments without weakening TLS verification.
+- Allow ACME writes in a dedicated systemd state directory while retaining read-only Runtime configuration.
+- Resume interrupted first installations with private ownership/state checks and preserved credentials, certificates and encryption keys.
+- Reject IP changes on domain-bound Hosts before mutation to prevent stale DNS and subscription endpoints.
+- Gate releases on native Linux installation, HTTPS, actual Shadowsocks traffic/metering/revocation, MCP, kernel BBR telemetry and application upgrade/rollback checks on both architectures.
+
+- Complete unattended first installation with generated administrator credentials, default Shadowsocks, publication and runtime/listener checks; retain an optional interactive setup.
+- Add automatic Linux BBR configuration and fresh kernel telemetry in host lists/details; show unsupported, failed, stale and offline states explicitly.
+- Add durable independent control-plane and Node 0.9.0 update workers, post-restart version checks, maintenance permissions and MCP tools.
+- Pin the IP control-plane certificate over verified SSH for strict Node HTTPS, and support automatic Caddy domain setup from installer environment settings.
+
+- Add a persistent localhost control-plane entry without simulated users or nodes; surface the HTTPS prerequisite before accepting SSH credentials.
+- Show disconnected control-plane status, back off read polling and reconnect without replaying writes or clearing SSH onboarding forms; require fresh reads after login and successful writes.
+- Initialize the first administrator only when the database has no administrators, preventing renamed credentials from being recreated on restart.
+
+- Add SSH onboarding with durable jobs, pinned host keys, password/key authentication, resumable installation, automatic protocol publication, metering and subscription verification.
+- Add MCP Server management over Streamable HTTP with 52 scoped tools and an Owner Bearer Token console; SSH onboarding requires a separately granted hosts.provision scope.
+- Add current-password-verified administrator username/password changes, session revocation and MCP token revocation on password reset; prevent stale concurrent logins from restoring access.
+- Automate Cloudflare node subdomains, retain separate SSH IPs, inherit enabled public protocols and verify existing subscriptions; preserve working Shadowsocks when domain setup needs retry.
+- Share remote ACME providers on sing-box 1.14, use the Node writable certificate directory and HTTP-01 TCP80, and activate QUIC transports over UDP.
+- Encrypt durable MCP write outcomes, deduplicate retries across restarts, and report uncertain crash outcomes without blindly reapplying changes.
+- Bundle locked production npm dependencies, validate them before service switching, and include them in release SBOMs.
+
+- Resolve hostname requests before IP routing, preserve explicit rule priority, and align system/domestic/AI DNS with their selected exits.
+- Default sing-box to TCP candidates, give AI an independent stable selection, and preserve active connections during policy changes.
+- Correct Egern top-level selection and provide complete verified offline China rules, atomic rule-set updates and visible version/degradation status.
+- Distinguish control-plane DNS predictions from measured client routing, including mixed-IP and oversized-response warnings.
+- Add native smart-routing and failover simulations with a negative control for AI exit stability.
+- Upgrade the approved metered sing-box Runtime to 1.14.2 and the builder to Go 1.26.8.
+- Migrate ACME per Host version and enable bounded optimistic DNS caching in 1.14+ client configurations.
+- Add Node 0.9.0 program-only updates, preserve the Runtime/Cronet pair during application upgrades, and gate Runtime upgrades on the Node version.
+- Add real protocol traffic, User metering/revocation, DNS outage and Node update rollback checks.
+- Preserve successful User saves during refresh failures and correct mobile fallback and DNS routing behavior.
+
 ## 0.2.32 - 2026-08-25
 
 ### Fixed

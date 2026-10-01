@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,44 @@ function jsonResponse(body, status = 200) {
     headers: body === undefined ? {} : { "content-type": "application/json" }
   });
 }
+
+test("RayLink Node retries a durable success receipt after restart without reapplying the config", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-node-receipt-"));
+  const statePath = join(directory, "node.json");
+  const completions = [];
+  let publications = 0;
+  let delivered = false;
+  const options = {
+    serverUrl: "https://panel.example.com",
+    enrollmentToken: "token",
+    statePath,
+    metadataProvider: async () => ({ buildTags: [] }),
+    runtimeAdapter: { publish: async () => {
+      publications += 1;
+      return { runtimeVersion: "1.14.2" };
+    } },
+    fetchFn: async (url, init) => {
+      if (url.endsWith("/enroll")) return jsonResponse({ hostId: "host", nodeSecret: "secret" });
+      if (url.endsWith("/heartbeat")) return jsonResponse({ ok: true });
+      if (url.endsWith("/next")) return delivered
+        ? jsonResponse(undefined, 204)
+        : jsonResponse({ id: "task-1", attempt: 1, kind: "publish-config", payload: {} });
+      if (url.endsWith("/complete")) {
+        completions.push(JSON.parse(init.body));
+        if (completions.length === 1) throw new Error("connection lost after task execution");
+        delivered = true;
+        return jsonResponse({ status: "succeeded" });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  };
+  await assert.rejects(new RayLinkNode(options).pollOnce(), /connection lost/);
+  assert.deepEqual(completions.map(({ status }) => status), ["succeeded"]);
+  await new RayLinkNode(options).pollOnce();
+  assert.equal(publications, 1);
+  assert.deepEqual(completions.map(({ status }) => status), ["succeeded", "succeeded"]);
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).pendingTaskReceipt, undefined);
+});
 
 test("RayLink Node surfaces the control-plane error message", async () => {
   const node = new RayLinkNode({
@@ -93,6 +131,23 @@ test("RayLink Node enrolls once and persists its node credential", async () => {
 
   await node.ensureEnrolled();
   assert.equal(requests.length, 1);
+});
+
+test("RayLink Node rejects a counter sample spanning a Runtime restart and retains the next cumulative sample", async () => {
+  let instance = "runtime-before";
+  let bytes = 150;
+  const collector = new NodeUsageCollector({
+    instanceProvider: async () => instance,
+    query: async () => {
+      instance = "runtime-after";
+      return [{ name: "user>>>usage@example.com>>>traffic>>>uplink", value: bytes }];
+    }
+  });
+  await assert.rejects(collector.collect(), /Runtime 实例发生变化/);
+  bytes = 175;
+  const next = await collector.collect();
+  assert.equal(next.runtimeInstanceId, "runtime-after");
+  assert.deepEqual(next.users, [{ name: "usage@example.com", uplinkBytes: 175, downlinkBytes: 0 }]);
 });
 
 test("RayLink Node collects cumulative per-user usage without resetting Runtime counters", async () => {
@@ -227,7 +282,7 @@ test("remote TCP protocol activation performs a real protocol probe before repor
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async (activation) => {
         events.push(["firewall", activation.network, activation.port]);
@@ -287,7 +342,7 @@ test("Hysteria 2 activation completes a real sing-box protocol fetch before repo
         if (probeAttempts === 1) throw new Error("temporary probe failure");
         return { stdout: "", stderr: "" };
       }
-      return { stdout: "sing-box version 1.13.14\n", stderr: "" };
+      return { stdout: "sing-box version 1.14.2\n", stderr: "" };
     },
     protocolProbeDelayMs: 0,
     firewallManager: {
@@ -367,7 +422,7 @@ test("a failed TUIC protocol probe restores the previous config and firewall rul
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async ({ port, network }) => ({
         managed: true,
@@ -461,7 +516,7 @@ test("remote protocol activation rolls config and firewall back after a failed p
     dataDir: directory,
     binaryPath: "sing-box",
     runtimeMode: "dry-run",
-    commandRunner: async () => ({ stdout: "sing-box version 1.13.14\n", stderr: "" }),
+    commandRunner: async () => ({ stdout: "sing-box version 1.14.2\n", stderr: "" }),
     firewallManager: {
       open: async () => ({
         managed: true,
@@ -510,7 +565,7 @@ test("remote protocol activation rejects an occupied system port before changing
       if (command === "ss") {
         return { stdout: "LISTEN 0 4096 *:18444 *:*\n", stderr: "" };
       }
-      return { stdout: "sing-box version 1.13.14\n", stderr: "" };
+      return { stdout: "sing-box version 1.14.2\n", stderr: "" };
     },
     firewallManager: {
       open: async () => {
@@ -554,7 +609,7 @@ test("RayLink Node applies a runtime upgrade task and reports the new version", 
       id: "task-upgrade-1",
       kind: "upgrade-runtime",
       attempt: 1,
-      payload: { targetVersion: "1.13.14" }
+      payload: { targetVersion: "1.14.2" }
     }),
     jsonResponse({ ok: true })
   ];
@@ -577,12 +632,12 @@ test("RayLink Node applies a runtime upgrade task and reports the new version", 
 
   await node.pollOnce();
 
-  assert.deepEqual(upgrades, [{ targetVersion: "1.13.14" }]);
+  assert.deepEqual(upgrades, [{ targetVersion: "1.14.2" }]);
   const completion = calls.find((call) => call.url.endsWith("/api/node/tasks/task-upgrade-1/complete"));
   assert.deepEqual(JSON.parse(completion.init.body), {
     attempt: 1,
     status: "succeeded",
-    result: { runtimeVersion: "1.13.14", rolledBack: false }
+    result: { runtimeVersion: "1.14.2", rolledBack: false }
   });
 });
 
@@ -596,7 +651,7 @@ test("RayLink Node reports an automatic Runtime rollback to the control plane", 
       id: "task-upgrade-failed",
       kind: "upgrade-runtime",
       attempt: 1,
-      payload: { targetVersion: "1.13.14" }
+      payload: { targetVersion: "1.14.2" }
     }),
     jsonResponse({ ok: true })
   ];
@@ -665,7 +720,7 @@ test("node runtime upgrade rolls the binary back when the new build rejects the 
     }
   });
 
-  await assert.rejects(adapter.upgrade({ targetVersion: "1.13.14" }), /已回滚/);
+  await assert.rejects(adapter.upgrade({ targetVersion: "1.14.2" }), /已回滚/);
   assert.equal(await readFile(binaryPath, "utf8"), "previous-binary");
   assert.equal(restarts, 1);
 });
@@ -689,7 +744,7 @@ test("node runtime refuses an upgrade before touching a Host without an active c
   });
 
   await assert.rejects(
-    adapter.upgrade({ targetVersion: "1.13.14" }),
+    adapter.upgrade({ targetVersion: "1.14.2" }),
     /没有活动配置/
   );
   assert.equal(installCalls, 0);
@@ -702,7 +757,7 @@ test("managed node upgrades an untagged Runtime to the approved metered build", 
   await writeFile(binaryPath, "previous-binary");
   await writeFile(builderPath, "#!/bin/sh\n");
   await writeFile(join(directory, "config.json"), "{}");
-  let version = "1.13.14";
+  let version = "1.14.2";
   let metered = false;
   const adapter = new NodeRuntimeAdapter({
     dataDir: directory,
@@ -730,8 +785,8 @@ test("managed node upgrades an untagged Runtime to the approved metered build", 
     }
   });
 
-  const result = await adapter.upgrade({ targetVersion: "1.13.14" });
-  assert.equal(result.runtimeVersion, "1.13.14");
+  const result = await adapter.upgrade({ targetVersion: "1.14.2" });
+  assert.equal(result.runtimeVersion, "1.14.2");
   assert.equal(metered, true);
 });
 
@@ -755,11 +810,11 @@ test("managed node upgrades from the signed release artifact without compiling",
     runtimeArch: "arm64",
     fetchFn: async (url) => {
       downloads.push(url);
-      if (url.endsWith("raylink-libcronet-1.13.14-linux-arm64.so.sha256")) {
+      if (url.endsWith("raylink-libcronet-1.14.2-linux-arm64.so.sha256")) {
         installed = true;
         return new Response(`${cronetChecksum}  raylink-libcronet.so\n`);
       }
-      if (url.endsWith("raylink-libcronet-1.13.14-linux-arm64.so")) {
+      if (url.endsWith("raylink-libcronet-1.14.2-linux-arm64.so")) {
         return new Response(cronetArtifact);
       }
       if (url.endsWith(".sha256")) {
@@ -774,7 +829,7 @@ test("managed node upgrades from the signed release artifact without compiling",
       if (command === binaryPath && args[0] === "version") {
         return {
           stdout: installed
-            ? "sing-box version 1.13.14\nTags: with_v2ray_api\n"
+            ? "sing-box version 1.14.2\nTags: with_v2ray_api\n"
             : "sing-box version 1.13.13\n",
           stderr: ""
         };
@@ -787,15 +842,15 @@ test("managed node upgrades from the signed release artifact without compiling",
     }
   });
 
-  const result = await adapter.upgrade({ targetVersion: "1.13.14" });
+  const result = await adapter.upgrade({ targetVersion: "1.14.2" });
 
-  assert.equal(result.runtimeVersion, "1.13.14");
+  assert.equal(result.runtimeVersion, "1.14.2");
   assert.equal(builderCalls, 0);
   assert.deepEqual(downloads, [
-    "https://panel.example.com/node/runtime/raylink-sing-box-1.13.14-linux-arm64",
-    "https://panel.example.com/node/runtime/raylink-sing-box-1.13.14-linux-arm64.sha256",
-    "https://panel.example.com/node/runtime/raylink-libcronet-1.13.14-linux-arm64.so",
-    "https://panel.example.com/node/runtime/raylink-libcronet-1.13.14-linux-arm64.so.sha256"
+    "https://panel.example.com/node/runtime/raylink-sing-box-1.14.2-linux-arm64",
+    "https://panel.example.com/node/runtime/raylink-sing-box-1.14.2-linux-arm64.sha256",
+    "https://panel.example.com/node/runtime/raylink-libcronet-1.14.2-linux-arm64.so",
+    "https://panel.example.com/node/runtime/raylink-libcronet-1.14.2-linux-arm64.so.sha256"
   ]);
   assert.deepEqual(await readFile(binaryPath), artifact);
   assert.deepEqual(await readFile(join(directory, "libcronet.so")), cronetArtifact);
@@ -877,6 +932,78 @@ test("node runtime restores the previous config when systemd rejects a publicati
   assert.equal(await readFile(configPath, "utf8"), "{\"version\":\"previous\"}\n");
   assert.equal(commands.filter(([command]) => command === "systemctl").length, 2);
 });
+
+test("node publication exposes rollback failure when both candidate and previous service fail", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-node-rollback-failed-"));
+  const configPath = join(directory, "config.json");
+  await writeFile(configPath, '{"version":"previous"}\n');
+  let restarts = 0;
+  const adapter = new NodeRuntimeAdapter({
+    dataDir: directory,
+    commandRunner: async (command) => {
+      if (command === "systemctl") throw new Error(++restarts === 1 ? "candidate failed" : "previous failed");
+      return { stdout: "", stderr: "" };
+    }
+  });
+  await assert.rejects(adapter.publish({ configText: '{"version":"candidate"}', version: "v2" }), (error) => {
+    assert.equal(error.message, "candidate failed");
+    assert.equal(error.rolledBack, false);
+    assert.equal(error.rollbackError, "previous failed");
+    return true;
+  });
+  assert.equal(await readFile(configPath, "utf8"), '{"version":"previous"}\n');
+  assert.equal(restarts, 2);
+});
+
+test("first Node publication stops a candidate rejected by its activation check", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-node-stop-first-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let running = false;
+  const adapter = new NodeRuntimeAdapter({
+    dataDir: directory,
+    portVerifier: { waitForListening: async () => { throw new Error("activation check failed"); } },
+    commandRunner: async (command, args) => {
+      if (command !== "systemctl") return { stdout: "" };
+      if (args[0] === "restart") { running = true; return { stdout: "" }; }
+      if (args[0] === "stop") { running = false; return { stdout: "" }; }
+      // runCommand preserves execFile output in cause when wrapping an error.
+      throw Object.assign(new Error("inactive"), { code: 3, cause: { stdout: "inactive\n" } });
+    }
+  });
+  await assert.rejects(adapter.publish({ version: "first", configText: '{"inbounds":[]}', activation: { exposure: "local" } }), (error) => {
+    assert.equal(error.message, "activation check failed");
+    assert.equal(error.rolledBack, true);
+    assert.equal(running, false, "the rejected candidate must no longer serve traffic");
+    return true;
+  });
+  await assert.rejects(readFile(join(directory, "config.json")), { code: "ENOENT" });
+});
+
+for (const failure of ["stop-failed", "still-active", "status-unavailable"]) {
+  test(`first Node publication reports failed rollback when ${failure}`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "raylink-node-stop-failed-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const adapter = new NodeRuntimeAdapter({
+      dataDir: directory,
+      portVerifier: { waitForListening: async () => { throw new Error("activation check failed"); } },
+      commandRunner: async (command, args) => {
+        if (command !== "systemctl" || args[0] === "restart") return { stdout: "" };
+        if (args[0] === "stop") {
+          if (failure === "stop-failed") throw new Error("stop denied");
+          return { stdout: "" };
+        }
+        if (failure === "status-unavailable") throw Object.assign(new Error("status unavailable"), { code: 1 });
+        return { stdout: "active\n" };
+      }
+    });
+    await assert.rejects(adapter.publish({ version: "first", configText: '{"inbounds":[]}', activation: { exposure: "local" } }), (error) => {
+      assert.equal(error.message, "activation check failed");
+      assert.equal(error.rolledBack, false);
+      assert.match(error.rollbackError, /stop denied|active|status unavailable/);
+      return true;
+    });
+  });
+}
 
 test("node runtime removes a first config when the service cannot start", async () => {
   const directory = await mkdtemp(join(tmpdir(), "raylink-node-first-failure-"));

@@ -10,6 +10,7 @@ import {
   protocolAvailability,
   protocolCatalog
 } from "../server/singbox/protocol-catalog.js";
+import { createRoutePolicyCandidates } from "../server/routing/policy.js";
 
 const eligibleUsers = [
   {
@@ -19,7 +20,42 @@ const eligibleUsers = [
   }
 ];
 
-test("source catalog exposes the inbound protocols registered by sing-box 1.13", () => {
+test("QUIC transports remain UDP candidates even when their protocol is VLESS", () => {
+  const vless = defaultProtocolConfigs().find((profile) => profile.type === "vless");
+  const config = buildMultiHostProtocolClientConfig({
+    credential: { ...eligibleUsers[0], serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+    hosts: [
+      { id: "quic", address: "quic.example.com", protocols: [{
+        ...vless, enabled: true, transport: { type: "quic" },
+        tls: { mode: "certificate", serverName: "quic.example.com" }
+      }] },
+      { id: "tcp", address: "tcp.example.com", protocols: [{ ...vless, enabled: true }] }
+    ]
+  });
+  const members = (tag) => config.outbounds.find((outbound) => outbound.tag === tag).outbounds;
+  assert.deepEqual(members("raylink-tcp"), ["raylink-tcp-vless"]);
+  assert.deepEqual(members("raylink-udp"), ["raylink-quic-vless"]);
+  assert.deepEqual(members("raylink-smart"), ["raylink-tcp-vless"]);
+  const policy = createRoutePolicyCandidates({
+    names: ["raylink-quic-vless", "raylink-tcp-vless"],
+    tcp: members("raylink-tcp"), udp: members("raylink-udp"), smart: members("raylink-smart")
+  });
+  assert.deepEqual(policy.fallback, ["raylink-tcp-vless", "raylink-quic-vless"]);
+});
+
+test("client capabilities match the TCP-only managed Shadowsocks listener", () => {
+  const config = buildProtocolClientConfig({
+    credential: { ...eligibleUsers[0], serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+    profiles: defaultProtocolConfigs(),
+    server: "node.example.com"
+  });
+  assert.equal(config.outbounds.find((outbound) => outbound.type === "shadowsocks").network, "tcp");
+  for (const group of config.outbounds.filter((outbound) => outbound.type === "urltest")) {
+    assert.equal(group.interrupt_exist_connections, false);
+  }
+});
+
+test("RayLink retains its supported inbound catalog on sing-box 1.14", () => {
   assert.deepEqual(
     protocolCatalog.map((protocol) => protocol.type),
     [
@@ -77,7 +113,7 @@ test("managed protocol profiles compile separate user credentials into server in
   assert.equal(inbounds[1].users[1].name, "raylink-probe@internal");
 });
 
-test("ACME TLS profiles compile a node-bound certificate request for sing-box 1.13", () => {
+test("ACME TLS profiles compile a node-bound certificate provider for sing-box 1.14", () => {
   const profile = normalizeProtocolConfig({
     ...defaultProtocolConfigs().find((item) => item.type === "hysteria2"),
     enabled: true,
@@ -97,11 +133,13 @@ test("ACME TLS profiles compile a node-bound certificate request for sing-box 1.
   assert.deepEqual(inbound.tls, {
     enabled: true,
     server_name: "node.example.com",
-    acme: {
+    certificate_provider: {
+      type: "acme",
       domain: ["node.example.com"],
       default_server_name: "node.example.com",
       email: "ops@example.com",
-      data_directory: "/var/lib/raylink/acme"
+      data_directory: "/var/lib/raylink/acme",
+      disable_tls_alpn_challenge: true
     }
   });
 });
@@ -183,12 +221,12 @@ test("client configuration includes every enabled user-facing protocol", () => {
   );
   assert.equal(
     config.outbounds.find((outbound) => outbound.type === "selector").default,
-    "raylink-smart"
+    "raylink-tcp"
   );
   assert.deepEqual(config.inbounds.map((inbound) => inbound.type), ["tun", "mixed"]);
   assert.equal(config.inbounds[0].auto_route, true);
   assert.equal(config.inbounds[0].strict_route, true);
-  assert.deepEqual(config.dns.servers.map((server) => server.tag), ["dns-local", "dns-remote"]);
+  assert.deepEqual(config.dns.servers.map((server) => server.tag), ["dns-local", "dns-domestic", "dns-remote", "dns-ai"]);
   assert.deepEqual(config.dns.servers[0], {
     type: "local",
     tag: "dns-local"
@@ -198,7 +236,7 @@ test("client configuration includes every enabled user-facing protocol", () => {
   assert.equal(config.route.rules[1].action, "hijack-dns");
   assert.equal(
     config.outbounds.find((outbound) => outbound.tag === "raylink-ai").default,
-    "raylink-auto"
+    "raylink-ai-stable"
   );
   assert.deepEqual(
     config.route.rules.find((rule) => rule.outbound === "raylink-ai").domain_suffix.slice(0, 2),
@@ -211,6 +249,11 @@ test("client configuration includes every enabled user-facing protocol", () => {
   assert.ok(config.route.rule_set.every((ruleSet) => ruleSet.type === "inline"));
   assert.ok(config.route.rule_set.every((ruleSet) => !Object.hasOwn(ruleSet, "url")));
   assert.equal(config.experimental.cache_file.enabled, true);
+  assert.equal(config.experimental.cache_file.store_dns, true);
+  assert.equal(config.experimental.cache_file.store_rdrc, undefined);
+  assert.equal(config.dns.timeout, "5s");
+  assert.deepEqual(config.dns.optimistic, { enabled: true, timeout: "30s" });
+  assert.equal(config.dns.cache_capacity, 4096);
 });
 
 test("sing-box client configuration compiles custom routing and DNS before managed rules", () => {
@@ -244,7 +287,7 @@ test("sing-box client configuration compiles custom routing and DNS before manag
   });
 
   const customDirectIndex = config.route.rules.findIndex(
-    (rule) => rule.domain_suffix?.includes("work.example")
+    (rule) => rule.domain_suffix?.includes("work.example") && rule.action === "route"
   );
   const aiIndex = config.route.rules.findIndex((rule) => rule.outbound === "raylink-ai");
   assert.ok(customDirectIndex > 1);
@@ -254,7 +297,7 @@ test("sing-box client configuration compiles custom routing and DNS before manag
     (rule) => rule.ip_cidr?.includes("192.0.2.0/24") && rule.action === "reject"
   ));
   assert.ok(config.dns.rules.some(
-    (rule) => rule.domain_suffix?.includes("work.example") && rule.server === "dns-local"
+    (rule) => rule.domain_suffix?.includes("work.example") && rule.server === "dns-domestic"
   ));
 });
 
@@ -363,6 +406,30 @@ test("multi-host client configuration exposes each host's enabled protocols thro
   );
 });
 
+test("smart UDP admission rejects expired health while keeping explicit UDP choices", () => {
+  const now = Date.parse("2026-10-01T12:00:00Z");
+  const profiles = defaultProtocolConfigs().filter((profile) => ["vless", "hysteria2"].includes(profile.type)).map((profile) => ({
+    ...profile, enabled: true, tls: { ...profile.tls, mode: "certificate", serverName: "node.example.com" }
+  }));
+  const generate = (checkedAt, roundsAt = checkedAt, jitterMs = 10) => buildMultiHostProtocolClientConfig({
+    now,
+    credential: { email: "test@example.com", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "password" },
+    hosts: [{ id: "node", address: "node.example.com", protocols: profiles,
+      protocolActivations: [{ type: "hysteria2", publicCheck: {
+        checkedAt, availability: "available", reachable: true, jitterMs,
+        samples: { count: 5, successful: 5 }, consecutiveFailures: 0,
+        healthWindow: { successRate: 100, rounds: [1, 2, 3].map(() => ({ checkedAt: roundsAt })) }
+      } }]
+    }]
+  });
+  const fresh = "2026-10-01T11:59:00Z";
+  for (const config of [generate("2026-09-01T12:00:00Z"), generate(undefined), generate(fresh, "2026-09-01T12:00:00Z"), generate(fresh, fresh, null)]) {
+    assert.deepEqual(config.outbounds.find(({ tag }) => tag === "raylink-smart").outbounds, ["raylink-node-vless"]);
+    assert.deepEqual(config.outbounds.find(({ tag }) => tag === "raylink-udp").outbounds, ["raylink-node-hysteria2"]);
+  }
+  assert.ok(generate(fresh).outbounds.find(({ tag }) => tag === "raylink-smart").outbounds.includes("raylink-node-hysteria2"));
+});
+
 test("client subscription separates TCP and UDP and excludes unhealthy UDP from smart selection", () => {
   const profiles = defaultProtocolConfigs().map((profile) => ({
     ...profile,
@@ -387,6 +454,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
         {
           type: "hysteria2",
           publicCheck: {
+            checkedAt: new Date().toISOString(),
             availability: "available",
             reachable: true,
             jitterMs: 18,
@@ -394,7 +462,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
             samples: { count: 5, successful: 5, failed: 0 },
             healthWindow: {
               successRate: 100,
-              rounds: [{}, {}, {}]
+              rounds: [1, 2, 3].map(() => ({ checkedAt: new Date().toISOString() }))
             }
           }
         },
@@ -423,7 +491,7 @@ test("client subscription separates TCP and UDP and excludes unhealthy UDP from 
     ["raylink-local-vless", "raylink-local-hysteria2"]
   );
   const selector = config.outbounds.find((outbound) => outbound.tag === "raylink-auto");
-  assert.equal(selector.default, "raylink-smart");
+  assert.equal(selector.default, "raylink-tcp");
   assert.deepEqual(selector.outbounds.slice(0, 3), [
     "raylink-smart",
     "raylink-tcp",
@@ -455,6 +523,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
         {
           type: "hysteria",
           publicCheck: {
+            checkedAt: new Date().toISOString(),
             availability: "available",
             reachable: true,
             jitterMs: 18,
@@ -462,7 +531,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
             samples: { count: 5, successful: 5, failed: 0 },
             healthWindow: {
               successRate: 100,
-              rounds: [{}, {}, {}]
+              rounds: [1, 2, 3].map(() => ({ checkedAt: new Date().toISOString() }))
             }
           }
         },
@@ -504,7 +573,7 @@ test("UDP groups expose every enabled QUIC protocol and smart selection promotes
   );
   assert.equal(
     config.outbounds.find((outbound) => outbound.tag === "raylink-auto").default,
-    "raylink-smart"
+    "raylink-tcp"
   );
 });
 
@@ -546,6 +615,8 @@ test("protocol availability is gated by schema version, platform and client buil
   };
 
   assert.equal(protocolAvailability(naive, base).available, false);
+  assert.equal(protocolAvailability(naive, { ...base, version: "1.14.2", tags: ["with_naive_outbound"] }).available, true);
+  assert.equal(protocolAvailability(naive, { ...base, version: "1.15.0" }).versionSupported, false);
   assert.deepEqual(protocolAvailability(naive, base).missingTags, ["with_naive_outbound"]);
   assert.equal(protocolAvailability(naive, { ...base, version: "1.12.0" }).versionSupported, false);
   assert.equal(protocolAvailability(redirect, { ...base, platform: "win32" }).platformSupported, false);

@@ -6,9 +6,13 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.32">
+  <link rel="stylesheet" href="./styles.css?v=0.2.33&amp;rev=runtime-automation-bbr-2">
 </head>
 <body>
+  <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
+    <div><strong id="connection-title">无法连接控制面服务</strong><p id="connection-copy"></p></div>
+    <button type="button" class="button secondary" data-reconnect-control-plane>立即重连</button>
+  </section>
   <section class="auth-screen" id="admin-auth" aria-labelledby="admin-auth-title">
     <form class="auth-card" id="admin-login-form">
       <span class="brand-mark auth-brand"><img src="/assets/brand/raylink-mark.svg?v=20260726" alt="" aria-hidden="true"></span>
@@ -80,6 +84,7 @@
       <div class="rail-footer">
         <div class="profile-menu-wrap">
           <div class="profile-menu" id="profile-menu" hidden>
+            <button type="button" data-open-account><svg><use href="#i-users"/></svg><span>个人登录信息</span></button>
             <button type="button" data-logout>
               <svg><use href="#i-logout"/></svg><span>退出登录</span>
             </button>
@@ -269,11 +274,11 @@
           </div>
           <section class="policy-layout" data-policy-panel="route">
             <div class="panel policy-list">
-              <div class="panel-heading"><div><p class="eyebrow">简单模式</p><h2>选择路由行为</h2></div><span class="status-badge good"><i></i>三端一致</span></div>
+              <div class="panel-heading"><div><p class="eyebrow">简单模式</p><h2>选择路由行为</h2></div><span class="status-badge good"><i></i>按客户端适配</span></div>
               <form id="routing-mode-form" class="routing-mode-grid">
                 <label class="routing-mode-card"><input type="radio" name="mode" value="smart"><span><strong>智能分流</strong><small>内网和国内直连；AI 与境外流量走代理；未知域名解析真实 IP 后判断。</small></span></label>
                 <label class="routing-mode-card"><input type="radio" name="mode" value="global-proxy"><span><strong>全局代理</strong><small>除内网和显式直连规则外，全部流量使用 RayLink 代理。</small></span></label>
-                <label class="routing-mode-card"><input type="radio" name="mode" value="direct"><span><strong>全部直连</strong><small>除拦截规则外不使用代理，适合临时排障。</small></span></label>
+                <label class="routing-mode-card"><input type="radio" name="mode" value="direct"><span><strong>全部直连</strong><small>默认直连，仍遵从自定义代理、AI 和拦截例外。</small></span></label>
                 <button class="button primary" type="submit">保存路由模式</button>
               </form>
             </div>
@@ -282,6 +287,8 @@
               <p id="routing-mode-description">正在读取统一路由策略。</p>
               <div class="setting-row"><div><strong>DNS 分流</strong><small>直连域名使用国内 DNS，代理域名使用远程加密 DNS</small></div><span class="status-badge good"><i></i>自动</span></div>
               <div class="setting-row"><div><strong>未知域名</strong><small>先解析真实 A / AAAA，再由 GeoIP 判断</small></div><span class="status-badge good"><i></i>安全判定</span></div>
+              <div class="setting-row"><div><strong>主控 / sing-box 规则集</strong><small id="routing-rule-set-status">正在加载规则集状态</small></div><span id="routing-rule-set-version">—</span></div>
+              <div class="setting-row"><div><strong>Mihomo / Egern 基线</strong><small>完整规则随应用发布更新</small></div><span id="routing-bundled-version">—</span></div>
               <div class="setting-row"><div><strong>自定义规则</strong><small>按优先级先于内置规则执行</small></div><span class="status-badge neutral"><i></i><span id="routing-rule-count">0</span> 条</span></div>
             </aside>
           </section>
@@ -292,7 +299,7 @@
             </div>
             <aside class="panel policy-inspector">
               <p class="eyebrow">新增例外</p><h2>添加路由规则</h2>
-              <p>仅填写匹配值，不要输入 URL 路径。域名后缀会同时匹配主域名和所有子域名。</p>
+              <p>仅填写匹配值，不要输入 URL 路径。域名后缀包含主域名和子域名；DNS 选项适用于域名规则，IP 规则按解析结果分流。</p>
               <form id="routing-rule-form" class="field-grid routing-rule-form">
                 <label class="field"><span>匹配类型</span><select name="match"><option value="domain_suffix">域名后缀</option><option value="domain">完整域名</option><option value="ip_cidr">IP 网段</option><option value="ip">单个 IP</option></select></label>
                 <label class="field"><span>动作</span><select name="action"><option value="direct">直连</option><option value="proxy">代理</option><option value="ai">AI 专用代理</option><option value="block">拦截</option></select></label>
@@ -313,7 +320,7 @@
               </form>
               <div id="routing-diagnose-result" class="routing-diagnose-result"><span>输入域名后，将展示 DNS 结果、命中规则、出口和判断原因。</span></div>
             </div>
-            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 国内域名 → 国内 IP → 代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
+            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 默认代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
           </section>
         </section>
 
@@ -324,12 +331,18 @@
           </div>
           <div class="workspace-tabs" role="tablist" aria-label="系统设置">
             <button class="active" data-system-tab="hosts" role="tab" aria-selected="true">主机</button>
+            <button data-system-tab="readiness" role="tab" aria-selected="false">运行体检</button>
             <button data-system-tab="certificates" role="tab" aria-selected="false">证书</button>
             <button data-system-tab="maintenance" role="tab" aria-selected="false">版本与备份</button>
             <button data-system-tab="access" data-owner-only role="tab" aria-selected="false">权限与审计</button>
+            <button data-system-tab="mcp" data-owner-only role="tab" aria-selected="false" hidden>MCP Server</button>
             <button data-system-tab="advanced" role="tab" aria-selected="false">高级</button>
           </div>
           <div data-system-panel="hosts">
+            <section class="resource-panel runtime-setup-card" aria-labelledby="runtime-setup-title">
+              <div class="resource-panel-heading"><div><p class="eyebrow">控制面本机</p><h2 id="runtime-setup-title">自动安装与配置</h2><p>安装组件、配置服务与默认协议、检查运行状态；BBR 单独展示实际内核结果。</p></div></div>
+              <div data-runtime-setup aria-live="polite"><p class="field-hint">正在读取安装状态…</p></div>
+            </section>
             <section class="resource-panel system-runtime-overview">
               <div class="resource-panel-heading">
                 <div><p class="eyebrow">控制面本机</p><h2>Runtime 状态</h2><p>集中展示本机 sing-box 进程、当前配置和 Deployment 应用状态。</p></div>
@@ -351,20 +364,49 @@
             <section class="table-panel host-table">
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>主机</th><th>状态</th><th>入口协议</th><th>类型</th><th>平台</th><th>最后心跳 / 版本</th><th><span class="sr-only">操作</span></th></tr></thead>
+                  <thead><tr><th>主机</th><th>状态</th><th>入口协议</th><th>类型</th><th>平台</th><th>BBR 加速</th><th>最后心跳 / 版本</th><th><span class="sr-only">操作</span></th></tr></thead>
                   <tbody id="host-table-body"></tbody>
                 </table>
               </div>
             </section>
+            <section class="resource-panel provisioning-history" id="provisioning-history" hidden>
+              <div class="resource-panel-heading"><div><p class="eyebrow">SSH 自动接入</p><h2>接入记录</h2><p id="provisioning-status" role="status">安装、上线与订阅验证的持久化进度。</p></div><button class="button secondary" data-refresh-provisioning><svg><use href="#i-refresh"/></svg>刷新记录</button></div>
+              <div id="provisioning-jobs"><p class="field-hint">正在读取接入记录…</p></div>
+            </section>
           </div>
+          <section class="resource-panel readiness-panel" data-system-panel="readiness" hidden>
+            <div class="resource-panel-heading">
+              <div><p class="eyebrow">运行证据</p><h2>运行体检</h2><p>汇总配置生效、主机、协议检测、计量、分流与备份状态，并给出处理入口。</p></div>
+              <div class="heading-actions"><button class="button secondary" data-refresh-readiness>刷新体检</button><button class="button secondary" data-export-readiness>导出诊断报告</button></div>
+            </div>
+            <p id="readiness-summary" role="status" aria-live="polite">等待读取体检结果…</p>
+            <div id="readiness-checks" class="readiness-checks"></div>
+            <div id="readiness-limitations" class="readiness-limitations"></div>
+          </section>
           <section class="system-card-grid" data-system-panel="certificates" hidden>
+            <article class="panel system-card node-domain-card"><span class="resource-icon"><svg><use href="#i-globe"/></svg></span><div><p class="eyebrow">节点 DNS 自动化</p><h2>自动分配节点域名</h2><p>配置 Cloudflare 后，新主机可以自动生成子域名和 DNS 解析，再通过 ACME 签发证书。也可在接入时填写已解析域名；控制面的访问域名不会被修改。</p>
+              <form id="node-domain-settings-form" class="certificate-settings-form" autocomplete="off">
+                <label class="field"><span>DNS 服务</span><select id="node-domain-provider" name="provider" disabled><option value="disabled">未启用</option><option value="cloudflare">Cloudflare</option></select></label>
+                <div data-cloudflare-fields hidden>
+                  <label class="field"><span>Cloudflare Zone ID</span><input name="zoneId" autocomplete="off" spellcheck="false" disabled></label>
+                  <label class="field"><span>节点域名后缀</span><input name="baseDomain" placeholder="nodes.example.com" autocomplete="off" spellcheck="false" disabled><small>需属于上方 Zone；系统只管理新节点的 DNS 记录。</small></label>
+                  <label class="field"><span>Cloudflare API Token</span><input name="apiToken" type="password" autocomplete="new-password" placeholder="留空保留已配置的 Token" disabled><small>仅授予目标 Zone 的 Zone Read + DNS Edit 权限；保存后不回显。</small></label>
+                </div>
+                <label class="node-domain-option"><input name="autoProvision" type="checkbox" disabled><span>新接入主机自动分配域名</span></label>
+                <label class="node-domain-option"><input name="inheritProtocols" type="checkbox" checked disabled><span>默认继承本机可一键启用的公网协议</span></label>
+                <p class="field-hint">TLS 协议还需要系统证书通知邮箱以及公网 ACME 验证条件。未配置 DNS 自动化时，“自动”接入将使用 IP 和 Shadowsocks。</p>
+                <div class="heading-actions"><button type="submit" class="button primary" disabled>保存 DNS 设置</button><span id="node-domain-status" role="status" class="field-hint">打开证书页后读取；仅 Owner 可修改。</span></div>
+              </form>
+            </div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">ACME 账户</p><h2>证书通知邮箱</h2><p>用于自动签发证书和接收证书到期通知。Naive、Hysteria、TUIC 与 Hysteria 2 一键启用时会自动读取这里的邮箱。</p><form class="certificate-settings-form" id="certificate-settings-form"><label class="field"><span>通知邮箱</span><input id="certificate-email" name="email" type="email" autocomplete="email" placeholder="ops@example.com" required><small class="field-error"></small></label><div class="heading-actions"><button class="button primary" type="submit">保存邮箱</button><span class="status-badge neutral" id="certificate-mode"><i></i>未配置</span></div></form></div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">TLS 资产</p><h2>证书路径由主机协议管理</h2><p>一键启用会优先使用主机域名自动签发证书；手动证书仍可在主机的“入口协议”中配置。</p><button class="text-button" data-system-tab="hosts">查看主机 <svg><use href="#i-arrow"/></svg></button></div></article>
             <article class="panel system-card"><span class="resource-icon">R</span><div><p class="eyebrow">Reality</p><h2>密钥按协议生成</h2><p>VLESS 等协议可在编辑抽屉中一键生成 Reality 密钥对。</p></div></article>
           </section>
           <div data-system-panel="maintenance" hidden>
             <section class="system-card-grid">
-              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">版本</p><h2 id="system-version">检测中</h2><p id="system-build">正在读取当前二进制构建。</p><p id="system-update-state">尚未检查稳定版更新。</p><div class="heading-actions"><button class="button secondary" data-check-runtime-update><svg><use href="#i-refresh"/></svg>检查更新</button><button class="button primary" id="upgrade-local-runtime" hidden><svg><use href="#i-arrow"/></svg>安全升级</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">RayLink 主控程序</p><h2 id="control-plane-update-title">RayLink 控制面</h2><p id="control-plane-version">正在读取版本…</p><p id="control-plane-update-state">主控、节点管理服务和 sing-box 分别更新。</p><span class="status-badge neutral" id="control-plane-update-badge">主控程序</span><div class="heading-actions"><button type="button" class="button secondary" data-check-system-update>检查主控更新</button><button type="button" class="button primary" data-upgrade-system hidden>更新 RayLink 主控</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-terminal"/></svg></span><div><p class="eyebrow">sing-box 代理 Runtime</p><h2 id="system-version">检测中</h2><p id="system-build">正在读取当前二进制构建。</p><p id="system-update-state">尚未检查稳定版更新。</p><div class="heading-actions"><button class="button secondary" data-check-runtime-update><svg><use href="#i-refresh"/></svg>检查 sing-box 更新</button><button class="button primary" id="upgrade-local-runtime" hidden><svg><use href="#i-arrow"/></svg>安全升级 sing-box</button></div></div></article>
+              <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-globe"/></svg></span><div><p class="eyebrow">RayLink Node 管理服务</p><h2>按主机更新 Node</h2><p>在主机详情查看 Node 版本、升级结果与 BBR 状态。节点管理服务更新不替换用户的 sing-box 配置。</p><button type="button" class="button secondary" data-system-tab="hosts">查看节点与更新</button></div></article>
               <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-rollback"/></svg></span><div><p class="eyebrow">数据库备份</p><h2 id="system-backup-title">尚无在线备份</h2><p id="system-backup-state">每天自动执行 SQLite 在线备份，并校验 SHA-256 与数据库完整性。</p><div class="heading-actions"><button class="button primary" data-create-backup><svg><use href="#i-rollback"/></svg>立即备份</button></div></div></article>
             </section>
 
@@ -430,6 +472,42 @@
               <div class="operations-log" id="audit-event-list"></div>
             </section>
           </section>
+          <section class="mcp-access" data-system-panel="mcp" hidden>
+            <section class="resource-panel mcp-panel">
+              <div class="resource-panel-heading"><div><p class="eyebrow">MCP Server</p><h2>连接 RayLink MCP Server</h2><p>为每个客户端创建独立 Token，按需授予权限；只有 Owner 可以管理。操作同时受 Token 范围和管理员当前角色约束。</p></div><button type="button" class="button secondary" data-refresh-mcp><svg><use href="#i-refresh"/></svg>刷新列表</button></div>
+              <dl class="mcp-connection-facts"><div><dt>Transport</dt><dd>Streamable HTTP</dd></div><div><dt>Authentication</dt><dd>Authorization: Bearer Token</dd></div></dl>
+              <label class="field mcp-endpoint"><span>Endpoint</span><input id="mcp-endpoint" readonly placeholder="打开此页后读取" aria-label="MCP Server Endpoint"></label>
+              <button type="button" class="button secondary" data-copy-target="mcp-endpoint">复制 Endpoint</button>
+              <p id="mcp-access-status" class="field-hint" role="status" aria-live="polite">正在等待加载凭据。</p>
+              <form id="mcp-create-form" class="mcp-create-form" autocomplete="off">
+                <div class="mcp-form-grid">
+                  <label class="field"><span>Token 名称</span><input name="name" maxlength="80" placeholder="例如：日常运维 Agent" required></label>
+                  <label class="field"><span>有效期</span><select name="expiresInDays"><option value="7">7 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="365">365 天</option></select></label>
+                </div>
+                <fieldset class="mcp-permissions"><legend>权限范围</legend>
+                  <div class="mcp-presets" aria-label="权限预设"><button type="button" class="button secondary" data-mcp-preset="read" aria-pressed="true">只读</button><button type="button" class="button secondary" data-mcp-preset="operator" aria-pressed="false">运维</button><button type="button" class="button secondary" data-mcp-preset="full" aria-pressed="false">完整常规权限</button></div>
+                  <div id="mcp-scope-list" class="mcp-scope-grid"></div>
+                  <p class="field-hint">“读取密钥”、“管理管理员”和“SSH 自动接入”需要单独勾选，任何预设都不会自动启用。</p>
+                </fieldset>
+                <div class="heading-actions"><button class="button primary" type="submit" id="mcp-create-submit" disabled><svg><use href="#i-plus"/></svg>创建 Token</button><span class="field-hint">Token 只显示一次，不会保存在浏览器存储中。</span></div>
+              </form>
+            </section>
+            <section id="mcp-issued" class="resource-panel mcp-panel mcp-issued" hidden aria-labelledby="mcp-issued-title">
+              <div class="resource-panel-heading"><div><p class="eyebrow">一次性显示</p><h2 id="mcp-issued-title">保存 MCP Server Token</h2><p>关闭后无法再次查看 Token。连接配置同样包含密钥，请仅放入受信任客户端。</p></div><button type="button" class="button secondary" data-dismiss-mcp>已保存，关闭</button></div>
+              <label class="field"><span>Bearer Token</span><input id="mcp-issued-token" readonly autocomplete="off" spellcheck="false"></label>
+              <div class="heading-actions"><button type="button" class="button secondary" data-copy-mcp="token">复制 Token</button><button type="button" class="button secondary" data-copy-mcp="config">复制连接配置</button></div>
+              <label class="field"><span>通用 JSON 配置示例</span><textarea id="mcp-issued-config" readonly rows="12" autocomplete="off" spellcheck="false"></textarea></label>
+              <p class="field-hint">Streamable HTTP 在本示例中使用标准字段 <code>type: "http"</code>，配合 Bearer 请求头；不同客户端的配置位置及字段可能不同，请按其 MCP 设置填写。</p>
+            </section>
+            <section class="resource-panel mcp-panel">
+              <div class="resource-panel-heading"><div><p class="eyebrow">Token 记录</p><h2>MCP Server 访问授权</h2><p>撤销后 Token 立即失效；列表只保存名称、范围和有效期等信息，无法找回明文。</p></div></div>
+              <div id="mcp-token-list" class="mcp-token-list"><div class="empty-state">加载后显示凭据。</div></div>
+            </section>
+            <section class="resource-panel mcp-panel mcp-guide">
+              <div class="resource-panel-heading"><div><p class="eyebrow">使用指南</p><h2>让 Agent 开始工作</h2></div></div>
+              <ol><li>在客户端添加 MCP Server，传输方式选择 Streamable HTTP，填写上方 Endpoint，并设置 <code>Authorization: Bearer &lt;Token&gt;</code> 请求头。</li><li>先让 Agent 获取可用工具和系统状态，再执行权限范围内的用户管理或运维操作。</li><li>写入工具需要 <code>requestId</code>。同一次操作因超时而重试时复用原 ID；新的操作使用新的 ID，避免重复执行。</li><li>可从只读权限开始，为不同 Agent 分别创建凭据；不再使用时，在此撤销。</li></ol>
+            </section>
+          </section>
           <section class="resource-panel" data-system-panel="advanced" hidden>
             <div class="resource-panel-heading"><div><p class="eyebrow">高级配置</p><h2>受管配置摘要</h2><p>这里展示 RayLink 管理的核心字段。受管字段需回到对应工作区修改。</p></div><button class="button secondary" data-system-tab="maintenance"><svg><use href="#i-code"/></svg>查看发布与回滚</button></div>
             <pre class="advanced-preview"><code id="system-config-preview">{}</code></pre>
@@ -461,11 +539,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.32"></script>
-  <script src="./subscription-session.js?v=0.2.32"></script>
-  <script src="./subscription-client-url.js?v=0.2.32"></script>
-  <script src="./subscription-quick.js?v=0.2.32"></script>
-  <script src="./protocol-health.js?v=0.2.32"></script>
-  <script src="./app.js?v=0.2.32"></script>
+  <script src="./subscription-qr.js?v=0.2.33"></script>
+  <script src="./subscription-session.js?v=0.2.33"></script>
+  <script src="./subscription-client-url.js?v=0.2.33"></script>
+  <script src="./subscription-quick.js?v=0.2.33"></script>
+  <script src="./protocol-health.js?v=0.2.33"></script>
+  <script src="./app.js?v=0.2.33&amp;rev=runtime-automation-bbr-2"></script>
 </body>
 </html>

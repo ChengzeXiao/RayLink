@@ -3,6 +3,16 @@ import test from "node:test";
 
 import { evaluateOperationalAlerts } from "../server/alerts.js";
 
+test("a fresh Node heartbeat does not hide a stopped remote Runtime", () => {
+  const now = new Date();
+  const alerts = evaluateOperationalAlerts({ now, hosts: [{
+    id: "remote-1", name: "Remote", kind: "remote", status: "online",
+    lastSeenAt: now.toISOString(),
+    telemetry: { updatedAt: now.toISOString(), serviceStatus: "stopped" }
+  }] });
+  assert.ok(alerts.some((alert) => alert.code === "HOST_OFFLINE" && alert.resourceId === "remote-1"));
+});
+
 test("operational alerts cover rollout, offline nodes, protocol health, memory and backups", () => {
   const now = new Date("2026-07-30T12:00:00.000Z");
   const alerts = evaluateOperationalAlerts({

@@ -13,7 +13,8 @@ window.RayLinkProtocolHealth = (() => {
   }
 
   function finiteMilliseconds(value) {
-    return Number.isFinite(Number(value))
+    return value !== null && value !== undefined && value !== ""
+      && typeof value !== "boolean" && Number.isFinite(Number(value)) && Number(value) >= 0
       ? `${Math.max(0, Math.round(Number(value)))} ms`
       : "—";
   }
@@ -26,6 +27,7 @@ window.RayLinkProtocolHealth = (() => {
   }
 
   function percentage(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return "—";
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return "—";
     return `${Math.max(0, Math.min(100, Math.round(numeric * 10) / 10))}%`;
@@ -95,6 +97,16 @@ window.RayLinkProtocolHealth = (() => {
     const availabilityRateLabel = availabilityRate(check.samples);
     const rollingAvailabilityLabel = percentage(check.healthWindow?.successRate);
     const layersLabel = layerSummary(check.layers);
+    // Keep the evidence window aligned with SMART_PROTOCOL_HEALTH_MAX_AGE_MS.
+    const ageMs = Date.now() - new Date(check.checkedAt).getTime();
+    if (!Number.isFinite(ageMs) || ageMs < -60_000 || ageMs > 15 * 60_000) {
+      const summary = `检测结果已过期或时间异常，请重新检测 · 上次记录 ${checkedLabel}`;
+      return {
+        label: "待复检", availabilityLabel: "待复检", className: "warning",
+        latencyLabel, p95Label, jitterLabel, availabilityRateLabel,
+        rollingAvailabilityLabel, layersLabel, checkedLabel, summary, title: summary
+      };
+    }
     const rateSummary = availabilityRateLabel === "—"
       ? ""
       : ` · 本轮成功率 ${availabilityRateLabel}`;
@@ -146,11 +158,11 @@ window.RayLinkProtocolHealth = (() => {
       };
     }
 
-    if (check.reachable === true && latencyLabel !== "—") {
+    if (check.reachable === true && check.availability !== "unavailable") {
       const latencyMs = Math.max(0, Math.round(Number(check.latencyMs)));
       const summary = `可用 · 连接耗时 ${latencyLabel}${p95Summary} · 抖动 ${jitterLabel}${rateSummary}${rollingSummary}${layerText} · 最近检测 ${checkedLabel}`;
       return {
-        label: latencyLabel,
+        label: latencyLabel === "—" ? "可用 · 未计时" : latencyLabel,
         availabilityLabel: "可用",
         latencyLabel,
         p95Label,
@@ -159,7 +171,7 @@ window.RayLinkProtocolHealth = (() => {
         rollingAvailabilityLabel,
         layersLabel,
         checkedLabel,
-        className: latencyMs <= 120 ? "good" : "warning",
+        className: latencyLabel !== "—" && latencyMs <= 120 ? "good" : "warning",
         summary,
         title: `${probeLabel} · ${summary}`
       };

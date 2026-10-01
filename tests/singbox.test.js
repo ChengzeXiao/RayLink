@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
+
 import { buildSingBoxConfig } from "../server/singbox/config.js";
 
 test("sing-box config contains one credential per eligible user", () => {
@@ -118,4 +120,26 @@ test("metering-capable Runtime enables loopback V2Ray Stats for eligible users o
       users: ["metered@example.com"]
     }
   });
+});
+
+
+test("rolling deployments select ACME syntax using the Host Runtime version", () => {
+  const profile = {
+    ...defaultProtocolConfigs().find((item) => item.type === "hysteria2"),
+    enabled: true,
+    tls: { mode: "acme", serverName: "node.example.com", acmeEmail: "ops@example.com",
+      acmeDataDirectory: "/var/lib/raylink/acme" }
+  };
+  for (const runtimeVersion of [undefined, "1.13.14", "1.14.2"]) {
+    const config = buildSingBoxConfig({
+      host: { region: "test", runtimeVersion }, users: [], protocols: [profile],
+      masterPassword: "AAAAAAAAAAAAAAAAAAAAAA=="
+    });
+    const tls = config.inbounds[0].tls;
+    const provider = runtimeVersion === "1.14.2" ? config.certificate_providers.find((entry) => entry.tag === tls.certificate_provider) : tls.acme;
+    assert.deepEqual(provider.domain, ["node.example.com"]);
+    assert.equal(provider.data_directory, "/var/lib/raylink/acme");
+    assert.equal(provider.type, runtimeVersion === "1.14.2" ? "acme" : undefined);
+    assert.equal(runtimeVersion === "1.14.2" ? tls.acme : tls.certificate_provider, undefined);
+  }
 });

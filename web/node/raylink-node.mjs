@@ -30,11 +30,13 @@ import { connect as connectHttp2 } from "node:http2";
 import { connect as connectTcp } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { BbrManager } from "./network-tuning.mjs";
+import { NodeSoftwareUpdater } from "./software-update.mjs";
 
 const execFile = promisify(execFileCallback);
-const AGENT_VERSION = "0.7.0";
+export const AGENT_VERSION = "0.9.0";
 const SECRET_ENVELOPE_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm";
 const SECRET_ENVELOPE_CONTEXT = Buffer.from("raylink-node-secret-v1", "utf8");
 const PROTOCOL_PROBE_TYPES = new Set([
@@ -390,11 +392,15 @@ export class NodeUsageCollector {
     if (!/^[a-zA-Z0-9_.:-]{1,160}$/.test(runtimeInstanceId)) {
       throw new Error("Runtime 实例编号无效");
     }
+    const users = normalizeV2RayStats(await this.query());
+    if (String(await this.instanceProvider()) !== runtimeInstanceId) {
+      throw new Error("采样期间 Runtime 实例发生变化，等待下一轮重新采样");
+    }
     return {
       sampleId: this.sampleId(),
       runtimeInstanceId,
       observedAt: this.clock().toISOString(),
-      users: normalizeV2RayStats(await this.query())
+      users
     };
   }
 }
@@ -530,6 +536,8 @@ export class NodeTelemetryCollector {
     this.sampleProvider = options.sampleProvider || systemSample;
     this.serviceProvider = options.serviceProvider
       || (() => serviceState(options.systemdUnit || "raylink-sing-box.service"));
+    this.bbrProvider = options.bbrProvider
+      || (() => new BbrManager({ mode: "systemd" }).inspect());
     this.clock = options.clock || Date.now;
     this.previous = null;
   }
@@ -564,7 +572,8 @@ export class NodeTelemetryCollector {
       networkTxBytes: sample.networkTxBytes,
       networkRxBps: byteRate(sample.networkRxBytes, this.previous?.sample.networkRxBytes),
       networkTxBps: byteRate(sample.networkTxBytes, this.previous?.sample.networkTxBytes),
-      serviceStatus: await this.serviceProvider()
+      serviceStatus: await this.serviceProvider(),
+      bbr: await this.bbrProvider()
     };
     this.previous = { sample, timestamp };
     return telemetry;
@@ -853,7 +862,19 @@ export class NodeRuntimeAdapter {
 
   async publish(task, privateKeyPem = null) {
     if (!task?.configText) throw new Error("发布任务缺少 sing-box 配置");
-    JSON.parse(task.configText);
+    const config = JSON.parse(task.configText);
+    const acmeProviders = [
+      ...(config.certificate_providers || []).filter((provider) => provider.type === "acme"),
+      ...(config.inbounds || []).flatMap((inbound) => inbound.tls?.acme ? [inbound.tls.acme]
+        : inbound.tls?.certificate_provider?.type === "acme" ? [inbound.tls.certificate_provider] : [])
+    ];
+    let storageAdapted = false;
+    for (const provider of acmeProviders) {
+      const directory = join(this.dataDir, "acme");
+      storageAdapted ||= provider.data_directory !== directory;
+      provider.data_directory = directory;
+    }
+    if (storageAdapted) task = { ...task, configText: JSON.stringify(config, null, 2) };
     await mkdir(this.dataDir, { recursive: true, mode: 0o750 });
     const tlsInstallation = await this.installTlsBundle(task, privateKeyPem);
     const temporaryPath = join(this.dataDir, `.config-${process.pid}-${Date.now()}.json`);
@@ -867,6 +888,20 @@ export class NodeRuntimeAdapter {
       hadConfig = await pathExists(this.configPath);
       if (task.activation && this.portVerifier.assertAvailable) {
         await this.portVerifier.assertAvailable(task.activation);
+      }
+      const challengePorts = new Map((task.activation?.challengePorts || []).map((challenge) => [`${challenge.port}/${challenge.network}`, challenge]));
+      for (const provider of acmeProviders) {
+        if (provider.disable_http_challenge || provider.dns01_challenge) continue;
+        const port = provider.alternative_http_port || 80;
+        challengePorts.set(`${port}/tcp`, { port, network: "tcp", purpose: "acme-http-01" });
+      }
+      for (const challenge of challengePorts.values()) {
+        try { await this.portVerifier.assertAvailable?.(challenge); }
+        catch (cause) {
+          throw Object.assign(new Error(`ACME HTTP-01 挑战端口 ${challenge.port}/${challenge.network} 不可用，请释放端口并确认云安全组允许访问`, { cause }), {
+            code: "ACME_CHALLENGE_PORT_OCCUPIED"
+          });
+        }
       }
       if (task.activation?.exposure === "public") {
         for (const rule of [
@@ -882,18 +917,7 @@ export class NodeRuntimeAdapter {
       await rename(temporaryPath, this.configPath);
       configActivated = true;
       if (this.runtimeMode === "systemd") {
-        try {
-          await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
-        } catch (error) {
-          if (hadConfig && await pathExists(backupPath)) {
-            await copyFile(backupPath, this.configPath);
-            await this.commandRunner("systemctl", ["restart", this.systemdUnit]).catch(() => {});
-          } else {
-            await rm(this.configPath, { force: true });
-          }
-          configActivated = false;
-          throw error;
-        }
+        await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
       }
       let activation = null;
       if (task.activation) {
@@ -932,6 +956,7 @@ export class NodeRuntimeAdapter {
         configPath: this.configPath,
         version: task.version,
         checksum: task.checksum,
+        ...(storageAdapted ? { appliedChecksum: createHash("sha256").update(`${task.configText.trim()}\n`).digest("hex") } : {}),
         tlsAssetsInstalled: tlsInstallation.count,
         ...(activation ? { activation } : {})
       };
@@ -940,12 +965,14 @@ export class NodeRuntimeAdapter {
       if (configActivated) {
         try {
           if (hadConfig && await pathExists(backupPath)) {
-            await copyFile(backupPath, this.configPath);
+            await copyFile(backupPath, temporaryPath);
+            await rename(temporaryPath, this.configPath);
             if (this.runtimeMode === "systemd") {
               await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
             }
           } else {
             await rm(this.configPath, { force: true });
+            if (this.runtimeMode === "systemd") await this.stopSystemd();
           }
         } catch (rollbackError) {
           rolledBack = false;
@@ -979,6 +1006,21 @@ export class NodeRuntimeAdapter {
       throw new Error("无法定位 sing-box 可执行文件");
     }
     return resolvedPath;
+  }
+
+  async stopSystemd() {
+    await this.commandRunner("systemctl", ["stop", this.systemdUnit], { timeout: 20_000 });
+    let state;
+    try {
+      const { stdout } = await this.commandRunner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      state = String(stdout).trim();
+    } catch (error) {
+      if (error.code !== 3) throw error;
+      state = String(error.stdout || error.cause?.stdout || "").trim();
+    }
+    if (!["inactive", "failed"].includes(state)) {
+      throw new Error(`${this.systemdUnit} 停止后仍未确认退出（${state || "未知状态"}）`);
+    }
   }
 
   async restartAndVerify(expectedVersion) {
@@ -1140,8 +1182,8 @@ export class NodeRuntimeAdapter {
 
   async upgrade(task) {
     const targetVersion = String(task?.targetVersion || "");
-    if (targetVersion !== "1.13.14") {
-      throw new Error("RayLink 当前只批准升级到 sing-box 1.13.14 计量版");
+    if (targetVersion !== "1.14.2") {
+      throw new Error("RayLink 当前只批准升级到 sing-box 1.14.2 计量版");
     }
     await mkdir(this.dataDir, { recursive: true, mode: 0o750 });
     const resolvedBinaryPath = await this.resolveBinaryPath();
@@ -1254,6 +1296,16 @@ export class RayLinkNode {
     }
     this.enrollmentToken = options.enrollmentToken || "";
     this.statePath = options.statePath || "/etc/raylink-node/node.json";
+    this.bbrManager = options.bbrManager || new BbrManager({
+      mode: options.runtimeMode || "systemd",
+      configPath: options.bbrConfigPath || join(dirname(this.statePath), "99-raylink-bbr.conf")
+    });
+    this.enableBbr = options.enableBbr ?? options.runtimeMode === "systemd";
+    this.bbrInitialization = null;
+    this.selfUpdater = options.selfUpdater || new NodeSoftwareUpdater({
+      server: this.serverUrl, dataDir: dirname(this.statePath),
+      root: options.nodeRoot || dirname(fileURLToPath(import.meta.url))
+    });
     this.fetchFn = options.fetchFn || globalThis.fetch;
     this.runtimeAdapter = options.runtimeAdapter || new NodeRuntimeAdapter({
       ...options,
@@ -1263,7 +1315,8 @@ export class RayLinkNode {
       preferMeteredRuntime: options.preferMeteredRuntime !== false
     });
     this.telemetryCollector = options.telemetryCollector || new NodeTelemetryCollector({
-      systemdUnit: this.runtimeAdapter.systemdUnit
+      systemdUnit: this.runtimeAdapter.systemdUnit,
+      bbrProvider: () => this.bbrManager.inspect()
     });
     this.usageCollector = options.usageCollector || new NodeUsageCollector({
       systemdUnit: this.runtimeAdapter.systemdUnit,
@@ -1341,6 +1394,14 @@ export class RayLinkNode {
   }
 
   async ensureEnrolled() {
+    if (this.enableBbr) {
+      this.bbrInitialization ||= this.bbrManager.configure().catch((error) => {
+        // BBR is an optional TCP optimization. Report failures while keeping
+        // enrollment and configuration delivery available on limited kernels.
+        console.error(`[RayLink Node] BBR 自动配置未完成：${error.message}`);
+      });
+      await this.bbrInitialization;
+    }
     const existing = await this.loadState();
     if (existing) return this.ensureEncryptionState(existing);
     if (!this.serverUrl) throw new Error("缺少 RAYLINK_SERVER");
@@ -1383,8 +1444,21 @@ export class RayLinkNode {
     });
   }
 
+  async flushTaskReceipt() {
+    const state = await this.ensureEnrolled();
+    const receipt = state.pendingTaskReceipt;
+    if (!receipt) return false;
+    await this.completeTask(receipt.taskId, receipt.attempt, receipt.status, receipt.result);
+    const next = { ...state };
+    delete next.pendingTaskReceipt;
+    await this.persistState(next);
+    return true;
+  }
+
   async pollOnce() {
     const state = await this.ensureEnrolled();
+    // Report the previous execution before claiming work, including after a Node restart.
+    if (await this.flushTaskReceipt()) return true;
     const metadata = await this.metadataProvider();
     await this.authenticatedRequest("/api/node/heartbeat", {
       method: "POST",
@@ -1411,17 +1485,44 @@ export class RayLinkNode {
         });
       }
     }
+    if (state.pendingNodeUpgrade) {
+      const outcome = await this.selfUpdater.result(state.pendingNodeUpgrade.taskId);
+      if (!outcome) return false;
+      const next = { ...state, pendingTaskReceipt: {
+        taskId: state.pendingNodeUpgrade.taskId,
+        attempt: state.pendingNodeUpgrade.attempt,
+        status: outcome.status,
+        result: outcome.result
+      } };
+      delete next.pendingNodeUpgrade;
+      await this.persistState(next);
+      await this.flushTaskReceipt();
+      return true;
+    }
     const task = await this.authenticatedRequest("/api/node/tasks/next");
     if (!task) return false;
+    let receipt;
     try {
+      if (task.kind === "upgrade-node") {
+        await this.persistState({ ...state, pendingNodeUpgrade: { taskId: task.id, attempt: task.attempt } });
+        try {
+          await this.selfUpdater.schedule(task);
+        } catch (error) {
+          await this.persistState(state);
+          throw error;
+        }
+        return true;
+      }
       const result = task.kind === "publish-config"
         ? await this.runtimeAdapter.publish(task.payload, state.encryptionPrivateKey)
         : task.kind === "upgrade-runtime"
           ? await this.runtimeAdapter.upgrade(task.payload)
-          : (() => { throw new Error(`不支持的节点任务：${task.kind}`); })();
-      await this.completeTask(task.id, task.attempt, "succeeded", result);
+          : task.kind === "configure-bbr"
+            ? await this.bbrManager.configure()
+            : (() => { throw new Error(`不支持的节点任务：${task.kind}`); })();
+      receipt = { taskId: task.id, attempt: task.attempt, status: "succeeded", result };
     } catch (error) {
-      await this.completeTask(task.id, task.attempt, "failed", {
+      receipt = { taskId: task.id, attempt: task.attempt, status: "failed", result: {
         error: error.message,
         ...(error.previousVersion ? { previousVersion: error.previousVersion } : {}),
         ...(error.code ? { code: error.code } : {}),
@@ -1433,8 +1534,10 @@ export class RayLinkNode {
         ...(typeof error.packageMetadataRestored === "boolean"
           ? { packageMetadataRestored: error.packageMetadataRestored }
           : {})
-      });
+      } };
     }
+    await this.persistState({ ...state, pendingTaskReceipt: receipt });
+    await this.flushTaskReceipt();
     return true;
   }
 
@@ -1463,7 +1566,10 @@ async function main() {
     systemdUnit: process.env.SING_BOX_SYSTEMD_UNIT,
     runtimeMode: process.env.RAYLINK_RUNTIME_MODE,
     protocolProbeUrl: process.env.RAYLINK_PROTOCOL_PROBE_URL,
-    preferMeteredRuntime: process.env.RAYLINK_ENABLE_USER_METERING !== "false"
+    preferMeteredRuntime: process.env.RAYLINK_ENABLE_USER_METERING !== "false",
+    enableBbr: true,
+    bbrConfigPath: process.env.RAYLINK_BBR_CONFIG,
+    nodeRoot: process.env.RAYLINK_NODE_ROOT
   });
   await node.run();
 }

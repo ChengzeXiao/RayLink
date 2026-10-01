@@ -118,16 +118,20 @@ export class RuntimeManager {
   }
 
   async publish(publisherAdminId = null, options = {}) {
-    return this.publishCandidate(
+    return this.#withPublication(async () => this.#publishCandidate(
       await this.prepareDeploymentCandidate(),
       publisherAdminId,
       options
-    );
+    ));
   }
 
   async publishCandidate(candidate, publisherAdminId = null, options = {}) {
+    return this.#withPublication(() => this.#publishCandidate(candidate, publisherAdminId, options));
+  }
+
+  async #publishCandidate(candidate, publisherAdminId, options) {
     const { compiled, remoteDeployments, hostSnapshots } = candidate;
-    const deployment = await this.publishCompiled({
+    const deployment = await this.#publishCompiled({
       ...compiled,
       hostSnapshots,
       version: deploymentVersion(),
@@ -162,6 +166,10 @@ export class RuntimeManager {
 
   async reconcile(publisherAdminId = null, options = {}) {
     if (this.publishing) return { changed: false, reason: "deployment-in-progress" };
+    return this.#withPublication(() => this.#reconcile(publisherAdminId, options));
+  }
+
+  async #reconcile(publisherAdminId, options) {
     const activeDeployment = this.store.listDeployments(100)
       .find((deployment) => deployment.status === "active");
     if (!activeDeployment) return { changed: false, reason: "initial-publication-required" };
@@ -175,7 +183,7 @@ export class RuntimeManager {
     }
     return {
       changed: true,
-      deployment: await this.publishCandidate(
+      deployment: await this.#publishCandidate(
         candidate,
         publisherAdminId,
         {
@@ -188,9 +196,13 @@ export class RuntimeManager {
   }
 
   async rollback(sourceDeploymentId, publisherAdminId = null) {
+    return this.#withPublication(() => this.#rollback(sourceDeploymentId, publisherAdminId));
+  }
+
+  async #rollback(sourceDeploymentId, publisherAdminId) {
     const snapshot = this.store.deploymentSnapshot(sourceDeploymentId);
     const configText = `${JSON.stringify(snapshot.config, null, 2)}\n`;
-    const deployment = await this.publishCompiled({
+    const deployment = await this.#publishCompiled({
       config: snapshot.config,
       configText,
       checksum: createHash("sha256").update(configText).digest("hex"),
@@ -230,7 +242,26 @@ export class RuntimeManager {
     return { ...current, runtime: deployment.runtime, remoteQueued };
   }
 
-  async publishCompiled({
+  async #withPublication(operation) {
+    if (this.publishing) {
+      const error = new Error("已有配置正在发布，请稍后重试");
+      error.code = "DEPLOYMENT_IN_PROGRESS";
+      error.statusCode = 409;
+      throw error;
+    }
+    this.publishing = true;
+    try {
+      return await operation();
+    } finally {
+      this.publishing = false;
+    }
+  }
+
+  async publishCompiled(compiled) {
+    return this.#withPublication(() => this.#publishCompiled(compiled));
+  }
+
+  async #publishCompiled({
     config,
     configText,
     checksum,
@@ -240,13 +271,6 @@ export class RuntimeManager {
     version,
     publisherAdminId
   }) {
-    if (this.publishing) {
-      const error = new Error("已有配置正在发布，请稍后重试");
-      error.code = "DEPLOYMENT_IN_PROGRESS";
-      error.statusCode = 409;
-      throw error;
-    }
-    this.publishing = true;
     let deploymentId;
     try {
       deploymentId = this.store.createDeployment({
@@ -269,10 +293,13 @@ export class RuntimeManager {
         runtime
       };
     } catch (error) {
-      if (deploymentId) this.store.finishDeployment(deploymentId, { status: "failed", error: error.message });
+      if (deploymentId) this.store.finishDeployment(deploymentId, {
+        status: "failed",
+        error: error.rollbackError
+          ? `${error.message}；恢复失败：${error.rollbackError}`
+          : error.message
+      });
       throw error;
-    } finally {
-      this.publishing = false;
     }
   }
 

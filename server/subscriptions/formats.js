@@ -1,13 +1,45 @@
+import { readFileSync } from "node:fs";
 import {
   AI_DOMAIN_SUFFIXES,
-  CHINA_FALLBACK_DOMAIN_SUFFIXES,
   createRoutePolicyCandidates,
   LOCAL_DOMAIN_SUFFIXES,
   normalizeRoutingPolicy,
   PRIVATE_NETWORK_CIDRS,
+  PROXY_DOMAIN_SUFFIXES,
   routeProbeUrlFromConfig,
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
+import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
+
+const bundledRulesVersion = JSON.parse(readFileSync(new URL("../routing/rule-sets/manifest.json", import.meta.url))).version;
+const bundledRulesComment = `# 智能分流内置规则版本: ${bundledRulesVersion}\n# 随 RayLink 应用发布更新；单独更新主控 SRS 清单不会刷新此内置基线。\n`;
+
+// sing-box leading-dot suffixes match subdomains only. Preserve that distinction
+// when compiling clients whose native suffix rule also includes the apex.
+const chinaDomainMatches = getBundledRoutingRules().geosite.flatMap((rule) => [
+  ...(rule.domain || []).map((value) => ["domain", value]),
+  ...(rule.domain_suffix || []).map((value) => value.startsWith(".")
+    ? ["domain_regex", `^.+${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`]
+    : ["domain_suffix", value]),
+  ...(rule.domain_regex || []).map((value) => ["domain_regex", value])
+]);
+const chinaIpCidrs = getBundledRoutingRules().geoip.flatMap((rule) => rule.ip_cidr || []);
+
+function mihomoChinaProviders() {
+  return {
+    "raylink-cn-domain": {
+      type: "inline", behavior: "classical", format: "yaml",
+      payload: chinaDomainMatches.map(([kind, value]) => `${{
+        domain: "DOMAIN", domain_suffix: "DOMAIN-SUFFIX", domain_regex: "DOMAIN-REGEX"
+      }[kind]},${value}`)
+    },
+    "raylink-cn-ip": { type: "inline", behavior: "ipcidr", format: "yaml", payload: chinaIpCidrs }
+  };
+}
+
+function egernChinaDomains(targetField, target) {
+  return chinaDomainMatches.map(([kind, value]) => ({ [kind]: { match: value, [targetField]: target } }));
+}
 
 const generatedNodeTypes = new Set([
   "shadowsocks",
@@ -177,37 +209,60 @@ function isIpv6Value(value) {
   return String(value).includes(":");
 }
 
-function dnsPolicyValue(dns) {
+function dnsPolicyValue(dns, action) {
   if (dns === "domestic") return ["https://223.5.5.5/dns-query"];
   if (dns === "system") return ["system"];
-  return [`https://1.1.1.1/dns-query#${ROUTE_POLICY_GROUPS.proxy.name}`];
+  return [`https://1.1.1.1/dns-query#${action === "ai" ? ROUTE_POLICY_GROUPS.ai.name : ROUTE_POLICY_GROUPS.proxy.name}`];
 }
 
 function mihomoDnsPolicyRules(policy) {
-  return {
+  const rules = {
     "domain:localhost": ["system"],
     ...Object.fromEntries(LOCAL_DOMAIN_SUFFIXES.map((suffix) => [
       `+.${suffix}`,
       ["system"]
-    ])),
-    ...Object.fromEntries(policy.rules.flatMap((rule) => {
-      if (!rule.enabled || !["domain", "domain_suffix"].includes(rule.match)) return [];
-      const key = rule.match === "domain"
-        ? `domain:${rule.value}`
-        : `+.${rule.value}`;
-      return [[key, dnsPolicyValue(rule.dns)]];
-    }))
+    ]))
   };
+  const priorDomains = [];
+  const matchesSuffix = (domain, suffix) => domain === suffix || domain.endsWith(`.${suffix}`);
+  const covered = (domain) => priorDomains.some((rule) => (
+    rule.match === "domain_suffix" && matchesSuffix(domain, rule.value)
+  ));
+  for (const rule of policy.rules) {
+    if (!rule.enabled || !["domain", "domain_suffix"].includes(rule.match)) continue;
+    // DNS policy chooses the most specific key, while route rules choose the
+    // first match. Omit unreachable child keys and protect local infrastructure.
+    if (rule.value === "localhost" || LOCAL_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(rule.value, suffix)) || covered(rule.value)) continue;
+    const key = rule.match === "domain" ? `domain:${rule.value}` : `+.${rule.value}`;
+    // Routing uses the first matching rule; duplicate DNS keys must do the same.
+    if (!Object.hasOwn(rules, key)) rules[key] = dnsPolicyValue(rule.dns, rule.action);
+    priorDomains.push(rule);
+  }
+  if (policy.mode === "smart") {
+    for (const domain of AI_DOMAIN_SUFFIXES) {
+      const key = `+.${domain}`;
+      if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("remote", "ai");
+    }
+    for (const domain of PROXY_DOMAIN_SUFFIXES) {
+      const key = `+.${domain}`;
+      if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("remote", "proxy");
+    }
+  }
+  return rules;
 }
 
 function mihomoLocalBypassRules() {
   return [
     "DOMAIN,localhost,DIRECT",
     ...LOCAL_DOMAIN_SUFFIXES.map((suffix) => `DOMAIN-SUFFIX,${suffix},DIRECT`),
-    ...PRIVATE_NETWORK_CIDRS.map((cidr) => (
-      `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT`
-    ))
+    ...mihomoPrivateIpRules()
   ];
+}
+
+function mihomoPrivateIpRules({ resolveDomains = false } = {}) {
+  return PRIVATE_NETWORK_CIDRS.map((cidr) => (
+    `${isIpv6Value(cidr) ? "IP-CIDR6" : "IP-CIDR"},${cidr},DIRECT${resolveDomains ? "" : ",no-resolve"}`
+  ));
 }
 
 function egernCustomRule(rule) {
@@ -215,7 +270,7 @@ function egernCustomRule(rule) {
     ? "domain_suffix"
     : rule.match === "domain"
       ? "domain"
-      : "ip_cidr";
+      : isIpv6Value(rule.value) ? "ip_cidr6" : "ip_cidr";
   const value = rule.match === "ip"
     ? `${rule.value}/${isIpv6Value(rule.value) ? 128 : 32}`
     : rule.value;
@@ -227,15 +282,21 @@ function egernCustomRule(rule) {
   };
 }
 
+function egernPrivateIpRules({ resolveDomains = false } = {}) {
+  return PRIVATE_NETWORK_CIDRS.map((cidr) => ({
+    [isIpv6Value(cidr) ? "ip_cidr6" : "ip_cidr"]: {
+      match: cidr, policy: "DIRECT", ...(resolveDomains ? {} : { no_resolve: true })
+    }
+  }));
+}
+
 function egernLocalBypassRules() {
   return [
     { domain: { match: "localhost", policy: "DIRECT" } },
     ...LOCAL_DOMAIN_SUFFIXES.map((suffix) => ({
       domain_suffix: { match: suffix, policy: "DIRECT" }
     })),
-    ...PRIVATE_NETWORK_CIDRS.map((cidr) => ({
-      ip_cidr: { match: cidr, policy: "DIRECT" }
-    }))
+    ...egernPrivateIpRules()
   ];
 }
 
@@ -296,7 +357,7 @@ function mihomoProxy(outbound) {
       ...common,
       cipher: outbound.method,
       password: outbound.password,
-      udp: true
+      udp: outbound.network !== "tcp"
     };
   }
   if (outbound.type === "vmess") {
@@ -390,7 +451,7 @@ function loonProxy(outbound) {
   const prefix = `${outbound.tag}=`;
   const common = `${outbound.server},${outbound.server_port}`;
   if (outbound.type === "shadowsocks") {
-    return `${prefix}shadowsocks,${common},${outbound.method},${loonQuote(outbound.password)},udp=true`;
+    return `${prefix}shadowsocks,${common},${outbound.method},${loonQuote(outbound.password)},udp=${outbound.network !== "tcp"}`;
   }
   if (["vmess", "vless"].includes(outbound.type)) {
     const transport = loonTransportOptions(outbound);
@@ -476,7 +537,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
     {
       name: ROUTE_POLICY_GROUPS.ai.name,
       type: "select",
-      proxies: policyChoices
+      proxies: [ROUTE_POLICY_GROUPS.aiStable.name, ...names, ...policyChoices]
     },
     {
       name: ROUTE_POLICY_GROUPS.smart.name,
@@ -519,7 +580,18 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       type: "fallback",
       proxies: fallbackGroups,
       url: probeUrl,
-      interval: 180,
+      interval: 60,
+      lazy: false,
+      timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
+      "max-failed-times": 3,
+      "expected-status": 204
+    },
+    {
+      name: ROUTE_POLICY_GROUPS.aiStable.name,
+      type: "fallback",
+      proxies: tcp.length ? tcp : fallbackGroups,
+      url: probeUrl,
+      interval: 60,
       lazy: false,
       timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
@@ -542,7 +614,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
     "unified-delay": true,
     "tcp-concurrent": true,
     profile: {
-      "store-selected": false,
+      "store-selected": true,
       "store-fake-ip": true
     },
     ...(pinnedHostnames.length ? { hosts: pinnedEndpoints } : {}),
@@ -561,7 +633,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       "nameserver-policy": {
         ...mihomoDnsPolicyRules(routePolicy),
         ...(routePolicy.mode === "smart"
-          ? { "geosite:cn": ["https://223.5.5.5/dns-query"] }
+          ? { "rule-set:raylink-cn-domain": ["https://223.5.5.5/dns-query"] }
           : {})
       },
       "proxy-server-nameserver": [
@@ -578,21 +650,24 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
     },
     proxies,
     "proxy-groups": proxyGroups,
+    ...(routePolicy.mode === "smart" ? { "rule-providers": mihomoChinaProviders() } : {}),
     rules: [
       ...mihomoLocalBypassRules(),
       ...routePolicy.rules.filter((rule) => rule.enabled).map(mihomoRule),
       ...(routePolicy.mode === "direct"
-        ? ["MATCH,DIRECT"]
+        ? [...mihomoPrivateIpRules({ resolveDomains: true }), "MATCH,DIRECT"]
         : routePolicy.mode === "global-proxy"
-          ? [`MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`]
+          ? [...mihomoPrivateIpRules({ resolveDomains: true }), `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`]
           : [
               ...AI_DOMAIN_SUFFIXES.map(
                 (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.ai.name}`
               ),
-              `DOMAIN-SUFFIX,google.com,${ROUTE_POLICY_GROUPS.smart.name}`,
-              `DOMAIN-SUFFIX,youtube.com,${ROUTE_POLICY_GROUPS.smart.name}`,
-              "GEOSITE,CN,DIRECT",
-              "GEOIP,CN,DIRECT",
+              ...PROXY_DOMAIN_SUFFIXES.map(
+                (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.proxy.name}`
+              ),
+              "RULE-SET,raylink-cn-domain,DIRECT",
+              ...mihomoPrivateIpRules({ resolveDomains: true }),
+              "RULE-SET,raylink-cn-ip,DIRECT",
               `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`
             ])
     ]
@@ -656,7 +731,7 @@ function egernProxy(outbound) {
         ...common,
         method: outbound.method,
         password: outbound.password,
-        udp_relay: true
+        udp_relay: outbound.network !== "tcp"
       }
     };
   }
@@ -749,9 +824,13 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
   const udp = candidates.udp;
   const fallbackGroups = candidates.fallback;
   const probeUrl = routeProbeUrlFromConfig(singBoxConfig);
+  const usesAiDns = routePolicy.mode === "smart" || routePolicy.rules.some((rule) => (
+    rule.enabled && ["domain", "domain_suffix"].includes(rule.match)
+    && rule.action === "ai" && rule.dns === "remote"
+  ));
   return {
     ipv6: false,
-    close_connections_on_policy_change: true,
+    close_connections_on_policy_change: false,
     hijack_dns: ["*"],
     bypass_tunnel_proxy: [
       "localhost",
@@ -766,7 +845,8 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         overseas: [
           "https://1.1.1.1/dns-query",
           "https://8.8.8.8/dns-query"
-        ]
+        ],
+        ...(usesAiDns ? { ai: ["https://9.9.9.9/dns-query"] } : {})
       },
       forward: [
         {
@@ -786,20 +866,19 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
           return [{
             [rule.match]: {
               match: rule.value,
-              value: rule.dns === "domestic" || rule.dns === "system"
-                ? "domestic"
-                : "overseas"
+              value: rule.dns === "system" ? "local"
+                : rule.dns === "domestic" ? "domestic"
+                  : rule.action === "ai" ? "ai" : "overseas"
             }
           }];
         }),
-        ...(routePolicy.mode === "smart"
-          ? CHINA_FALLBACK_DOMAIN_SUFFIXES.map((domain) => ({
-              domain_suffix: {
-                match: domain === ".cn" ? "cn" : domain,
-                value: "domestic"
-              }
-            }))
-          : []),
+        ...(routePolicy.mode === "smart" ? AI_DOMAIN_SUFFIXES.map((domain) => ({
+          domain_suffix: { match: domain, value: "ai" }
+        })) : []),
+        ...(routePolicy.mode === "smart" ? PROXY_DOMAIN_SUFFIXES.map((domain) => ({
+          domain_suffix: { match: domain, value: "overseas" }
+        })) : []),
+        ...(routePolicy.mode === "smart" ? egernChinaDomains("value", "domestic") : []),
         {
           domain_wildcard: {
             match: "*",
@@ -845,8 +924,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         fallback: {
           name: ROUTE_POLICY_GROUPS.fallback.name,
           policies: fallbackGroups,
-          interval: 300,
-          timeout: 5
+          interval: 60,
+          timeout: 5,
+          latency_test_url: probeUrl
         }
       },
       {
@@ -856,20 +936,35 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
             {
               cellular: {
                 match: "*",
-                policy: tcp.length
-                  ? ROUTE_POLICY_GROUPS.tcp.name
-                  : ROUTE_POLICY_GROUPS.smart.name
+                policy: ROUTE_POLICY_GROUPS.fallback.name
               }
             },
             { ssid: { match: "*", policy: "故障回退" } }
           ],
-          default_policy: "RayLink 智能"
+          default_policy: ROUTE_POLICY_GROUPS.fallback.name
+        }
+      },
+      {
+        select: {
+          name: ROUTE_POLICY_GROUPS.proxy.name,
+          policies: ["网络环境", ...candidates.policyChoices]
+        }
+      },
+      {
+        fallback: {
+          name: ROUTE_POLICY_GROUPS.aiStable.name,
+          policies: tcp.length ? tcp : fallbackGroups,
+          interval: 60,
+          timeout: 5,
+          latency_test_url: probeUrl
         }
       },
       {
         select: {
           name: ROUTE_POLICY_GROUPS.ai.name,
           policies: [
+            ROUTE_POLICY_GROUPS.aiStable.name,
+            ...names,
             "网络环境",
             ROUTE_POLICY_GROUPS.fallback.name,
             ROUTE_POLICY_GROUPS.smart.name,
@@ -895,17 +990,23 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
     rules: [
       ...egernLocalBypassRules(),
       ...routePolicy.rules.filter((rule) => rule.enabled).map(egernCustomRule),
+      // Default DNS connections follow the AI exit unless explicitly overridden.
+      ...(usesAiDns ? [{ ip_cidr: { match: "9.9.9.9/32", policy: ROUTE_POLICY_GROUPS.ai.name, no_resolve: true } }] : []),
       ...(routePolicy.mode === "direct"
-        ? [{ default: { policy: "DIRECT" } }]
+        ? [...egernPrivateIpRules({ resolveDomains: true }), { default: { policy: "DIRECT" } }]
         : routePolicy.mode === "global-proxy"
-          ? [{ default: { policy: "网络环境" } }]
+          ? [...egernPrivateIpRules({ resolveDomains: true }), { default: { policy: ROUTE_POLICY_GROUPS.proxy.name } }]
           : [
               ...AI_DOMAIN_SUFFIXES.map((domain) => ({
                 domain_suffix: { match: domain, policy: ROUTE_POLICY_GROUPS.ai.name }
               })),
-              { domain_suffix: { match: "cn", policy: "DIRECT" } },
-              { geoip: { match: "CN", policy: "DIRECT" } },
-              { default: { policy: "网络环境" } }
+              ...PROXY_DOMAIN_SUFFIXES.map((domain) => ({
+                domain_suffix: { match: domain, policy: ROUTE_POLICY_GROUPS.proxy.name }
+              })),
+              ...egernChinaDomains("policy", "DIRECT"),
+              ...egernPrivateIpRules({ resolveDomains: true }),
+              ...chinaIpCidrs.map((cidr) => ({ [isIpv6Value(cidr) ? "ip_cidr6" : "ip_cidr"]: { match: cidr, policy: "DIRECT" } })),
+              { default: { policy: ROUTE_POLICY_GROUPS.proxy.name } }
             ])
     ]
   };
@@ -928,7 +1029,7 @@ export function buildSubscriptionArtifact({
     return {
       contentType: "application/yaml; charset=utf-8",
       filename: "raylink-mihomo.yaml",
-      body: stringifyYaml(buildMihomoConfig(singBoxConfig, routePolicy, endpointOverrides))
+      body: bundledRulesComment + stringifyYaml(buildMihomoConfig(singBoxConfig, routePolicy, endpointOverrides))
     };
   }
   if (format === "loon") {
@@ -951,7 +1052,7 @@ export function buildSubscriptionArtifact({
     return {
       contentType: "application/yaml; charset=utf-8",
       filename: "raylink-egern-profile.yaml",
-      body: stringifyYaml(buildEgernProfile(
+      body: bundledRulesComment + stringifyYaml(buildEgernProfile(
         configWithDirectDialEndpoints(singBoxConfig, endpointOverrides),
         routePolicy
       ))

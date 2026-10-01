@@ -16,7 +16,7 @@ RayLink 一键安装
 
 参数：
   --public-ip IP           控制台对外访问 IP；留空时尝试自动检测
-  --version VERSION        安装版本，默认 0.2.32
+  --version VERSION        安装版本，默认 0.2.33
   --release-base-url URL   发布包根地址，默认使用 RayLink GitHub Releases
   --dry-run                只下载、校验和解压，不修改系统
   -h, --help               显示帮助
@@ -28,9 +28,9 @@ RayLink 一键安装
 EOF
 }
 
-version="${RAYLINK_VERSION:-0.2.32}"
+version="${RAYLINK_VERSION:-0.2.33}"
 public_ip="${RAYLINK_PUBLIC_IP:-}"
-default_release_base_url="https://github.com/Zanetach/RayLink/releases/download"
+default_release_base_url="https://github.com/ChengzeXiao/RayLink/releases/download"
 release_base_url="${RAYLINK_RELEASE_BASE_URL:-$default_release_base_url}"
 dry_run=false
 
@@ -166,7 +166,11 @@ read_archive \
 installer="${temporary_root}/${expected_root}/deploy/install-control-plane.sh"
 upgrade_installer="${temporary_root}/${expected_root}/deploy/upgrade-control-plane.sh"
 install_root="${RAYLINK_INSTALL_ROOT:-/opt/raylink}"
-if [ -f "$install_root/package.json" ]; then
+pending_install="${RAYLINK_CONFIG_ROOT:-/etc/raylink}/install-pending"
+if [ -f "$install_root/package.json" ] \
+  && ! { [ -f "${temporary_root}/${expected_root}/deploy/initial-install-state.sh" ] \
+    && bash "${temporary_root}/${expected_root}/deploy/initial-install-state.sh" pending "$pending_install" \
+      "${RAYLINK_DATA_ROOT:-/var/lib/raylink}" "${RAYLINK_NODE_ROOT:-/opt/raylink-nodejs}"; }; then
   action=upgrade
   installer="$upgrade_installer"
   [ -f "$installer" ] || fail "发布包缺少控制面升级器"

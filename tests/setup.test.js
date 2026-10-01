@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -815,11 +815,11 @@ test("the control-plane installer emits a fragment setup URL and never persists 
   assert.doesNotMatch(runtimeBuilder, /go\.dev\/dl\/\$\{archive\}\.sha256/);
   assert.match(
     runtimeBuilder,
-    /da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f/
+    /d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b/
   );
   assert.match(
     runtimeBuilder,
-    /fd2bccce882e29369f56c86487663bb78ba7ea9e02188a5b0269303a0c3d33ab/
+    /211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0/
   );
   assert.ok(
     runtimeBuilder.includes(
@@ -847,7 +847,8 @@ test("the release package keeps every installer dependency executable", async ()
     "../deploy/package-release.sh",
     "../deploy/restore-database.sh",
     "../deploy/check-database-compatibility.mjs",
-    "../deploy/generate-release-metadata.mjs"
+    "../deploy/generate-release-metadata.mjs",
+    "../deploy/prepare-runtime-dependencies.mjs"
   ]) {
     const dependency = await stat(new URL(relativePath, import.meta.url));
     assert.notEqual(
@@ -862,8 +863,8 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
   const directory = await mkdtemp(join(tmpdir(), "raylink-release-metadata-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const archivePath = join(directory, "raylink-0.2.20-linux-amd64.tar.gz");
-  const runtimePath = join(directory, "raylink-sing-box-1.13.14-linux-amd64");
-  const cronetPath = join(directory, "raylink-libcronet-1.13.14-linux-amd64.so");
+  const runtimePath = join(directory, "raylink-sing-box-1.14.2-linux-amd64");
+  const cronetPath = join(directory, "raylink-libcronet-1.14.2-linux-amd64.so");
   await writeFile(archivePath, "known-raylink-archive");
   await writeFile(runtimePath, "known-sing-box-runtime");
   await writeFile(cronetPath, "known-cronet-runtime");
@@ -873,7 +874,7 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
     archivePath,
     runtimePath,
     "0.2.20",
-    "1.13.14",
+    "1.14.2",
     "amd64",
     cronetPath
   ]);
@@ -886,7 +887,7 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
   assert.equal(manifest.architecture, "amd64");
   assert.equal(manifest.archive.filename, "raylink-0.2.20-linux-amd64.tar.gz");
   assert.match(manifest.archive.sha256, /^[a-f0-9]{64}$/);
-  assert.equal(manifest.runtime.version, "1.13.14");
+  assert.equal(manifest.runtime.version, "1.14.2");
   assert.match(manifest.runtime.sha256, /^[a-f0-9]{64}$/);
   assert.equal(manifest.runtime.companions[0].name, "Cronet");
   assert.match(manifest.runtime.companions[0].sha256, /^[a-f0-9]{64}$/);
@@ -899,10 +900,10 @@ test("release metadata publishes a checksummed manifest and SPDX SBOM", async (t
     entry.name === "RayLink" && entry.versionInfo === "0.2.20"
   )));
   assert.ok(sbom.packages.some((entry) => (
-    entry.name === "sing-box" && entry.versionInfo === "1.13.14"
+    entry.name === "sing-box" && entry.versionInfo === "1.14.2"
   )));
   assert.ok(sbom.packages.some((entry) => (
-    entry.name === "Cronet" && entry.versionInfo === "1.13.14"
+    entry.name === "Cronet" && entry.versionInfo === "1.14.2"
   )));
   assert.ok(sbom.relationships.some((entry) => entry.relationshipType === "DEPENDS_ON"));
 });
@@ -952,16 +953,18 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.doesNotMatch(releaseWorkflow, /roms\//);
   assert.match(productionWorkflow, /build-runtime-artifact\.sh/);
   assert.match(productionWorkflow, /needs:\s+runtime/);
-  assert.match(productionWorkflow, /SING_BOX_BIN=.*npm run check:protocols/);
+  assert.match(productionWorkflow, /SING_BOX_BIN=.*npm run check:production/);
   assert.doesNotMatch(productionWorkflow, /env:\s*\n\s+SING_BOX_BIN:/);
   assert.match(releaseWorkflow, /runner:\s+ubuntu-24\.04-arm/);
   assert.match(releaseWorkflow, /arch:\s+amd64/);
   assert.match(releaseWorkflow, /arch:\s+arm64/);
   assert.match(releaseWorkflow, /attest-build-provenance@v2/);
   assert.match(releaseWorkflow, /needs:\s+verify/);
-  assert.match(releaseWorkflow, /npm run check/);
-  assert.match(releaseWorkflow, /SING_BOX_BIN=.*npm run check:protocols/);
-  assert.match(releaseWorkflow, /npm run check:soak/);
+  assert.match(releaseWorkflow, /SING_BOX_BIN=.*npm run check:production/);
+  const { scripts } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  for (const name of ["check", "check:protocols", "check:traffic", "check:dns", "check:routing", "check:soak"]) {
+    assert.ok(scripts["check:production"].split(" && ").includes(`npm run ${name}`), `${name} must gate releases`);
+  }
   assert.match(releaseWorkflow, /build-runtime-artifact\.sh/);
   assert.match(releaseWorkflow, /actions\/upload-artifact@v7/);
   assert.match(releaseWorkflow, /release-assets\/install\.sh/);
@@ -969,7 +972,7 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.match(packager, /CHANGELOG\.md/);
 });
 
-async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
+async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingCronet = false, dependencyFailure = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-upgrade-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const installRoot = join(directory, "installed");
@@ -978,6 +981,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
   const nodeRoot = join(directory, "node");
   const fakeBin = join(directory, "bin");
   const serviceUnit = join(directory, "raylink.service");
+  const runtimeServiceUnit = join(directory, "sing-box-raylink.service");
   const environmentFile = join(directory, "raylink.env");
   const orderLog = join(directory, "order.log");
   const cronetSource = join(directory, "raylink-libcronet.so");
@@ -997,11 +1001,14 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
   `);
   durableDatabase.close();
   const previousServiceUnit = "[Service]\nExecStart=/opt/raylink/server/old-index.js\n";
+  const previousRuntimeServiceUnit = "[Service]\nProtectSystem=strict\n";
   const previousEnvironment = "RAYLINK_PROXY_HOST=node.example.com\n";
   await writeFile(serviceUnit, previousServiceUnit);
+  await writeFile(runtimeServiceUnit, previousRuntimeServiceUnit);
   await writeFile(environmentFile, previousEnvironment, { mode: 0o600 });
   const cronetArtifact = Buffer.from("approved-cronet-runtime");
   const cronetChecksum = createHash("sha256").update(cronetArtifact).digest("hex");
+  if (existingCronet) await writeFile(cronetInstallPath, "cronet-for-1.13");
   await writeFile(cronetSource, cronetArtifact);
   await writeFile(`${cronetSource}.sha256`, `${cronetChecksum}  ${cronetSource}\n`);
   const executables = {
@@ -1049,6 +1056,15 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
   );
   await chmod(join(nodeRoot, "bin", "node"), 0o755);
 
+  let sourceRoot = new URL("..", import.meta.url).pathname;
+  if (dependencyFailure) {
+    sourceRoot = join(directory, "candidate-source");
+    await mkdir(sourceRoot);
+    for (const path of ["package.json", "server", "web", "deploy"]) {
+      await cp(new URL(`../${path}`, import.meta.url), join(sourceRoot, path), { recursive: true });
+    }
+    await writeFile(join(sourceRoot, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { "unlocked-dependency": "1.0.0" } } } }));
+  }
   let error = null;
   try {
     await execFile("bash", [
@@ -1067,7 +1083,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
         RAYLINK_SERVICE_UNIT: serviceUnit,
         RAYLINK_ENV_FILE: environmentFile,
         RAYLINK_PUBLIC_IP: "203.0.113.10",
-        RAYLINK_SOURCE_DIR: new URL("..", import.meta.url).pathname,
+        RAYLINK_SOURCE_DIR: sourceRoot,
         RAYLINK_CRONET_SOURCE: cronetSource,
         RAYLINK_CRONET_PATH: cronetInstallPath,
         RAYLINK_PORT: "4173"
@@ -1086,9 +1102,19 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false } = {}) {
     operations,
     previousEnvironment,
     previousServiceUnit,
+    previousRuntimeServiceUnit,
+    runtimeServiceUnit,
     serviceUnit
   };
 }
+
+test("dependency verification failure leaves the installed service and application untouched", async (t) => {
+  const { error, operations, installRoot } = await runControlPlaneUpgradeHarness(t, { dependencyFailure: true });
+  assert.ok(error, "an inconsistent dependency lock must reject the candidate");
+  assert.match(error.stderr, /生产依赖检查失败/);
+  assert.ok(!operations.includes("systemctl stop raylink"), "preflight must not interrupt the existing service");
+  assert.equal(JSON.parse(await readFile(join(installRoot, "package.json"), "utf8")).version, "0.2.12");
+});
 
 test("the control-plane upgrader backfills the local Host dial IP", async (t) => {
   const { environmentFile, error } = await runControlPlaneUpgradeHarness(t);
@@ -1101,6 +1127,17 @@ test("the control-plane upgrader backfills the local Host dial IP", async (t) =>
       ""
     ].join("\n")
   );
+});
+
+test("the control-plane upgrader installs writable ACME storage without interrupting the Runtime", async (t) => {
+  const { error, operations, runtimeServiceUnit } = await runControlPlaneUpgradeHarness(t);
+  assert.equal(error, null);
+  const unit = await readFile(runtimeServiceUnit, "utf8");
+  assert.match(unit, /^StateDirectory=raylink\/acme$/m);
+  assert.match(unit, /^StateDirectoryMode=0700$/m);
+  assert.match(unit, /^ReadWritePaths=\/var\/lib\/raylink\/acme$/m);
+  assert.match(unit, /^ReadOnlyPaths=\/var\/lib\/raylink\/sing-box\/config\.json$/m);
+  assert.ok(!operations.some((entry) => /^systemctl (start|stop|restart).*sing-box/.test(entry)));
 });
 
 test("the control-plane upgrader stops writers before backing up durable data", async (t) => {
@@ -1140,6 +1177,8 @@ test("a failed control-plane health check restores application, data and service
     operations,
     previousEnvironment,
     previousServiceUnit,
+    previousRuntimeServiceUnit,
+    runtimeServiceUnit,
     serviceUnit
   } = await runControlPlaneUpgradeHarness(t, { healthFails: true });
 
@@ -1161,6 +1200,7 @@ test("a failed control-plane health check restores application, data and service
     restoredDatabase.close();
   }
   assert.equal(await readFile(serviceUnit, "utf8"), previousServiceUnit);
+  assert.equal(await readFile(runtimeServiceUnit, "utf8"), previousRuntimeServiceUnit);
   assert.equal(await readFile(environmentFile, "utf8"), previousEnvironment);
   await assert.rejects(readFile(cronetInstallPath), (readError) => readError.code === "ENOENT");
   assert.equal(
@@ -1184,6 +1224,7 @@ test("one-command bootstrap verifies and prepares the matching release package",
   const armBinDirectory = join(directory, "arm-bin");
   await mkdir(releaseDirectory, { recursive: true });
   await mkdir(packageDeployDirectory, { recursive: true });
+  await cp(new URL("../deploy/initial-install-state.sh", import.meta.url), join(packageDeployDirectory, "initial-install-state.sh"));
   await mkdir(fakeBinDirectory, { recursive: true });
   await mkdir(armBinDirectory, { recursive: true });
   await writeFile(
@@ -1313,6 +1354,17 @@ test("one-command bootstrap verifies and prepares the matching release package",
     `${existingInstallRoot}|203.0.113.10`
   );
 
+  const partialConfigRoot = join(directory, "partial-config");
+  const pending = join(partialConfigRoot, "install-pending");
+  const resumeRecord = join(directory, "resume-record.txt");
+  await mkdir(pending, { recursive: true, mode: 0o700 });
+  await writeFile(join(pending, "owner"), "RAYLINK_INITIAL_INSTALL_V1\n", { mode: 0o600 });
+  await execFile("bash", installerArguments, {
+    env: { ...installerEnvironment, RAYLINK_INSTALL_ROOT: existingInstallRoot,
+      RAYLINK_CONFIG_ROOT: partialConfigRoot, INSTALL_RECORD_PATH: resumeRecord }
+  });
+  assert.equal(await readFile(resumeRecord, "utf8"), "203.0.113.10", "owned partial applications resume installation rather than invoking the running-service upgrader");
+
   await assert.rejects(
     () => execFile("bash", installerArguments, {
       env: {
@@ -1401,4 +1453,11 @@ test("one-command bootstrap verifies and prepares the matching release package",
   });
   assert.match(armDryRun.stdout, /linux-arm64/);
   assert.match(armDryRun.stdout, /SHA-256 校验通过/);
+});
+
+
+test("application-only upgrade preserves the library paired with the old Runtime", async (t) => {
+  const { cronetInstallPath, error } = await runControlPlaneUpgradeHarness(t, { existingCronet: true });
+  assert.equal(error, null);
+  assert.equal(await readFile(cronetInstallPath, "utf8"), "cronet-for-1.13");
 });

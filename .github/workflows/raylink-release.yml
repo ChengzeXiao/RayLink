@@ -24,21 +24,19 @@ jobs:
         run: |
           runtime_directory="${RUNNER_TEMP}/raylink-protocol-runtime"
           sudo bash deploy/build-runtime-artifact.sh \
-            1.13.14 \
+            1.14.2 \
             "$runtime_directory" \
             amd64
           (
             cd "$runtime_directory"
-            sha256sum -c raylink-sing-box-1.13.14-linux-amd64.sha256
-            sha256sum -c raylink-libcronet-1.13.14-linux-amd64.so.sha256
+            sha256sum -c raylink-sing-box-1.14.2-linux-amd64.sha256
+            sha256sum -c raylink-libcronet-1.14.2-linux-amd64.so.sha256
           )
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
       - name: Run production acceptance suite
         run: |
-          npm run check
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.13.14-linux-amd64" npm run check:protocols
-          npm run check:soak
+          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:production
 
   build:
     name: linux-${{ matrix.arch }}
@@ -73,7 +71,7 @@ jobs:
       - name: Build and natively verify metered sing-box Runtime
         run: |
           sudo bash deploy/build-runtime-artifact.sh \
-            1.13.14 \
+            1.14.2 \
             web/node/runtime \
             "${{ matrix.arch }}"
       - name: Build checksummed RayLink package, manifest and SPDX SBOM
@@ -84,6 +82,11 @@ jobs:
           bash deploy/package-release.sh \
             "${{ steps.version.outputs.version }}" \
             "output/releases/raylink-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+      - name: Verify native installation, service sandbox and upgrade rollback
+        run: |
+          sudo env RAYLINK_DISPOSABLE_SYSTEM=1 bash tests/linux-install-smoke.sh \
+            "output/releases/raylink-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            "${{ steps.version.outputs.version }}"
       - uses: actions/upload-artifact@v7
         with:
           name: raylink-linux-${{ matrix.arch }}
@@ -123,5 +126,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             release-assets/* \
             --verify-tag \
-            --generate-notes \
+            --notes-file "docs/release/${GITHUB_REF_NAME}.md" \
             --title "RayLink $GITHUB_REF_NAME"

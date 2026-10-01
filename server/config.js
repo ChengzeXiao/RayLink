@@ -103,6 +103,8 @@ export function loadConfig(env = process.env) {
     host,
     port,
     dataDir,
+    ruleSetManifestPath: env.RAYLINK_RULE_SET_MANIFEST
+      ? resolve(env.RAYLINK_RULE_SET_MANIFEST) : null,
     adminUsername: env.RAYLINK_ADMIN_USERNAME || "admin",
     adminPassword,
     subscriptionEncryptionKey,

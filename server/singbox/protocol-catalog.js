@@ -2,14 +2,15 @@ import { createHmac } from "node:crypto";
 
 import {
   AI_DOMAIN_SUFFIXES,
-  CHINA_FALLBACK_DOMAIN_SUFFIXES,
   DEFAULT_ROUTE_PROBE_URL,
   LOCAL_DOMAIN_SUFFIXES,
   normalizeRoutingPolicy,
+  PROXY_DOMAIN_SUFFIXES,
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
+import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
 
-const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.13.14";
+const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.14.2";
 const docsRoot = "https://sing-box.sagernet.org/configuration/inbound";
 const protocolProbeTypes = new Set([
   "shadowsocks",
@@ -313,7 +314,7 @@ export function protocolAvailability(catalog, installation) {
     ...catalog.requiredTags,
     ...(catalog.clientCapable ? catalog.clientRequiredTags : [])
   ];
-  const versionSupported = /^1\.13(?:\.|$)/.test(String(installation?.version || ""));
+  const versionSupported = /^1\.(?:13|14)\.\d+$/.test(String(installation?.version || ""));
   return {
     ...catalog,
     available: installation?.installed === true
@@ -328,7 +329,7 @@ export function protocolAvailability(catalog, installation) {
   };
 }
 
-export function buildProtocolInbounds({ profiles, users, masterPassword }) {
+export function buildProtocolInbounds({ profiles, users, masterPassword, runtimeVersion = "1.14.2" }) {
   return profiles.filter((profile) => profile.enabled).map((profile) => {
     const catalog = protocolByType.get(profile.type);
     const base = {
@@ -340,7 +341,7 @@ export function buildProtocolInbounds({ profiles, users, masterPassword }) {
       base.listen = profile.listen;
       base.listen_port = profile.port;
     }
-    const tls = buildServerTls(profile);
+    const tls = buildServerTls(profile, runtimeVersion);
     if (tls) base.tls = tls;
     const transport = buildTransport(profile);
     if (transport) base.transport = transport;
@@ -373,18 +374,31 @@ export function buildProtocolClientConfig({
 }
 
 const udpClientProtocolTypes = new Set(["hysteria", "hysteria2", "tuic"]);
-const adaptiveUdpProtocolTypes = new Set(udpClientProtocolTypes);
 const UDP_STABLE_JITTER_LIMIT_MS = 80;
+export const SMART_PROTOCOL_HEALTH_MAX_AGE_MS = 15 * 60_000;
 
-function protocolIsStableForSmartSelection(activation) {
+function usesUdpTransport(protocol) {
+  return udpClientProtocolTypes.has(protocol.type) || protocol.transport?.type === "quic";
+}
+
+function protocolIsStableForSmartSelection(activation, now) {
   const check = activation?.publicCheck;
+  const recent = (value) => {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) && timestamp <= now + 60_000
+      && now - timestamp <= SMART_PROTOCOL_HEALTH_MAX_AGE_MS;
+  };
+  const rounds = Array.isArray(check?.healthWindow?.rounds) ? check.healthWindow.rounds : [];
   return check?.availability === "available"
+    && recent(check.checkedAt)
     && check.reachable === true
     && Number(check.consecutiveFailures || 0) === 0
     && Number(check.samples?.successful || 0) >= 4
-    && Number(check.healthWindow?.rounds?.length || 0) >= 3
+    && rounds.filter((round) => recent(round?.checkedAt)).length >= 3
     && Number(check.healthWindow?.successRate || 0) >= 95
-    && Number.isFinite(Number(check.jitterMs))
+    && typeof check.jitterMs === "number"
+    && Number.isFinite(check.jitterMs)
+    && check.jitterMs >= 0
     && Number(check.jitterMs) <= UDP_STABLE_JITTER_LIMIT_MS;
 }
 
@@ -393,7 +407,8 @@ export function buildMultiHostProtocolClientConfig({
   hosts,
   ruleSetBaseUrl = null,
   probeUrl = DEFAULT_ROUTE_PROBE_URL,
-  routePolicy
+  routePolicy,
+  now = Date.now()
 }) {
   const smartExcludedTags = new Set();
   const protocolOutbounds = hosts.flatMap((host) => {
@@ -412,12 +427,12 @@ export function buildMultiHostProtocolClientConfig({
     return managed.map((profile) => {
       const tag = `raylink-${hostTag}-${profile.type}`;
       if (
-        adaptiveUdpProtocolTypes.has(profile.type)
-        && !protocolIsStableForSmartSelection(activations.get(profile.type))
+        usesUdpTransport(profile)
+        && !protocolIsStableForSmartSelection(activations.get(profile.type), now)
       ) {
         smartExcludedTags.add(tag);
       }
-      return buildClientOutbound(profile, credential, host.address, tag);
+      return buildClientOutbound(profile, credential, host.endpointDomain || host.address, tag);
     });
   });
   return clientConfigForOutbounds(protocolOutbounds, {
@@ -436,7 +451,7 @@ function urlTestOutbound(tag, outbounds, probeUrl, tolerance = 50) {
     url: probeUrl,
     interval: "3m",
     tolerance,
-    interrupt_exist_connections: true
+    interrupt_exist_connections: false
   };
 }
 
@@ -453,10 +468,10 @@ function clientConfigForOutbounds(
   if (!protocolOutbounds.length) throw protocolError("NO_CLIENT_PROTOCOL", "当前没有可下发的用户协议", 409);
   const tags = protocolOutbounds.map((outbound) => outbound.tag);
   const tcpTags = protocolOutbounds
-    .filter((outbound) => !udpClientProtocolTypes.has(outbound.type))
+    .filter((outbound) => !usesUdpTransport(outbound))
     .map((outbound) => outbound.tag);
   const udpTags = protocolOutbounds
-    .filter((outbound) => adaptiveUdpProtocolTypes.has(outbound.type))
+    .filter(usesUdpTransport)
     .map((outbound) => outbound.tag);
   const healthyUdpTags = udpTags.filter((tag) => !smartExcludedTags.has(tag));
   const smartTags = [...tcpTags, ...healthyUdpTags];
@@ -467,6 +482,16 @@ function clientConfigForOutbounds(
     ...(udpTags.length ? [urlTestOutbound("raylink-udp", udpTags, probeUrl)] : []),
     urlTestOutbound("raylink-fastest", tags, probeUrl)
   ];
+  // Native URLTest has no ordered fallback. A tolerance equal to its 15s
+  // probe deadline keeps a healthy AI exit stable; failed probes remove it.
+  // Leave headroom for uint16 delay + tolerance arithmetic in sing-box.
+  const aiStableGroup = {
+    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, tcpTags.length ? tcpTags : usableSmartTags, probeUrl, 15_000),
+    interval: "1m"
+  };
+  for (const outbound of automaticGroups) {
+    if (outbound.tag === ROUTE_POLICY_GROUPS.tcp.tag) outbound.interval = "1m";
+  }
   const selectorGroups = automaticGroups.map((outbound) => outbound.tag);
   const ruleSets = ruleSetBaseUrl
     ? [
@@ -491,21 +516,12 @@ function clientConfigForOutbounds(
         {
           type: "inline",
           tag: "geosite-geolocation-cn",
-          rules: [{
-            domain_suffix: [...CHINA_FALLBACK_DOMAIN_SUFFIXES]
-          }]
+          rules: getBundledRoutingRules().geosite
         },
         {
           type: "inline",
           tag: "geoip-cn",
-          rules: [{
-            ip_cidr: [
-              "119.29.29.29/32",
-              "180.76.76.76/32",
-              "223.5.5.5/32",
-              "223.6.6.6/32"
-            ]
-          }]
+          rules: getBundledRoutingRules().geoip
         }
       ];
   const customDnsRules = routePolicy.rules.flatMap((rule) => {
@@ -514,11 +530,12 @@ function clientConfigForOutbounds(
     return [{
       [field]: [rule.value],
       action: "route",
-      server: rule.dns === "domestic" || rule.dns === "system"
-        ? "dns-local"
-        : "dns-remote"
+      server: rule.dns === "system" ? "dns-local"
+        : rule.dns === "domestic" ? "dns-domestic"
+          : rule.action === "ai" ? "dns-ai" : "dns-remote"
     }];
   });
+  let resolvesCustomIps = false;
   const customRouteRules = routePolicy.rules.flatMap((rule) => {
     if (!rule.enabled) return [];
     const field = {
@@ -530,10 +547,16 @@ function clientConfigForOutbounds(
     const value = rule.match === "ip"
       ? `${rule.value}/${String(rule.value).includes(":") ? 128 : 32}`
       : rule.value;
+    const resolveRules = field === "ip_cidr" && !resolvesCustomIps
+      ? [{ action: "resolve" }]
+      : [];
+    if (field === "ip_cidr") resolvesCustomIps = true;
     if (rule.action === "block") {
-      return [{ [field]: [value], action: "reject" }];
+      return [...resolveRules, { [field]: [value], action: "reject" }];
     }
-    return [{
+    return [...resolveRules,
+      ...(field !== "ip_cidr" && !resolvesCustomIps
+        ? [{ [field]: [value], action: "resolve" }] : []), {
       [field]: [value],
       action: "route",
       outbound: rule.action === "direct"
@@ -543,15 +566,34 @@ function clientConfigForOutbounds(
           : ROUTE_POLICY_GROUPS.proxy.tag
     }];
   });
+  // Keep the exact addresses already checked by earlier IP rules. Re-resolving
+  // a TTL=0/rotating answer here could dial an IP that those rules would reject.
+  const resolveRemaining = (match = {}) => resolvesCustomIps ? [] : [{ ...match, action: "resolve" }];
   const managedRouteRules = routePolicy.mode === "smart"
     ? [
+        ...resolveRemaining({ domain_suffix: [...AI_DOMAIN_SUFFIXES] }),
         {
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.ai.tag
         },
+        ...resolveRemaining({ domain_suffix: [...PROXY_DOMAIN_SUFFIXES] }),
+        {
+          domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
+          action: "route",
+          outbound: ROUTE_POLICY_GROUPS.proxy.tag
+        },
+        ...resolveRemaining({ rule_set: "geosite-geolocation-cn" }),
         {
           rule_set: "geosite-geolocation-cn",
+          action: "route",
+          outbound: ROUTE_POLICY_GROUPS.direct.tag
+        },
+        // SOCKS/HTTP hostname requests have no destination IP until resolved.
+        // default_domain_resolver only affects dialing, after rule selection.
+        ...resolveRemaining(),
+        {
+          ip_is_private: true,
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.direct.tag
         },
@@ -561,20 +603,38 @@ function clientConfigForOutbounds(
           outbound: ROUTE_POLICY_GROUPS.direct.tag
         }
       ]
-    : [];
+    : [
+        ...resolveRemaining(),
+        { ip_is_private: true, action: "route", outbound: ROUTE_POLICY_GROUPS.direct.tag }
+      ];
   return {
     log: { level: "info", timestamp: true },
     dns: {
+      timeout: "5s",
+      cache_capacity: 4096,
+      optimistic: { enabled: true, timeout: "30s" },
       servers: [
         {
           type: "local",
           tag: "dns-local"
         },
         {
+          type: "https",
+          tag: "dns-domestic",
+          server: "223.5.5.5",
+          path: "/dns-query"
+        },
+        {
           type: "tls",
           tag: "dns-remote",
           server: "8.8.8.8",
           detour: "raylink-auto"
+        },
+        {
+          type: "tls",
+          tag: "dns-ai",
+          server: "8.8.8.8",
+          detour: ROUTE_POLICY_GROUPS.ai.tag
         }
       ],
       rules: [
@@ -586,12 +646,20 @@ function clientConfigForOutbounds(
         },
         ...customDnsRules,
         ...(routePolicy.mode === "smart" ? [{
+          domain_suffix: [...AI_DOMAIN_SUFFIXES],
+          action: "route",
+          server: "dns-ai"
+        }, {
+          domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
+          action: "route",
+          server: "dns-remote"
+        }, {
           rule_set: "geosite-geolocation-cn",
           action: "route",
-          server: "dns-local"
+          server: "dns-domestic"
         }] : [])
       ],
-      final: routePolicy.mode === "direct" ? "dns-local" : "dns-remote",
+      final: routePolicy.mode === "direct" ? "dns-domestic" : "dns-remote",
       strategy: "prefer_ipv4"
     },
     inbounds: [
@@ -613,23 +681,25 @@ function clientConfigForOutbounds(
     outbounds: [
       ...protocolOutbounds,
       ...automaticGroups,
+      aiStableGroup,
       {
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.proxy.tag,
         outbounds: [...selectorGroups, ...tags],
-        default: ROUTE_POLICY_GROUPS.smart.tag,
-        interrupt_exist_connections: true
+        default: tcpTags.length ? ROUTE_POLICY_GROUPS.tcp.tag : ROUTE_POLICY_GROUPS.smart.tag,
+        interrupt_exist_connections: false
       },
       {
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.ai.tag,
         outbounds: [
+          ROUTE_POLICY_GROUPS.aiStable.tag,
           ROUTE_POLICY_GROUPS.proxy.tag,
           ...selectorGroups,
           ...tags
         ],
-        default: ROUTE_POLICY_GROUPS.proxy.tag,
-        interrupt_exist_connections: true
+        default: ROUTE_POLICY_GROUPS.aiStable.tag,
+        interrupt_exist_connections: false
       },
       { type: "direct", tag: "direct" }
     ],
@@ -653,6 +723,13 @@ function clientConfigForOutbounds(
         {
           domain: ["localhost"],
           domain_suffix: [...LOCAL_DOMAIN_SUFFIXES],
+          action: "resolve",
+          server: "dns-local",
+          disable_optimistic_cache: true
+        },
+        {
+          domain: ["localhost"],
+          domain_suffix: [...LOCAL_DOMAIN_SUFFIXES],
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.direct.tag
         },
@@ -669,7 +746,7 @@ function clientConfigForOutbounds(
     experimental: {
       cache_file: {
         enabled: true,
-        store_rdrc: true
+        store_dns: true
       }
     }
   };
@@ -703,6 +780,7 @@ function buildClientOutbound(profile, credential, server, tag = `raylink-${profi
   if (profile.type === "shadowsocks") {
     return {
       ...common,
+      network: "tcp",
       method: "2022-blake3-aes-128-gcm",
       password: `${credential.serverPassword}:${credential.runtimePassword}`
     };
@@ -748,7 +826,7 @@ function buildClientOutbound(profile, credential, server, tag = `raylink-${profi
   throw protocolError("CLIENT_PROTOCOL_UNSUPPORTED", `${profile.type} 无法生成用户客户端配置`, 409);
 }
 
-function buildServerTls(profile) {
+function buildServerTls(profile, runtimeVersion) {
   if (profile.tls.mode === "none") return null;
   if (profile.tls.mode === "certificate") {
     return {
@@ -759,14 +837,18 @@ function buildServerTls(profile) {
     };
   }
   if (profile.tls.mode === "acme") {
+    const useCertificateProvider = /^1\.14\./.test(runtimeVersion);
     return {
       enabled: true,
       server_name: profile.tls.serverName,
-      acme: {
+      // Unknown/legacy Hosts keep the 1.13 syntax during rolling upgrades.
+      [useCertificateProvider ? "certificate_provider" : "acme"]: {
+        ...(useCertificateProvider ? { type: "acme" } : {}),
         domain: [profile.tls.serverName],
         default_server_name: profile.tls.serverName,
         email: profile.tls.acmeEmail,
-        data_directory: profile.tls.acmeDataDirectory
+        data_directory: profile.tls.acmeDataDirectory,
+        disable_tls_alpn_challenge: true
       }
     };
   }

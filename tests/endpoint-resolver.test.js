@@ -1,10 +1,57 @@
 import assert from "node:assert/strict";
+import { createSocket } from "node:dgram";
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { EndpointResolver } from "../server/subscriptions/endpoint-resolver.js";
+
+test("endpoint DNS deadline cancels outstanding lookup before accepting another request", async () => {
+  let active = 0;
+  let peak = 0;
+  const resolver = new EndpointResolver({
+    lookupTimeoutMs: 10,
+    lookup: (_hostname, { signal } = {}) => new Promise((_resolve, reject) => {
+      active++; peak = Math.max(peak, active);
+      signal?.addEventListener("abort", () => { active--; reject(signal.reason); }, { once: true });
+    })
+  });
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(await resolver.resolve({ hostname: "blackhole.example", fallbackAddress: "203.0.113.1" }), {
+      address: "203.0.113.1", source: "configured-fallback"
+    });
+    assert.equal(active, 0, "timed-out DNS work must be canceled");
+  }
+  assert.equal(peak, 1);
+});
+
+test("canceling one real DNS lookup leaves a concurrent Host lookup intact", async (t) => {
+  const server = createSocket("udp4");
+  let sawBlackhole;
+  const blackholeSeen = new Promise((resolve) => { sawBlackhole = resolve; });
+  server.on("message", (query, peer) => {
+    let end = 12; const labels = [];
+    while (query[end]) { const size = query[end++]; labels.push(query.toString("ascii", end, end + size)); end += size; }
+    if (labels.join(".") === "blackhole.example") { sawBlackhole(); return; }
+    end += 5;
+    const header = Buffer.from(query.subarray(0, 12));
+    header.writeUInt16BE(0x8180, 2); header.writeUInt16BE(1, 6);
+    header.writeUInt16BE(0, 8); header.writeUInt16BE(0, 10);
+    const response = Buffer.concat([header, query.subarray(12, end), Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 203, 0, 113, 22])]);
+    setTimeout(() => server.send(response, peer.port, peer.address), 100);
+  });
+  server.bind(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => server.close());
+  const resolver = new EndpointResolver({ dnsServers: [`127.0.0.1:${server.address().port}`], lookupTimeoutMs: 175 });
+  const blackhole = resolver.resolve({ hostname: "blackhole.example", fallbackAddress: "203.0.113.1" });
+  await blackholeSeen; await delay(100);
+  const healthy = resolver.resolve({ hostname: "healthy.example" });
+  assert.deepEqual(await blackhole, { address: "203.0.113.1", source: "configured-fallback" });
+  assert.deepEqual(await healthy, { address: "203.0.113.22", source: "dns" });
+});
 
 test("endpoint resolver caches healthy DNS answers until their TTL expires", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "raylink-endpoints-"));

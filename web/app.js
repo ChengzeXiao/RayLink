@@ -4,7 +4,10 @@ const subscriptionQuick = window.RayLinkSubscriptionQuick;
 const protocolHealth = window.RayLinkProtocolHealth;
 let bootstrapRefreshTimer = null;
 let bootstrapRefreshInFlight = false;
-const requiredNodeAgentVersion = "0.7.0";
+let bootstrapRefreshPromise = null;
+let bootstrapReadPromise = null;
+const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
+const requiredNodeAgentVersion = "0.9.0";
 
 const clientCatalog = {
   mihomo: { name: "Clash / Mihomo", platforms: "Windows / macOS / Android", action: "导入订阅" },
@@ -23,7 +26,7 @@ const clientCatalog = {
     platforms: "iPhone / iPad · 仅添加节点，保留现有规则",
     action: "下载节点订阅"
   },
-  "sing-box": { name: "sing-box", platforms: "iOS / Android / Desktop", action: "下载配置" }
+  "sing-box": { name: "sing-box", platforms: "1.14+ · iOS / Android / Desktop", action: "下载配置" }
 };
 const universalClientFormats = Object.freeze(["mihomo", "loon", "egern-profile", "egern", "sing-box"]);
 
@@ -35,11 +38,15 @@ const controlPlane = {
   runtime: null,
   runtimePreview: null,
   installation: null,
+  runtimeSetup: null,
+  bbr: null,
+  systemUpdate: null,
   runtimeUpdate: null,
   protocolCatalog: [],
   deployments: [],
   backups: [],
   alerts: [],
+  readiness: null,
   alertDelivery: null,
   admins: [],
   auditEvents: [],
@@ -47,8 +54,14 @@ const controlPlane = {
   access: null,
   certificate: { mode: null, email: "" },
   routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
+  routingRuleSets: null,
   portalProfile: null
 };
+
+const mcpAccess = { tokens: [], scopes: [], endpoint: "", issued: null, loading: false, creating: false, generation: 0 };
+const provisioning = { jobs: [], loading: false, timer: null, drawerJobId: null, generation: 0 };
+const runtimeSetupRequest = { running: false, error: "" };
+const systemUpdateRequest = { checking: false, upgrading: false, error: "" };
 
 const scopeLabels = {
   all: "全部节点",
@@ -199,7 +212,12 @@ function versionIsOlder(currentVersion, targetVersion) {
   return false;
 }
 
+function nodeVersionSupports(version, minimumVersion) {
+  return /^\d+\.\d+\.\d+$/.test(String(version || "")) && !versionIsOlder(version, minimumVersion);
+}
+
 function applyBootstrap(data) {
+  const previousAdminId = controlPlane.currentAdmin?.id;
   users.splice(0, users.length, ...data.users.map((user) => ({
     id: user.id,
     name: user.name,
@@ -215,10 +233,19 @@ function applyBootstrap(data) {
   })));
   accountSummary.totalUsers = users.length;
   controlPlane.currentAdmin = data.currentAdmin;
+  controlPlane.provisioning = data.provisioning || null;
+  if (!canProvision() || (previousAdminId && previousAdminId !== data.currentAdmin.id)) clearProvisioning();
+  document.querySelector("#provisioning-history").hidden = !canProvision();
+  document.querySelectorAll("[data-new-host]").forEach((button) => { button.hidden = !canProvision(); });
   controlPlane.hosts = data.hosts;
   controlPlane.runtime = data.runtime;
   controlPlane.runtimePreview = data.runtimePreview;
   controlPlane.installation = data.installation;
+  controlPlane.runtimeSetup = data.runtimeSetup || null;
+  if (["running", "succeeded"].includes(controlPlane.runtimeSetup?.status)) runtimeSetupRequest.error = "";
+  controlPlane.bbr = data.bbr || null;
+  controlPlane.systemUpdate = data.systemUpdate || null;
+  if (["queued", "running", "succeeded"].includes(controlPlane.systemUpdate?.task?.status)) systemUpdateRequest.error = "";
   controlPlane.runtimeUpdate = data.runtimeUpdate;
   controlPlane.protocolCatalog = data.protocolCatalog;
   controlPlane.deployments = data.deployments;
@@ -230,6 +257,8 @@ function applyBootstrap(data) {
   controlPlane.telemetry = data.telemetry || { windowHours: 24, networkSeries: [] };
   controlPlane.access = data.access || null;
   controlPlane.certificate = data.certificate || { mode: null, email: "" };
+  controlPlane.nodeDomains = data.nodeDomains || null;
+  controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
     unknownDomain: "resolve-geoip",
@@ -257,15 +286,41 @@ function applyBootstrap(data) {
   document.querySelectorAll("[data-owner-only]").forEach((element) => {
     element.hidden = data.currentAdmin.role !== "owner";
   });
+  if (data.currentAdmin.role !== "owner" || (previousAdminId && previousAdminId !== data.currentAdmin.id)) {
+    clearMcpAccess();
+    if (!document.querySelector('[data-system-panel="mcp"]').hidden) selectWorkspaceTab("system", "hosts");
+  }
   renderUsers();
   renderRuntime();
   renderRoutingPolicy();
+  renderRuntimeSetup();
+  renderSystemUpdate();
 }
 
-async function loadBootstrap() {
-  const data = await api("/api/bootstrap");
-  applyBootstrap(data);
-  return data;
+async function loadBootstrap({ share = false } = {}) {
+  const generation = controlPlaneConnection.generation;
+  const earlierRead = bootstrapReadPromise;
+  if (earlierRead) {
+    if (share) return earlierRead;
+    // A refresh after a committed write must not reuse a snapshot requested before that write.
+    await earlierRead.catch(() => {});
+    if (generation !== controlPlaneConnection.generation) {
+      throw Object.assign(new Error("登录状态已变化，请重新读取页面。"), { name: "AbortError" });
+    }
+    if (bootstrapReadPromise && bootstrapReadPromise !== earlierRead) return bootstrapReadPromise;
+  }
+  const controller = new AbortController();
+  controlPlaneConnection.controller = controller;
+  const request = api("/api/bootstrap", { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) }).then((data) => {
+    if (generation === controlPlaneConnection.generation) applyBootstrap(data);
+    return data;
+  });
+  bootstrapReadPromise = request;
+  try { return await request; }
+  finally {
+    if (bootstrapReadPromise === request) bootstrapReadPromise = null;
+    if (controlPlaneConnection.controller === controller) controlPlaneConnection.controller = null;
+  }
 }
 
 function renderRuntime() {
@@ -274,8 +329,8 @@ function renderRuntime() {
   const railStatus = document.querySelector(".rail-status");
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const deploymentVersion = activeDeployment?.version || "尚未发布";
-  const healthy = runtime.state === "running";
-  railStatus.querySelector("strong").textContent = healthy
+  const healthy = runtime.mode === "systemd" && runtime.state === "running";
+  railStatus.querySelector("strong").textContent = runtime.mode !== "systemd" ? "本地测试模式" : healthy
     ? "Runtime 运行中"
     : runtime.state === "staged"
       ? "Runtime 已暂存"
@@ -306,7 +361,7 @@ const routingModeCopy = {
   },
   direct: {
     title: "全部直连",
-    description: "不使用代理，仅保留拦截规则，适合临时排障或停用代理。"
+    description: "默认直连，仍遵从自定义代理、AI 和拦截例外，适合临时排障。"
   }
 };
 
@@ -334,6 +389,12 @@ function renderRoutingPolicy() {
   setText("#routing-mode-description", mode.description);
   setText("#routing-rule-count", policy.rules.length);
   setText("#routing-rules-badge", policy.rules.length);
+  const ruleSets = controlPlane.routingRuleSets;
+  setText("#routing-rule-set-version", ruleSets?.version || "随包基线");
+  setText("#routing-bundled-version", ruleSets?.bundledVersion || "随应用更新");
+  setText("#routing-rule-set-status", ruleSets?.degraded
+    ? `更新降级：${ruleSets.lastError || "使用最近有效基线"}`
+    : ruleSets?.available ? "完整规则可用 · 校验通过" : "导出使用完整随包规则");
   const list = document.querySelector("#routing-rule-list");
   if (!list) return;
   if (!policy.rules.length) {
@@ -362,7 +423,7 @@ async function persistRoutingPolicy(nextPolicy, successMessage) {
   });
   controlPlane.routingPolicy = saved;
   renderRoutingPolicy();
-  showToast("策略已生效", successMessage);
+  showToast("策略已保存", successMessage);
   return saved;
 }
 
@@ -433,10 +494,13 @@ async function diagnoseRouting(event) {
       ? diagnostic.addresses.map((entry) => entry.address).join("、")
       : "无需解析";
     result.innerHTML = `
-      <div><small>最终出口</small><strong>${escapeHtml(diagnostic.outbound)}</strong></div>
+      <div><small>推断出口</small><strong>${escapeHtml(diagnostic.outbound || "混合结果，需客户端确认")}</strong></div>
       <div><small>命中来源</small><strong>${escapeHtml(diagnostic.source)}</strong></div>
+      <div><small>策略 DNS</small><strong>${escapeHtml(diagnostic.dns)}</strong></div>
+      <div><small>证据来源</small><strong>${diagnostic.evidence?.kind === "control-plane-dns" ? "主控系统 DNS" : "规则推断"}</strong></div>
       <div class="full"><small>解析地址</small><strong>${escapeHtml(addressText)}</strong></div>
       <p>${escapeHtml(diagnostic.explanation)} · ${escapeHtml(new Date(diagnostic.checkedAt).toLocaleString("zh-CN"))}</p>
+      ${(diagnostic.warnings || []).map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}
     `;
   } catch (error) {
     result.innerHTML = `<span class="danger-text">${escapeHtml(error.message)}</span>`;
@@ -451,7 +515,7 @@ function renderDashboard() {
   const host = hosts.find((candidate) => candidate.id === "local") || hosts[0];
   const latestAttempt = controlPlane.deployments[0];
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
-  const ready = runtime.state === "running";
+  const ready = runtime.mode === "systemd" && runtime.state === "running";
   const readyHosts = hosts.filter((candidate) => {
     if (candidate.id === "local") return ready;
     return candidate.status === "online"
@@ -581,6 +645,7 @@ function formatBitRate(value) {
 
 function hostStatusView(host, runtime, localReady) {
   if (host.id === "local") {
+    if (runtime.mode !== "systemd") return { label: "本地测试", className: "neutral" };
     return localReady
       ? { label: "运行中", className: "good" }
       : runtime.state === "staged"
@@ -595,7 +660,7 @@ function hostStatusView(host, runtime, localReady) {
   }
   if (host.status === "offline") return { label: "离线", className: "danger" };
   if (host.status === "pending") return { label: "等待接入", className: "neutral" };
-  if (host.agentVersion !== requiredNodeAgentVersion) {
+  if (!nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)) {
     return { label: "Node 待升级", className: "warning" };
   }
   if (!host.telemetry?.updatedAt || Date.now() - new Date(host.telemetry.updatedAt).getTime() > 30_000) {
@@ -625,7 +690,7 @@ function renderDashboardNodes({ hosts, runtime, ready }) {
     return `
       <button class="node-row" data-open-host="${escapeHtml(host.id)}">
         <span class="node-pulse ${status.className === "good" ? "" : "warning"}"></span>
-        <span class="node-name"><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span>
+        <span class="node-name"><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span>
         <span class="node-load" title="CPU ${cpu.toFixed(1)}%"><i style="--load:${cpu}%"></i></span>
         <span class="latency ${status.className === "good" ? "" : "warning"}">${escapeHtml(status.label)}</span>
       </button>`;
@@ -646,7 +711,7 @@ function renderDashboardNodes({ hosts, runtime, ready }) {
     return `
       <article class="node-health-card">
         <div class="node-health-heading">
-          <button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span></button>
+          <button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span></button>
           <span class="status-badge ${status.className}"><i></i>${escapeHtml(status.label)}</span>
         </div>
         <div class="node-health-metrics">
@@ -828,7 +893,7 @@ function renderHostTopology(hosts, runtime) {
         <span class="topology-node-mark"><i></i>SB</span>
         <span class="topology-node-copy">
           <strong>${escapeHtml(host.name)}</strong>
-          <small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small>
+          <small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small>
           <em><i></i>${escapeHtml(type)} · ${escapeHtml(state.label)}</em>
         </span>
       </button>`;
@@ -855,16 +920,51 @@ function renderHostTopology(hosts, runtime) {
   status.innerHTML = `<i></i>${healthyCount}/${hosts.length} 个 Host 在线`;
 }
 
+function hostBbrPresentation(host) {
+  const remote = host.kind === "remote";
+  const bbr = remote ? host.telemetry?.bbr : controlPlane.bbr;
+  if (!remote && controlPlane.runtime?.mode !== "systemd") {
+    return { label: "本地测试模式", className: "neutral", detail: "当前环境不配置 Linux BBR，也不提供真实网络加速。", canConfigure: false };
+  }
+  const fresh = value => {
+    const age = Date.now() - new Date(value || "").getTime();
+    return Number.isFinite(age) && age >= -5_000 && age <= 60_000;
+  };
+  const timestamp = bbr?.checkedAt || host.telemetry?.updatedAt;
+  const current = fresh(timestamp) && (!remote || (host.status === "online" && fresh(host.lastSeenAt)));
+  const canConfigure = (!remote || (host.status === "online" && nodeVersionSupports(host.agentVersion, "0.9.0")))
+    && ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+  if (host.bbrTask?.pending) return { label: "BBR 配置中", className: "warning", detail: "配置任务已下发，等待节点执行与新心跳确认。", canConfigure: false };
+  if (host.bbrTask?.status === "failed") return { label: "BBR 配置失败", className: "danger", detail: host.bbrTask.error?.message || host.bbrTask.error || "节点配置任务失败，请查看系统权限及内核支持后重试。", canConfigure };
+  if (!bbr) return { label: "BBR 待上报", className: "neutral", detail: remote ? "等待节点上报内核拥塞控制状态；旧版 Node 需先升级。" : "尚无内核状态检测结果。", canConfigure };
+  const kernel = `拥塞控制 ${bbr.congestionControl || "未知"} · 队列 ${bbr.qdisc || "未知"}`;
+  if (!current) return { label: "BBR 状态过期", className: "warning", detail: `${kernel}。此为历史记录，待主机恢复心跳或重新检测后确认。`, canConfigure };
+  const labels = {
+    enabled: ["BBR 已启用", "good"], available: ["BBR 未启用", "warning"],
+    unsupported: ["内核不支持 BBR", "neutral"], unavailable: ["BBR 无法检测", "warning"],
+    failed: ["BBR 配置失败", "danger"], development: ["本地测试模式", "neutral"]
+  };
+  const [label, className] = labels[bbr.status] || ["BBR 待确认", "neutral"];
+  return { label, className, detail: `${kernel}${bbr.error ? ` · ${bbr.error}` : ""}。BBR 优化 TCP 拥塞控制，不代表移动网络或 UDP 协议已通过实测。`, canConfigure: canConfigure && !["enabled", "unsupported", "development"].includes(bbr.status) };
+}
+
+function hostBbrMarkup(host) {
+  const bbr = hostBbrPresentation(host);
+  return `<div class="switch-row host-bbr-state"><div><strong>TCP 网络加速</strong><small>${escapeHtml(bbr.detail)}</small></div><span class="status-badge ${bbr.className}">${escapeHtml(bbr.label)}</span></div>
+    ${bbr.canConfigure ? `<button type="button" class="button secondary" data-configure-bbr="${escapeHtml(host.id)}">${icon("refresh")}启用 / 重试 BBR 配置</button>` : ""}`;
+}
+
 function renderHosts() {
   if (!elements.hostBody) return;
   const hosts = controlPlane.hosts;
   const runtime = controlPlane.runtime || { state: "unknown", mode: "dry-run" };
   renderHostTopology(hosts, runtime);
   if (!hosts.length) {
-    elements.hostBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">尚未配置 Runtime 主机</div></td></tr>';
+    elements.hostBody.innerHTML = '<tr><td colspan="8"><div class="empty-state">尚未配置 Runtime 主机</div></td></tr>';
     return;
   }
   elements.hostBody.innerHTML = hosts.map((host) => {
+    const bbr = hostBbrPresentation(host);
     const protocolLabels = (host.protocols || [])
       .filter((profile) => profile.enabled)
       .map((profile) => {
@@ -876,12 +976,12 @@ function renderHosts() {
       });
     const isLocal = host.kind !== "remote";
     const healthy = isLocal
-      ? runtime.state === "running"
+      ? runtime.mode === "systemd" && runtime.state === "running"
       : host.status === "online"
-        && host.agentVersion === requiredNodeAgentVersion
+        && nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)
         && host.telemetry?.serviceStatus === "running";
     const status = isLocal
-      ? (healthy ? "运行中" : runtime.state === "staged" ? "已暂存" : "待配置")
+      ? (runtime.mode !== "systemd" ? "本地测试" : healthy ? "运行中" : runtime.state === "staged" ? "已暂存" : "待配置")
       : host.deploymentSync?.status === "revocation-pending"
         ? "撤权待应用"
         : host.runtimeUpgrade?.pending
@@ -892,7 +992,7 @@ function renderHosts() {
             : "升级失败·需检查"
         : host.deploymentSync?.status === "pending"
           ? "配置待应用"
-      : host.agentVersion && host.agentVersion !== requiredNodeAgentVersion
+      : host.agentVersion && !nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion)
         ? "Node 待升级"
         : ({ pending: "等待接入", online: "在线", degraded: "发布失败" }[host.status] || "离线");
     const statusClass = host.deploymentSync?.status === "revocation-pending"
@@ -916,13 +1016,14 @@ function renderHosts() {
       : "尚无心跳";
     return `
     <tr>
-      <td><button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></span></button></td>
+      <td><button class="identity-link" data-open-host="${escapeHtml(host.id)}"><span class="flag">SB</span><span><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></span></button></td>
       <td><span class="status-badge ${statusClass}"><i></i>${status}</span></td>
       <td>${protocolLabels.length
         ? `<div class="host-protocol-tags" aria-label="已启用 ${protocolLabels.length} 个入口协议">${protocolLabels.map(({ name, connection }) => `<span class="tag protocol-latency-tag"><span>${escapeHtml(name)}</span><em class="protocol-latency-value ${connection.className}" title="${escapeHtml(connection.title)}">${escapeHtml(connection.summary)}</em></span>`).join("")}</div>`
         : '<span class="tag">尚未启用</span>'}</td>
       <td>${isLocal ? "控制面本机" : "RayLink Node"}</td>
       <td>${escapeHtml(isLocal ? runtime.platform || "local" : [host.platform, host.architecture].filter(Boolean).join(" / ") || "等待上报")}</td>
+      <td><span class="status-badge ${bbr.className}" title="${escapeHtml(bbr.detail)}">${escapeHtml(bbr.label)}</span></td>
       <td><strong>${escapeHtml(isLocal ? runtime.runtimeVersion || runtime.mode : lastSeen)}</strong><small>${escapeHtml(isLocal ? runtime.state : host.runtimeVersion || host.agentVersion || "等待注册")}</small></td>
       <td><button class="icon-button small" aria-label="编辑${escapeHtml(host.name)}" data-open-host="${escapeHtml(host.id)}">${icon("more")}</button></td>
     </tr>`;
@@ -960,13 +1061,40 @@ function renderConfigPreview() {
   if (systemPreview) systemPreview.textContent = preview.textContent;
 }
 
+function runtimeSetupPresentation() {
+  const setup = controlPlane.runtimeSetup || {};
+  const development = controlPlane.runtime?.mode !== "systemd" || setup.status === "development" || (controlPlane.runtime?.platform && controlPlane.runtime.platform !== "linux");
+  const running = runtimeSetupRequest.running || setup.status === "running";
+  const failed = runtimeSetupRequest.error || setup.status === "failed";
+  if (running) return { title: "正在安装与配置 Runtime", className: "warning", message: setup.message || "正在安装组件、准备服务、配置默认协议并检查运行状态。", button: "正在配置…", busy: true };
+  if (development) return { title: "本地测试模式", className: "neutral", message: "此环境不运行 Linux 代理服务，也不启用 BBR 加速。已下载二进制不代表服务可用；自动安装与配置请在 Linux 正式部署上执行。", button: "仅支持 Linux 正式部署", busy: false, blocked: true };
+  if (failed) return { title: "安装配置未完成", className: "danger", message: runtimeSetupRequest.error || setup.error?.message || setup.error || setup.message || "请查看失败步骤，修复后重试。", button: "重试完整配置", busy: false };
+  if (setup.status === "succeeded" && controlPlane.runtime?.state === "running") return { title: "安装与配置完成", className: "good", message: setup.message || "Runtime 服务与默认协议已配置，运行检查通过。BBR 结果请以独立内核状态为准。", button: "重新检查与配置", busy: false };
+  return { title: setup.status === "succeeded" ? "配置已完成，等待运行确认" : "一键安装与配置", className: "neutral", message: setup.message || "自动安装组件、配置系统服务与 Shadowsocks、发布配置并确认运行；内核支持时配置 BBR。", button: "一键安装与配置", busy: false };
+}
+
+function runtimeSetupMarkup() {
+  const presentation = runtimeSetupPresentation();
+  const setup = controlPlane.runtimeSetup || {};
+  const canManage = ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+  const statusLabels = { pending: "等待", running: "进行中", succeeded: "完成", completed: "完成", failed: "失败", warning: "需注意", skipped: "跳过", development: "本地测试" };
+  const steps = Array.isArray(setup.steps) ? setup.steps : [];
+  return `<div class="runtime-setup-heading"><div><strong>${escapeHtml(presentation.title)}</strong><p>${escapeHtml(presentation.message)}</p></div><span class="status-badge ${presentation.className}">${presentation.busy ? "执行中" : presentation.className === "good" ? "已验证" : presentation.className === "danger" ? "可重试" : "待检查"}</span></div>
+    ${steps.length ? `<ol class="runtime-setup-steps">${steps.map(step => `<li class="${step.status === "failed" ? "failed" : ["succeeded", "completed"].includes(step.status) ? "complete" : "pending"}"><span><strong>${escapeHtml(step.label || step.id || "配置步骤")}</strong><small>${escapeHtml(step.message || "")}</small></span><em>${escapeHtml(statusLabels[step.status] || step.status || "等待")}</em></li>`).join("")}</ol>` : ""}
+    ${canManage ? `<button type="button" class="button primary" data-install-runtime ${presentation.busy || presentation.blocked ? "disabled" : ""}>${icon(presentation.busy ? "refresh" : "terminal")}${escapeHtml(presentation.button)}</button>` : '<p class="field-hint">仅 Owner 或运维管理员可安装与配置。</p>'}`;
+}
+
+function renderRuntimeSetup() {
+  document.querySelectorAll("[data-runtime-setup]").forEach(target => { target.innerHTML = runtimeSetupMarkup(); });
+}
+
 function renderSystemRuntime() {
   const runtime = controlPlane.runtime || { state: "unknown", mode: "dry-run" };
   const installation = controlPlane.installation || { installed: false, version: null };
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const latestDeployment = controlPlane.deployments[0];
-  const ready = ["running", "staged"].includes(runtime.state);
-  setText("#system-runtime-state", ready ? "运行正常" : "等待发布");
+  setText("#system-runtime-state", runtime.mode !== "systemd" ? "本地测试 · 未提供代理服务" : runtime.state === "running" ? "运行中"
+    : runtime.state === "staged" ? "已暂存 · 未运行" : "未确认运行");
   setText("#system-config-state", activeDeployment?.version || "尚未发布");
   setText(
     "#system-validation-state",
@@ -1019,6 +1147,59 @@ function renderSystemRuntime() {
   }
 }
 
+function systemUpdatePresentation() {
+  const update = controlPlane.systemUpdate || {};
+  const task = update.task || {};
+  const development = controlPlane.runtime?.mode !== "systemd";
+  const pending = systemUpdateRequest.upgrading || ["queued", "running"].includes(task.status);
+  const blockedReason = development ? "本地测试模式不执行主控系统更新，请在 Linux 正式部署上更新。" : update.blockedReason;
+  const failed = task.status === "failed" || update.status === "error";
+  return {
+    pending,
+    canUpgrade: !blockedReason && update.supported !== false && !pending && update.updateAvailable === true && controlPlane.currentAdmin?.role === "owner",
+    title: pending ? "主控更新进行中" : failed ? "主控更新未完成" : task.status === "succeeded" ? "最近主控更新已完成" : "RayLink 控制面",
+    className: pending ? "warning" : failed ? "danger" : "neutral",
+    message: systemUpdateRequest.error || blockedReason || task.error || task.message || update.error
+      || (update.updateAvailable ? `可更新到 ${update.latestVersion}。` : update.status === "ready" ? "当前没有可用的主控更新。" : "检查 RayLink 主控程序更新；sing-box 与节点服务独立管理。")
+  };
+}
+
+function renderSystemUpdate() {
+  const update = controlPlane.systemUpdate || {};
+  const state = systemUpdatePresentation();
+  setText("#control-plane-update-title", state.title);
+  setText("#control-plane-version", `当前 ${update.currentVersion || "待读取"}${update.latestVersion ? ` · 可用版本 ${update.latestVersion}` : ""}`);
+  setText("#control-plane-update-state", state.message);
+  const badge = document.querySelector("#control-plane-update-badge");
+  if (badge) { badge.className = `status-badge ${state.className}`; badge.textContent = state.pending ? "执行中" : state.className === "danger" ? "需检查" : "主控程序"; }
+  const check = document.querySelector("[data-check-system-update]");
+  if (check) { check.disabled = systemUpdateRequest.checking || state.pending; check.textContent = systemUpdateRequest.checking ? "正在检查…" : "检查主控更新"; }
+  const upgrade = document.querySelector("[data-upgrade-system]");
+  if (upgrade) { upgrade.hidden = !state.canUpgrade && !state.pending; upgrade.disabled = !state.canUpgrade; upgrade.textContent = state.pending ? "正在更新…" : update.task?.status === "failed" ? "重试主控更新" : "更新 RayLink 主控"; }
+  document.querySelectorAll("[data-node-update-state]").forEach(target => {
+    const host = controlPlane.hosts.find(item => item.id === target.dataset.nodeUpdateState);
+    if (host) target.innerHTML = nodeUpdateMarkup(host);
+  });
+  document.querySelectorAll("[data-host-bbr-state]").forEach(target => {
+    const host = controlPlane.hosts.find(item => item.id === target.dataset.hostBbrState);
+    if (host) target.innerHTML = hostBbrMarkup(host);
+  });
+}
+
+function nodeUpdateMarkup(host) {
+  const upgrade = host.nodeUpgrade || {};
+  const pending = upgrade.pending || ["queued", "running"].includes(upgrade.status);
+  const targetVersion = upgrade.availableVersion || upgrade.targetVersion || requiredNodeAgentVersion;
+  const needed = !nodeVersionSupports(host.agentVersion, targetVersion);
+  const canManage = controlPlane.currentAdmin?.role === "owner";
+  const blocked = upgrade.blockedReason || (host.status !== "online" ? "节点离线，恢复心跳后再更新。" : "");
+  const canUpgrade = needed && !pending && nodeVersionSupports(host.agentVersion, "0.9.0") && upgrade.supported !== false && !blocked && canManage;
+  const label = pending ? "Node 更新中" : upgrade.status === "failed" ? "Node 更新失败" : needed ? "Node 可更新" : "Node 已匹配";
+  const message = upgrade.error || upgrade.message || blocked || (needed ? `当前 ${host.agentVersion || "未知版本"}，目标 ${targetVersion}。更新节点管理服务后可采集和配置 BBR；0.8 节点仍可升级 sing-box。` : `当前 ${host.agentVersion}。Node 服务负责心跳、配置应用与 BBR 状态采集。`);
+  return `<div class="switch-row"><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div><span class="status-badge ${upgrade.status === "failed" ? "danger" : pending || needed ? "warning" : "neutral"}">${escapeHtml(host.agentVersion || "未上报")}</span></div>
+    ${canUpgrade ? `<button type="button" class="button primary" data-upgrade-node="${escapeHtml(host.id)}">${icon("arrow")}${upgrade.status === "failed" ? "重试 Node 更新" : "更新 Node 服务"}</button>` : ""}`;
+}
+
 function renderSystem() {
   const installation = controlPlane.installation || { installed: false, version: null, platform: "unknown", architecture: null };
   const update = controlPlane.runtimeUpdate;
@@ -1046,7 +1227,7 @@ function renderSystem() {
             : "尚未检查稳定版更新。";
   }
   if (upgradeButton) {
-    upgradeButton.hidden = update?.updateAvailable !== true || installation.platform !== "linux";
+    upgradeButton.hidden = update?.updateAvailable !== true || installation.platform !== "linux" || controlPlane.runtime?.mode !== "systemd";
     upgradeButton.textContent = update?.latestVersion
       ? `安全升级到 ${update.latestVersion}`
       : "安全升级";
@@ -1080,20 +1261,240 @@ function renderSystem() {
   renderAdminAccess();
 }
 
+function renderReadiness() {
+  const report = controlPlane.readiness;
+  const target = document.querySelector("#readiness-checks");
+  if (!target) return;
+  if (!report) {
+    setText("#readiness-summary", "尚无体检结果，请刷新后查看。");
+    target.replaceChildren();
+    setText("#readiness-limitations", "");
+    return;
+  }
+  const summary = report.summary;
+  const labels = { healthy: "控制面检查通过", blocked: "存在需处理的异常", attention: "仍有项目待确认" };
+  setText("#readiness-summary", `${labels[report.status] || "待确认"} · ${summary.pass} 项通过 / ${summary.fail} 项异常 / ${summary.warning} 项警告 / ${summary.unknown} 项待确认 · ${new Date(report.generatedAt).toLocaleString("zh-CN")}`);
+  const statuses = {
+    fail: { label: "异常", className: "danger", order: 0 },
+    warning: { label: "警告", className: "warning", order: 1 },
+    unknown: { label: "待确认", className: "neutral", order: 2 },
+    pass: { label: "通过", className: "good", order: 3 }
+  };
+  target.innerHTML = [...report.checks].sort((a, b) => statuses[a.status].order - statuses[b.status].order).map((check) => {
+    const state = statuses[check.status];
+    const hostIndex = /^host:(\d+):/.exec(check.id)?.[1];
+    const hostName = hostIndex === undefined ? "" : controlPlane.hosts[Number(hostIndex)]?.name;
+    return `<article class="readiness-row">
+      <span class="status-badge ${state.className}"><i></i>${state.label}</span>
+      <div><strong>${escapeHtml(check.title)}${hostName ? ` · ${escapeHtml(hostName)}` : ""}</strong><p>${escapeHtml(check.detail)}</p>
+      ${check.observedAt ? `<small>证据时间 ${escapeHtml(new Date(check.observedAt).toLocaleString("zh-CN"))}</small>` : ""}</div>
+      <button class="text-button" data-readiness-target="${escapeHtml(check.target)}">${escapeHtml(check.action)}</button>
+    </article>`;
+  }).join("");
+  setText("#readiness-limitations", `${report.limitations.join(" ")} 导出不包含主机地址、用户资料、订阅密钥或原始配置；“主机 N”对应当前列表顺序。`);
+}
+
+async function refreshReadiness(button, exportReport = false) {
+  button.disabled = true;
+  try {
+    const report = await api("/api/operations/readiness", { signal: AbortSignal.timeout(10_000) });
+    controlPlane.readiness = report;
+    renderReadiness();
+    if (exportReport) {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `raylink-readiness-${report.generatedAt.replace(/[:.]/g, "-")}.json`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      showToast("报告已导出", "已导出当前检查结论、证据时间与处理建议。");
+    } else {
+      showToast("体检已刷新", "已重新汇总运行证据；协议测速请进入对应主机执行。");
+    }
+  } catch (error) {
+    showToast(exportReport ? "导出失败" : "体检刷新失败", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function syncMcpCreateButton() {
+  document.querySelector("#mcp-create-submit").disabled = controlPlane.currentAdmin?.role !== "owner"
+    || !mcpAccess.scopes.length || !mcpAccess.endpoint || mcpAccess.loading || mcpAccess.creating || Boolean(mcpAccess.issued);
+  document.querySelector("[data-refresh-mcp]").disabled = mcpAccess.loading || mcpAccess.creating;
+}
+
+function clearMcpSecret() {
+  mcpAccess.issued = null;
+  document.querySelector("#mcp-issued-token").value = "";
+  document.querySelector("#mcp-issued-config").value = "";
+  document.querySelector("#mcp-issued").hidden = true;
+  syncMcpCreateButton();
+}
+
+function clearMcpAccess() {
+  mcpAccess.generation += 1;
+  mcpAccess.tokens = [];
+  mcpAccess.scopes = [];
+  mcpAccess.endpoint = "";
+  mcpAccess.loading = false;
+  mcpAccess.creating = false;
+  clearMcpSecret();
+  document.querySelector("#mcp-create-form").reset();
+  document.querySelector("#mcp-endpoint").value = "";
+  document.querySelector("#mcp-scope-list").replaceChildren();
+  applyMcpPreset("read");
+  document.querySelector("#mcp-token-list").replaceChildren();
+  document.querySelector("[data-refresh-mcp]").disabled = false;
+  setText("#mcp-access-status", "打开此页后读取凭据。");
+}
+
+function mcpSessionIsCurrent(generation, adminId) {
+  return generation === mcpAccess.generation && controlPlane.currentAdmin?.id === adminId
+    && controlPlane.currentAdmin?.role === "owner";
+}
+
+function handleMcpError(error, title) {
+  if (error.status === 401) { showAdminLogin(); return; }
+  if (error.status === 403) clearMcpAccess();
+  setText("#mcp-access-status", error.message);
+  showToast(title, error.message);
+}
+
+function renderMcpScopes() {
+  const target = document.querySelector("#mcp-scope-list");
+  const selected = target.children.length
+    ? new Set([...target.querySelectorAll("input:checked")].map((input) => input.value))
+    : new Set(["read"]);
+  const sensitive = (scope) => ["secrets.read", "admins.manage", "hosts.provision"].includes(scope.id);
+  const scopes = [...mcpAccess.scopes.filter((scope) => !sensitive(scope)), ...mcpAccess.scopes.filter(sensitive)];
+  target.innerHTML = scopes.map((scope) => `<label class="mcp-scope-option">
+    <input type="checkbox" name="scope" value="${escapeHtml(scope.id)}" ${selected.has(scope.id) ? "checked" : ""}>
+    <span><strong>${escapeHtml(scope.label || scope.id)}${sensitive(scope) ? "<em>单独授权</em>" : ""}</strong><small>${escapeHtml(scope.description || scope.id)}</small></span>
+  </label>`).join("");
+}
+
+function applyMcpPreset(preset) {
+  const selected = new Set(preset === "operator" ? ["read", "users.manage", "runtime.manage"]
+    : preset === "full" ? ["read", "users.manage", "runtime.manage", "system.manage", "audit.read"] : ["read"]);
+  document.querySelectorAll('#mcp-scope-list input[name="scope"]').forEach((input) => { input.checked = selected.has(input.value); });
+  document.querySelectorAll("[data-mcp-preset]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.mcpPreset === preset));
+  });
+}
+
+function renderMcpTokens() {
+  const target = document.querySelector("#mcp-token-list");
+  const date = (value) => value ? new Date(value).toLocaleString("zh-CN") : "尚未使用";
+  const labels = new Map(mcpAccess.scopes.map((scope) => [scope.id, scope.label || scope.id]));
+  target.innerHTML = mcpAccess.tokens.length ? mcpAccess.tokens.map((token) => {
+    const expired = Date.parse(token.expiresAt) <= Date.now();
+    const status = token.revokedAt ? "已撤销" : expired ? "已到期" : "有效";
+    return `<article class="mcp-token-row"><div><strong>${escapeHtml(token.name)}</strong>
+      <p>${escapeHtml(token.adminUsername || "管理员")} · ${escapeHtml((token.scopes || []).map((scope) => labels.get(scope) || scope).join("、"))}</p>
+      <p>到期 ${escapeHtml(date(token.expiresAt))} · 最近使用 ${escapeHtml(date(token.lastUsedAt))}</p></div>
+      <div class="mcp-token-actions"><span class="status-badge ${token.revokedAt || expired ? "neutral" : "good"}"><i></i>${status}</span>
+      <button type="button" class="button secondary" data-revoke-mcp="${escapeHtml(token.id)}" ${token.revokedAt ? "disabled" : ""}>${token.revokedAt ? "已撤销" : "撤销"}</button></div></article>`;
+  }).join("") : '<div class="empty-state">尚无 MCP 凭据。创建一个只读凭据开始使用。</div>';
+}
+
+async function loadMcpAccess() {
+  if (controlPlane.currentAdmin?.role !== "owner" || mcpAccess.loading || mcpAccess.creating) return;
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  const button = document.querySelector("[data-refresh-mcp]");
+  mcpAccess.loading = true;
+  syncMcpCreateButton();
+  setText("#mcp-access-status", "正在读取凭据…");
+  try {
+    const data = await api("/api/mcp/tokens", { signal: AbortSignal.timeout(15_000) });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    mcpAccess.tokens = data.tokens || [];
+    mcpAccess.scopes = data.scopes || [];
+    mcpAccess.endpoint = data.endpoint || "";
+    document.querySelector("#mcp-endpoint").value = mcpAccess.endpoint;
+    renderMcpScopes();
+    renderMcpTokens();
+    if (mcpAccess.issued && mcpAccess.tokens.find((token) => token.id === mcpAccess.issued.id)?.revokedAt) clearMcpSecret();
+    setText("#mcp-access-status", `${mcpAccess.tokens.length} 个凭据 · 列表更新于 ${new Date().toLocaleTimeString("zh-CN")}`);
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) handleMcpError(error, "凭据加载失败");
+  } finally {
+    if (generation === mcpAccess.generation) {
+      mcpAccess.loading = false;
+      button.disabled = false;
+      syncMcpCreateButton();
+    }
+  }
+}
+
+async function createMcpCredential(event) {
+  event.preventDefault();
+  if (controlPlane.currentAdmin?.role !== "owner" || mcpAccess.loading || mcpAccess.creating || mcpAccess.issued) return;
+  const form = event.currentTarget;
+  const scopes = [...form.querySelectorAll('input[name="scope"]:checked')].map((input) => input.value);
+  if (!scopes.length) { setText("#mcp-access-status", "请至少选择一项权限。"); return; }
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  mcpAccess.creating = true;
+  syncMcpCreateButton();
+  try {
+    const created = await api("/api/mcp/tokens", { method: "POST", body: JSON.stringify({
+      name: form.elements.name.value.trim(), scopes, expiresInDays: Number(form.elements.expiresInDays.value)
+    }) });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    const { token, ...metadata } = created;
+    mcpAccess.tokens = [metadata, ...mcpAccess.tokens.filter((entry) => entry.id !== metadata.id)];
+    mcpAccess.issued = { id: metadata.id };
+    document.querySelector("#mcp-issued-token").value = token;
+    document.querySelector("#mcp-issued-config").value = JSON.stringify({ mcpServers: { raylink: {
+      type: "http", url: mcpAccess.endpoint, headers: { Authorization: `Bearer ${token}` }
+    } } }, null, 2);
+    document.querySelector("#mcp-issued").hidden = false;
+    renderMcpTokens();
+    setText("#mcp-access-status", "凭据已创建。保存下方令牌后关闭一次性显示区，再创建其他凭据。");
+    document.querySelector("#mcp-issued-token").focus();
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) handleMcpError(error, "创建凭据失败");
+  } finally {
+    if (generation === mcpAccess.generation) { mcpAccess.creating = false; syncMcpCreateButton(); }
+  }
+}
+
+async function revokeMcpCredential(button) {
+  if (controlPlane.currentAdmin?.role !== "owner" || button.disabled) return;
+  const generation = mcpAccess.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  button.disabled = true;
+  try {
+    const revoked = await api(`/api/mcp/tokens/${encodeURIComponent(button.dataset.revokeMcp)}`, { method: "DELETE" });
+    if (!mcpSessionIsCurrent(generation, adminId)) return;
+    mcpAccess.tokens = mcpAccess.tokens.map((token) => token.id === revoked.id ? revoked : token);
+    if (mcpAccess.issued?.id === revoked.id) clearMcpSecret();
+    renderMcpTokens();
+    setText("#mcp-access-status", "凭据已撤销，使用此令牌的新请求将被拒绝。");
+    showToast("凭据已撤销", "已停止此 Agent 的访问权限。");
+  } catch (error) {
+    if (mcpSessionIsCurrent(generation, adminId)) { handleMcpError(error, "撤销失败"); button.disabled = false; }
+  }
+}
+
 function renderAdminAccess() {
   const target = document.querySelector("#admin-access-list");
   const auditTarget = document.querySelector("#audit-event-list");
-  if (target) {
+  if (target && !target.contains(document.activeElement)) {
     target.innerHTML = controlPlane.admins.length
       ? controlPlane.admins.map((admin) => `
         <div class="admin-access-row" data-admin-row="${escapeHtml(admin.id)}">
-          <span><strong>${escapeHtml(admin.username)}</strong><small>创建于 ${new Date(admin.createdAt).toLocaleString("zh-CN")}</small></span>
+          <label class="field"><span class="sr-only">管理员用户名</span><input data-admin-username ${admin.id === controlPlane.currentAdmin?.id ? "disabled" : ""} value="${escapeHtml(admin.username)}" minlength="3" maxlength="64" aria-label="${escapeHtml(admin.username)} 的用户名" autocomplete="off"><small>创建于 ${new Date(admin.createdAt).toLocaleString("zh-CN")}</small></label>
           <select data-admin-role aria-label="${escapeHtml(admin.username)} 的角色">
             ${["owner", "operator", "support", "auditor"].map((role) => (
               `<option value="${role}" ${admin.role === role ? "selected" : ""}>${role}</option>`
             )).join("")}
           </select>
-          <input data-admin-password type="password" minlength="12" autocomplete="new-password" placeholder="留空则不重置密码" aria-label="重置 ${escapeHtml(admin.username)} 的密码">
+          <input data-admin-password ${admin.id === controlPlane.currentAdmin?.id ? 'disabled placeholder="请从个人登录信息修改"' : 'placeholder="留空则不重置密码"'} type="password" minlength="12" autocomplete="new-password" aria-label="重置 ${escapeHtml(admin.username)} 的密码">
           <button class="button secondary" data-save-admin="${escapeHtml(admin.id)}">保存</button>
         </div>`).join("")
       : '<div class="empty-state">当前角色不能查看管理员列表。</div>';
@@ -1138,22 +1539,19 @@ async function saveAdministrator(adminId) {
   if (!row) return;
   const button = row.querySelector("[data-save-admin]");
   const password = row.querySelector("[data-admin-password]").value;
+  const username = row.querySelector("[data-admin-username]").value.trim();
   button.disabled = true;
   try {
     await api(`/api/admins/${encodeURIComponent(adminId)}`, {
       method: "PATCH",
       body: JSON.stringify({
         role: row.querySelector("[data-admin-role]").value,
-        ...(password ? { password } : {})
+        ...(adminId !== controlPlane.currentAdmin?.id ? { username, ...(password ? { password } : {}) } : {})
       })
     });
-    if (password && adminId === controlPlane.currentAdmin?.id) {
-      showAdminLogin();
-      elements.authError.textContent = "密码已更新，请使用新密码重新登录。";
-      return;
-    }
+    row.querySelector("[data-admin-password]").value = "";
     await loadBootstrap();
-    showToast("管理员已更新", password ? "角色和登录密码已经更新。" : "管理员角色已经更新。");
+    showToast("管理员已更新", password ? "登录信息已更新，该账号的会话和 MCP Token 已撤销。" : "用户名和角色已保存。");
   } catch (error) {
     showToast("更新管理员失败", error.message);
   } finally {
@@ -1178,6 +1576,70 @@ async function createDatabaseBackup() {
   } finally {
     button.disabled = false;
     button.innerHTML = `${icon("rollback")} 立即备份`;
+  }
+}
+
+function renderNodeDomainSettings() {
+  const form = document.querySelector("#node-domain-settings-form");
+  const settings = controlPlane.nodeDomains || {};
+  const owner = controlPlane.currentAdmin?.role === "owner";
+  form.elements.provider.value = settings.provider || "disabled";
+  form.elements.zoneId.value = settings.zoneId || "";
+  form.elements.baseDomain.value = settings.baseDomain || "";
+  form.elements.apiToken.value = "";
+  form.elements.apiToken.placeholder = settings.tokenConfigured ? "已配置；留空保留现有 Token" : "Cloudflare API Token";
+  form.elements.autoProvision.checked = Boolean(settings.autoProvision);
+  form.elements.inheritProtocols.checked = settings.inheritProtocols !== false;
+  form.querySelectorAll("input, select, button").forEach(input => { input.disabled = !owner; });
+  setText("#node-domain-status", `${settings.tokenConfigured ? "DNS Token 已配置" : "尚未配置 DNS Token"}${owner ? " · Token 不会回显" : " · 仅 Owner 可修改"}`);
+  syncNodeDomainProvider();
+}
+
+function syncNodeDomainProvider() {
+  const form = document.querySelector("#node-domain-settings-form");
+  const enabled = form.elements.provider.value === "cloudflare";
+  form.querySelector("[data-cloudflare-fields]").hidden = !enabled;
+  form.elements.zoneId.required = enabled;
+  form.elements.baseDomain.required = enabled;
+}
+
+async function loadNodeDomainSettings() {
+  const adminId = controlPlane.currentAdmin?.id;
+  if (!adminId) return;
+  try {
+    const data = await api("/api/settings/node-domains", { signal: AbortSignal.timeout(15_000) });
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    controlPlane.nodeDomains = data.nodeDomains;
+    renderNodeDomainSettings();
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id) setText("#node-domain-status", `读取失败：${error.message}`);
+  }
+}
+
+async function saveNodeDomainSettings(event) {
+  event.preventDefault();
+  if (controlPlane.currentAdmin?.role !== "owner") return;
+  const adminId = controlPlane.currentAdmin.id;
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  if (button.disabled) return;
+  button.disabled = true;
+  const apiToken = form.elements.apiToken.value.trim();
+  try {
+    const data = await api("/api/settings/node-domains", { method: "PATCH", body: JSON.stringify({
+      provider: form.elements.provider.value, zoneId: form.elements.zoneId.value.trim(), baseDomain: form.elements.baseDomain.value.trim(),
+      autoProvision: form.elements.autoProvision.checked, inheritProtocols: form.elements.inheritProtocols.checked,
+      ...(apiToken ? { apiToken } : {})
+    }) });
+    form.elements.apiToken.value = "";
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    controlPlane.nodeDomains = data.nodeDomains;
+    renderNodeDomainSettings();
+    showToast("节点域名设置已保存", "新的自动接入任务将使用此设置，现有主机不受影响。");
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id) setText("#node-domain-status", `保存失败：${error.message}`);
+  } finally {
+    button.disabled = controlPlane.currentAdmin?.role !== "owner";
   }
 }
 
@@ -1334,14 +1796,20 @@ function setProfileMenu(open) {
 }
 
 function showAdminLogin() {
-  if (bootstrapRefreshTimer) {
-    clearInterval(bootstrapRefreshTimer);
-    bootstrapRefreshTimer = null;
-  }
+  stopControlPlaneRefresh();
+  runtimeSetupRequest.running = false;
+  runtimeSetupRequest.error = "";
+  systemUpdateRequest.checking = false;
+  systemUpdateRequest.upgrading = false;
+  systemUpdateRequest.error = "";
+  clearProvisioning();
+  clearMcpAccess();
   setProfileMenu(false);
   closeDrawer({ restoreFocus: false, clearContent: true });
   document.documentElement.classList.remove("hide-root-scrollbar");
   controlPlane.currentAdmin = null;
+  controlPlane.nodeDomains = null;
+  document.querySelector("#node-domain-settings-form")?.reset();
   elements.authError.textContent = "";
   elements.authForm.elements.password.value = "";
   elements.authScreen.hidden = false;
@@ -1354,6 +1822,7 @@ function showAdminLogin() {
 }
 
 async function logoutControlPlane(button) {
+  clearMcpAccess();
   button.disabled = true;
   const previousMarkup = button.innerHTML;
   button.textContent = "正在退出…";
@@ -1374,12 +1843,74 @@ async function logoutControlPlane(button) {
   if (sessionEnded) showAdminLogin();
 }
 
+function clearPersonalAccountSecrets() {
+  elements.drawerContent.querySelectorAll('[data-personal-account] input[type="password"]').forEach((input) => { input.value = ""; });
+}
+
+function openPersonalAccount(mode = "profile") {
+  if (!controlPlane.currentAdmin) return;
+  setProfileMenu(false);
+  const password = mode === "password";
+  openDrawer({
+    title: "个人登录信息", eyebrow: "我的账号", saveLabel: "保存并重新登录",
+    content: `<div class="account-mode-switch" role="group" aria-label="修改登录信息">
+      <button type="button" class="button ${password ? "secondary" : "primary"}" data-account-mode="profile" aria-pressed="${!password}">修改用户名</button>
+      <button type="button" class="button ${password ? "primary" : "secondary"}" data-account-mode="password" aria-pressed="${password}">修改密码</button>
+    </div>
+    <form id="account-${password ? "password" : "profile"}-form" data-personal-account class="drawer-form">
+      <p class="field-hint">当前账号：${escapeHtml(controlPlane.currentAdmin.username)}。修改成功后，所有浏览器会话将退出，需要重新登录。${password ? "此账号的全部 MCP Token 也会立即撤销，请重新创建并更新客户端配置。" : "现有 MCP Token 保持有效。"}</p>
+      ${password ? `<input type="text" name="username" autocomplete="username" value="${escapeHtml(controlPlane.currentAdmin.username)}" hidden>` : `<label class="field"><span>新用户名</span><input name="username" value="${escapeHtml(controlPlane.currentAdmin.username)}" minlength="3" maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\\-]{2,63}" autocomplete="username" required><small>3–64 位字母、数字、下划线、点或短横线，以字母或数字开头。</small></label>`}
+      <label class="field"><span>当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
+      ${password ? `<label class="field"><span>新密码</span><input name="newPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required><small>至少 12 位，须与当前密码不同。</small></label><label class="field"><span>确认新密码</span><input name="confirmPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>` : ""}
+      <button type="submit" hidden>保存并重新登录</button>
+    </form>`
+  });
+}
+
+async function savePersonalAccountForm(form) {
+  if (form.dataset.saving === "true") return;
+  const adminId = controlPlane.currentAdmin?.id;
+  if (!adminId) return;
+  form.querySelector?.("[data-form-error]")?.remove();
+  const password = form.id === "account-password-form";
+  if (password && form.elements.newPassword.value !== form.elements.confirmPassword.value) {
+    showDrawerFormError(form, new Error("两次输入的新密码不一致。"));
+    return;
+  }
+  const username = password ? controlPlane.currentAdmin.username : form.elements.username.value.trim();
+  const body = { currentPassword: form.elements.currentPassword.value };
+  if (password) body.newPassword = form.elements.newPassword.value;
+  else body.username = username;
+  form.dataset.saving = "true";
+  elements.drawerSave.disabled = true;
+  elements.drawerSave.textContent = "正在保存…";
+  try {
+    await api(`/api/account/${password ? "password" : "profile"}`, { method: password ? "POST" : "PATCH", body: JSON.stringify(body) });
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    clearPersonalAccountSecrets();
+    showAdminLogin();
+    elements.authForm.elements.username.value = username;
+    elements.authError.textContent = password ? "密码已更新，所有会话和 MCP Token 已撤销。请使用新密码重新登录。" : "用户名已更新，所有会话已退出。请使用新用户名重新登录。";
+  } catch (error) {
+    if (adminId !== controlPlane.currentAdmin?.id) return;
+    if (error.status === 401 || error.code === "ACCOUNT_CHANGED") { showAdminLogin(); elements.authError.textContent = "账号信息已变化，请重新登录。"; return; }
+    if (form.isConnected) showDrawerFormError(form, error);
+  } finally {
+    delete form.dataset.saving;
+    if (form.isConnected) { elements.drawerSave.disabled = false; elements.drawerSave.textContent = "保存并重新登录"; }
+  }
+}
+
 function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
+  clearPersonalAccountSecrets();
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  provisioning.drawerJobId = null;
   lastFocusedElement = document.activeElement;
   elements.drawerTitle.textContent = title;
   elements.drawerEyebrow.textContent = eyebrow;
   elements.drawerContent.innerHTML = content;
   elements.drawerSave.textContent = saveLabel;
+  elements.drawerSave.disabled = false;
   elements.drawer.classList.add("open");
   elements.drawerScrim.classList.add("open");
   elements.drawer.setAttribute("aria-hidden", "false");
@@ -1389,6 +1920,9 @@ function openDrawer({ title, eyebrow, content, saveLabel = "保存更改" }) {
 }
 
 function closeDrawer({ restoreFocus = true, clearContent = false } = {}) {
+  clearPersonalAccountSecrets();
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  provisioning.drawerJobId = null;
   elements.drawer.classList.remove("open");
   elements.drawerScrim.classList.remove("open");
   elements.drawer.setAttribute("aria-hidden", "true");
@@ -1461,7 +1995,7 @@ function userSubscriptionAccessMarkup(user) {
                 <span class="subscription-client-badge">添加</span>
               </a>
               <a class="subscription-client-action" href="#" data-subscription-format="singbox">
-                <span><strong>sing-box JSON</strong><small>下载高级客户端配置</small></span>
+                <span><strong>sing-box JSON</strong><small>需要 sing-box 1.14 或更新版本</small></span>
                 <span class="subscription-client-badge">下载</span>
               </a>
             </div>
@@ -1619,6 +2153,14 @@ const protocolStatePresentation = {
 
 function protocolState(host, profile, applied) {
   const activation = host.protocolActivations?.find((item) => item.type === profile.type);
+  const verifiedActivation = ["port-listening", "public-ready"].includes(activation?.state);
+  if (profile.enabled && host.kind !== "remote" && (!activation || verifiedActivation)
+    && controlPlane.runtime?.mode !== "systemd") {
+    return { label: "本地测试配置", className: "neutral", activation: null };
+  }
+  if (verifiedActivation && host.kind !== "remote" && controlPlane.runtime?.state !== "running") {
+    return { label: "服务未运行", className: "warning", activation: null };
+  }
   if (activation && protocolStatePresentation[activation.state]) {
     const [label, className] = protocolStatePresentation[activation.state];
     return { label, className, activation };
@@ -1627,8 +2169,8 @@ function protocolState(host, profile, applied) {
     ? JSON.stringify(profile) !== JSON.stringify(applied)
     : profile.enabled;
   return {
-    label: pending ? "待发布" : profile.enabled ? "端口已监听" : "未启用",
-    className: pending ? "warning" : profile.enabled ? "good" : "neutral",
+    label: pending ? "待发布" : profile.enabled ? "已配置，待验证" : "未启用",
+    className: pending || profile.enabled ? "warning" : "neutral",
     activation: null
   };
 }
@@ -1638,10 +2180,10 @@ function hostDrawerMarkup(hostId) {
   const isRemote = host.kind === "remote";
   const nodeNeedsUpgrade = isRemote
     && host.enrolledAt
-    && host.agentVersion !== requiredNodeAgentVersion;
+    && !nodeVersionSupports(host.agentVersion, requiredNodeAgentVersion);
   const runtimeUpdate = controlPlane.runtimeUpdate;
   const runtimeCanUpgrade = isRemote
-    && !nodeNeedsUpgrade
+    && nodeVersionSupports(host.agentVersion, "0.8.0")
     && runtimeUpdate?.compatible !== false
     && runtimeUpdate?.latestVersion
     && host.runtimeUpgrade?.pending !== true
@@ -1654,13 +2196,9 @@ function hostDrawerMarkup(hostId) {
     );
   const nodeUpgradeCommand = [
     'raylink_node_tmp="$(mktemp)"',
-    'raylink_builder_tmp="$(mktemp)"',
-    `curl -fsSL ${shellQuote(`${location.origin}/node/raylink-node.mjs`)} -o "$raylink_node_tmp"`,
-    `curl -fsSL ${shellQuote(`${location.origin}/node/build-metered-runtime.sh`)} -o "$raylink_builder_tmp"`,
-    'sudo install -m 0755 "$raylink_node_tmp" /opt/raylink-node/raylink-node.mjs',
-    'sudo install -m 0755 "$raylink_builder_tmp" /opt/raylink-node/build-metered-runtime.sh',
-    'rm -f "$raylink_node_tmp" "$raylink_builder_tmp"',
-    "sudo systemctl restart raylink-node.service"
+    `curl -fsSL ${shellQuote(`${location.origin}/node/upgrade.sh`)} -o "$raylink_node_tmp"`,
+    `sudo env RAYLINK_SERVER=${shellQuote(location.origin)} bash "$raylink_node_tmp"`,
+    'rm -f "$raylink_node_tmp"'
   ].join(" && ");
   const runtimeCopy = isRemote
     ? `${host.status === "online" ? "在线" : host.status === "pending" ? "等待接入" : "需要检查"} · ${host.runtimeVersion || host.agentVersion || "尚未上报版本"}`
@@ -1713,7 +2251,7 @@ function hostDrawerMarkup(hostId) {
   const activeDeployment = controlPlane.deployments.find((deployment) => deployment.status === "active");
   const runtimeHealthy = isRemote
     ? host.telemetry?.serviceStatus === "running"
-    : ["running", "staged"].includes(controlPlane.runtime?.state);
+    : controlPlane.runtime?.mode === "systemd" && controlPlane.runtime?.state === "running";
   const hostDiagnostics = [
     {
       name: isRemote ? "Node 连接" : "sing-box 安装",
@@ -1756,13 +2294,14 @@ function hostDrawerMarkup(hostId) {
     </article>`).join("");
   return `
     <form class="drawer-form" id="host-drawer-form" data-host-id="${escapeHtml(host.id)}">
-      <div class="drawer-profile"><span class="avatar">${escapeHtml(host.name.slice(0, 1))}</span><div><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}</small></div></div>
+      <div class="drawer-profile"><span class="avatar">${escapeHtml(host.name.slice(0, 1))}</span><div><strong>${escapeHtml(host.name)}</strong><small>${escapeHtml(host.address)} · ${escapeHtml(host.region)}${host.endpointDomain ? ` · ${escapeHtml(host.endpointDomain)}` : ""}</small></div></div>
       <p class="drawer-section-label">主机连接</p>
       <label class="field"><span>名称</span><input name="hostname" value="${escapeHtml(host.name)}" placeholder="例如：东京生产节点" required></label>
       <label class="field"><span>节点连接地址（每台 Host 独立）</span><input name="address" value="${escapeHtml(host.address)}" placeholder="node.example.com" required><small class="field-hint">每台 Host 可以使用不同的域名或公网 IP，订阅会使用这里的地址连接该节点。</small></label>
       <label class="field"><span>区域标识</span><input name="region" value="${escapeHtml(host.region)}" pattern="[A-Za-z0-9-]{2,32}" placeholder="tokyo" required></label>
       <p class="drawer-section-label">主机诊断</p>
       <div class="diagnostic-grid host-diagnostic-grid">${diagnosticMarkup}</div>
+      <div data-host-bbr-state="${escapeHtml(host.id)}">${hostBbrMarkup(host)}</div>
       <button type="button" class="button secondary" data-refresh-host-diagnostics="${escapeHtml(host.id)}">${icon("refresh")}刷新主机诊断</button>
       <p class="drawer-section-label">入口协议</p>
       <p class="field-hint">协议属于当前主机。一键启用会完成配置、校验、发布、端口检查，并在成功后自动进入用户订阅。</p>
@@ -1770,8 +2309,8 @@ function hostDrawerMarkup(hostId) {
       <button type="button" class="button secondary" data-measure-host-latency="${escapeHtml(host.id)}">${icon("refresh")}测试全部协议连接</button>
       <p class="field-hint">每个公网协议执行 5 次完整握手与外部访问，显示中位连接耗时和抖动；连续 3 轮失败后才标记超时。本机及高级系统协议标记为不适用。</p>
       <div class="switch-row"><div><strong>${isRemote ? "RayLink Node" : "Runtime 模式"}</strong><small>${escapeHtml(runtimeCopy)}</small></div><span class="status-badge neutral"><i></i>${escapeHtml(isRemote ? host.status : controlPlane.runtime?.state || "unknown")}</span></div>
-      ${!isRemote && !controlPlane.installation?.installed
-        ? `<button type="button" class="button primary" id="install-sing-box">${icon("terminal")}一键安装 sing-box</button><p class="field-hint">安装完成后即可在当前主机启用入口协议。</p>`
+      ${!isRemote
+        ? `<section class="runtime-setup-card" data-runtime-setup aria-live="polite">${runtimeSetupMarkup()}</section>`
         : ""}
       <div class="switch-row"><div><strong>用户流量计量</strong><small>${usageMeteringDescription(host.usageMetering)}</small></div><span class="status-badge ${host.usageMetering?.status === "healthy" ? "good" : host.usageMetering?.status === "error" ? "danger" : "warning"}"><i></i>${usageMeteringLabel(host.usageMetering)}</span></div>
       ${isRemote ? `<div class="switch-row"><div><strong>TLS 资产安全通道</strong><small>${host.assetEncryptionReady ? "节点 X25519 公钥已登记；证书私钥将以节点专属密封包下发。" : "请升级并重启 RayLink Node，使其生成并上报资产加密公钥。"}</small></div><span class="status-badge ${host.assetEncryptionReady ? "good" : "warning"}"><i></i>${host.assetEncryptionReady ? "已就绪" : "待升级"}</span></div>` : ""}
@@ -1779,8 +2318,9 @@ function hostDrawerMarkup(hostId) {
       ${isRemote && !host.enrolledAt
         ? `<button type="button" class="button secondary" data-reissue-host="${escapeHtml(host.id)}">${icon("refresh")}重新生成接入命令</button><p class="field-hint">新的接入令牌会立即替换之前的令牌。</p>`
         : ""}
+      ${isRemote && host.enrolledAt ? `<p class="drawer-section-label">Node 管理服务</p><div data-node-update-state="${escapeHtml(host.id)}">${nodeUpdateMarkup(host)}</div>` : ""}
       ${nodeNeedsUpgrade
-        ? `<p class="drawer-section-label">Node 升级</p><p class="field-hint">当前 ${escapeHtml(host.agentVersion || "旧版")} 不支持正式版任务租约和服务遥测。控制面会暂停向该节点派发配置，升级后自动恢复。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button>`
+        ? `<details class="node-manual-upgrade"><summary>无法在线更新时，使用服务器命令</summary><p class="field-hint">更新只替换 Node 程序与构建器，保留身份及当前 Runtime。完成后等待心跳确认版本。</p><pre class="advanced-preview"><code id="node-upgrade-command">${escapeHtml(nodeUpgradeCommand)}</code></pre><button type="button" class="button secondary" data-copy-target="node-upgrade-command">${icon("copy")}复制升级命令</button></details>`
         : ""}
       ${runtimeCanUpgrade
         ? `<p class="drawer-section-label">Runtime 升级</p><p class="field-hint">${host.runtimeVersion === runtimeUpdate.latestVersion ? `当前版本缺少真实计量能力，将按审批构建重新安装 ${escapeHtml(runtimeUpdate.latestVersion)}。` : `可从 ${escapeHtml(host.runtimeVersion || "未知版本")} 升级到审批版 ${escapeHtml(runtimeUpdate.latestVersion)}。`}节点会备份当前二进制、校验现有配置并在失败时自动回滚。</p><button type="button" class="button primary" data-upgrade-host="${escapeHtml(host.id)}">${icon("arrow")}升级 sing-box</button>`
@@ -1820,13 +2360,177 @@ function newHostDrawerMarkup() {
     </form>`;
 }
 
-function openNewHost() {
+function openNewHost(manual = false) {
   openDrawer({
     title: "添加主机",
     eyebrow: "多节点接入",
-    content: newHostDrawerMarkup(),
-    saveLabel: "创建并生成命令"
+    content: manual ? `<button type="button" class="text-button" data-auto-provision>返回 SSH 自动接入</button>${newHostDrawerMarkup()}` : provisioningFormMarkup(),
+    saveLabel: manual ? "创建并生成命令" : "一键接入"
   });
+}
+
+function clearProvisioningSecrets(form) {
+  if (!form) return;
+  for (const name of ["password", "privateKey", "passphrase", "sudoPassword"]) {
+    if (form.elements[name]) form.elements[name].value = "";
+  }
+}
+
+function syncProvisioningAuthentication(form) {
+  const mode = form.elements.authMethod.value;
+  const privateKey = mode === "privateKey";
+  form.querySelector("[data-provision-password]").hidden = mode !== "password";
+  form.querySelector("[data-provision-key]").hidden = !privateKey;
+  form.elements.password.required = mode === "password";
+  form.elements.privateKey.required = privateKey;
+  if (mode !== "password") form.elements.password.value = "";
+  if (!privateKey) { form.elements.privateKey.value = ""; form.elements.passphrase.value = ""; }
+  if (mode === "resume") clearProvisioningSecrets(form);
+  form.querySelector(".provision-options").hidden = mode === "resume";
+}
+
+function syncProvisioningDomain(form) {
+  const mode = form.elements.domainMode.value;
+  form.querySelector("[data-provision-domain-field]").hidden = mode !== "existing";
+  form.elements.endpointDomain.required = mode === "existing";
+  if (mode !== "existing") form.elements.endpointDomain.value = "";
+  form.querySelector("[data-provision-inherit]").hidden = mode === "none";
+}
+
+function canProvision() { return ["owner", "operator"].includes(controlPlane.currentAdmin?.role); }
+
+function clearProvisioning() {
+  provisioning.generation += 1;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  provisioning.jobs = [];
+  provisioning.loading = false;
+  provisioning.drawerJobId = null;
+  clearProvisioningSecrets(elements.drawerContent.querySelector("#provision-host-form"));
+  document.querySelector("#provisioning-jobs")?.replaceChildren();
+}
+
+function provisioningFormMarkup(job = null) {
+  const field = (label, name, type, attributes = "") => `<label class="field"><span>${label}</span><input name="${name}" type="${type}" ${attributes}><small class="field-error"></small></label>`;
+  return `<form class="drawer-form" id="provision-host-form" autocomplete="off" ${job ? `data-job-id="${escapeHtml(job.id)}"` : ""}>
+    <div class="drawer-profile"><span class="avatar">${icon("terminal")}</span><div><strong>${job ? "重试原接入任务" : "SSH 自动接入 VPS"}</strong><small>安装 → 心跳 → 协议启用 → 连通与订阅验证</small></div></div>
+    ${controlPlane.provisioning?.canStart === false ? `<div class="notice-card" role="alert"><div><strong>请先配置 VPS 可访问的 HTTPS 控制面</strong><p>当前控制面地址 ${escapeHtml(controlPlane.provisioning.controlPlaneOrigin || location.origin)} 尚不满足自动接入条件。本机入口可用于管理；请先在系统访问设置中配置公网 HTTPS 地址，再填写 SSH 登录凭据并接入。</p></div></div>` : ""}
+    <p class="field-hint">需要 Linux、systemd 与 root 或 sudo 权限；VPS 必须能访问控制面的公网 HTTPS 地址。始终启用 Shadowsocks 稳定协议；有节点域名时可自动配置 TLS 协议。</p>
+    ${job ? `<div class="notice-card"><div><strong>${escapeHtml(job.input.name)}</strong><p>${escapeHtml(job.input.username)}@${escapeHtml(job.input.host)}:${job.input.port} · 保留原任务和 Host；节点已在线时可只继续配置验证。</p></div></div>` : `
+      ${field("公网 IP", "host", "text", 'placeholder="填写服务器实际公网 IP 或 IPv6" required spellcheck="false"')}
+      <div class="field-grid">${field("SSH 端口", "port", "number", 'value="22" min="1" max="65535" required')}${field("登录用户", "username", "text", 'value="root" required autocomplete="off"')}</div>`}
+    <label class="field"><span>${job ? "重试方式" : "登录方式"}</span><select name="authMethod" data-provision-auth><option value="password">密码</option><option value="privateKey">SSH 私钥</option>${job ? '<option value="resume">仅继续配置验证（节点已在线）</option>' : ""}</select></label>
+    <div data-provision-password>${field("SSH 密码", "password", "password", 'required autocomplete="new-password"')}</div>
+    <div data-provision-key hidden><label class="field"><span>SSH 私钥</span><textarea name="privateKey" rows="6" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><small class="field-error"></small></label>${field("私钥口令（可选）", "passphrase", "password", 'autocomplete="new-password"')}</div>
+    ${job ? "" : `<p class="drawer-section-label">节点域名与协议</p>
+      <label class="field"><span>域名方式</span><select name="domainMode" data-provision-domain><option value="auto">自动分配域名（推荐）</option><option value="existing">使用已解析域名</option><option value="none">仅 IP / Shadowsocks</option></select></label>
+      <div data-provision-domain-field hidden>${field("已解析到此 VPS 的域名", "endpointDomain", "text", 'placeholder="node.example.com" spellcheck="false"')}</div>
+      <label class="node-domain-option" data-provision-inherit><input name="inheritProtocols" type="checkbox" ${controlPlane.nodeDomains?.inheritProtocols !== false ? "checked" : ""}><span>继承本机可一键启用的公网协议</span></label>
+      <p class="field-hint">自动模式使用系统 DNS 设置；未配置或未启用自动域名时只启用 Shadowsocks。已有域名需先解析到此 VPS。TLS 签发依赖系统证书邮箱与公网验证条件；域名不会替换 SSH IP。</p>`}
+    <details class="provision-options"><summary>sudo 密码${job ? "" : " / 名称 / 区域（可选）"}</summary>
+      ${field("sudo 密码（需要时填写）", "sudoPassword", "password", 'autocomplete="new-password"')}
+      ${job ? "" : `${field("名称", "hostname", "text", 'maxlength="80" placeholder="默认 VPS-IP"')}${field("区域标识", "region", "text", 'pattern="[A-Za-z0-9-]{2,32}" placeholder="默认 global"')}<p class="field-hint">仅向“全部节点”或该区域范围内的有效用户自动下发，不改变任何用户权益。</p>`}
+    </details>
+    <p class="field-hint">登录凭据仅用于本次任务，服务端不保存；任务接受后清空表单。安装未完成或节点离线时，重试需要重新输入凭据。</p>
+    ${job ? "" : '<button type="button" class="text-button" data-manual-provision>使用手动接入命令</button>'}
+  </form>`;
+}
+
+async function submitProvisioningForm(form) {
+  if (controlPlane.provisioning?.canStart === false) {
+    throw new Error("当前控制面地址不支持自动接入，请先配置 VPS 可访问的 HTTPS 控制面，再提交 SSH 登录凭据。");
+  }
+  const field = (name) => form.elements[name]?.value || "";
+  const authentication = field("authMethod") === "privateKey" ? { privateKey: field("privateKey"), ...(field("passphrase") ? { passphrase: field("passphrase") } : {}) } : { password: field("password") };
+  const credentials = field("authMethod") === "resume" ? {} : { ...authentication, ...(field("sudoPassword") ? { sudoPassword: field("sudoPassword") } : {}) };
+  if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
+  const body = form.dataset.jobId ? { requestId: form.dataset.requestId, ...credentials } : {
+    requestId: form.dataset.requestId, host: field("host").trim(), port: Number(field("port")), username: field("username").trim(),
+    domainMode: field("domainMode") || "auto", inheritProtocols: (field("domainMode") || "auto") !== "none" && form.elements.inheritProtocols?.checked !== false,
+    ...(field("domainMode") === "existing" ? { endpointDomain: field("endpointDomain").trim() } : {}),
+    ...(field("hostname").trim() ? { name: field("hostname").trim() } : {}), ...(field("region").trim() ? { region: field("region").trim() } : {}), ...credentials
+  };
+  const path = form.dataset.jobId ? `/api/hosts/provision/${encodeURIComponent(form.dataset.jobId)}/retry` : "/api/hosts/provision";
+  let response;
+  try {
+    response = await api(path, { method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+  } catch (error) {
+    // Retry has an existing durable identity: resolve an ambiguous response by
+    // reading that job before asking the user to send credentials again.
+    if (form.dataset.jobId && (!error.status || error.status >= 500 || error.status === 409)) {
+      const observed = await api(`/api/hosts/provision/${encodeURIComponent(form.dataset.jobId)}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (["queued", "running", "succeeded"].includes(observed?.job?.status)) response = observed;
+    }
+    if (!response) throw error;
+  }
+  clearProvisioningSecrets(form);
+  return response.job;
+}
+
+const provisioningLabels = { queued: "等待接入", running: "正在接入", succeeded: "接入完成", failed: "接入失败", interrupted: "接入中断" };
+
+function provisioningProgressMarkup(job) {
+  const completed = job.status === "succeeded";
+  return `<div class="drawer-form" data-provisioning-progress="${escapeHtml(job.id)}">
+    <div class="drawer-profile"><span class="avatar">${icon("server")}</span><div><strong>${escapeHtml(job.input.name)}</strong><small>${escapeHtml(job.input.host)}:${job.input.port}</small></div></div>
+    <h3>${escapeHtml(provisioningLabels[job.status] || job.status)}</h3>
+    <progress class="provision-progress" max="100" value="${Number(job.progress) || 0}" aria-label="接入进度"></progress>
+    <p role="status" aria-live="polite">${escapeHtml(job.message)} · ${Number(job.progress) || 0}%</p>
+    ${job.result?.endpointDomain ? `<p class="field-hint">节点域名：<strong>${escapeHtml(job.result.endpointDomain)}</strong></p>` : ""}
+    ${job.errorCode ? `<p class="provision-error">${escapeHtml(job.errorCode)}</p>` : ""}
+    ${job.hostKeyFingerprint ? `<p class="field-hint">SSH 指纹 <code class="provision-fingerprint">${escapeHtml(job.hostKeyFingerprint)}</code></p>` : ""}
+    ${completed ? `<div class="notice-card"><div><strong>${job.result?.subscriptionStatus === "verified" ? `已验证 ${Number(job.result.verifiedUserCount) || 0} 位用户的订阅` : "等待有效用户"}</strong><p>${job.result?.subscriptionStatus === "verified" ? "有权限的用户刷新客户端订阅后可获得新节点。" : "尚无可用于验证的有效用户；创建或启用符合节点范围的用户后，刷新订阅获取节点。"}</p></div></div>` : ""}
+    ${job.result?.skippedProtocols?.length ? `<div class="notice-card"><div><strong>未自动启用的协议</strong>${job.result.skippedProtocols.map((entry) => `<p>${escapeHtml(entry.type)}：${entry.reason === "DOMAIN_REQUIRED" ? "需要节点域名才能启用 TLS" : "需要手动配置，请在主机入口协议中处理"}</p>`).join("")}</div></div>` : ""}
+    ${job.result?.protocolChecks?.length ? `<div class="provision-checks">${job.result.protocolChecks.map((check) => `<p><strong>${escapeHtml(check.type)}</strong><span>${escapeHtml(check.state)}${check.latencyMs == null ? "" : ` · ${Number(check.latencyMs)} ms`}</span></p>`).join("")}</div>` : ""}
+    ${["failed", "interrupted"].includes(job.status) ? `<button type="button" class="button primary" data-retry-provision="${escapeHtml(job.id)}">重试原任务</button>` : ""}
+    ${job.hostId ? `<button type="button" class="button secondary" data-open-host="${escapeHtml(job.hostId)}">查看主机</button>` : ""}
+    <p class="field-hint">${["queued", "running"].includes(job.status) ? "关闭此面板后任务继续运行，可在主机页的接入记录中查看结果。" : "结果已保存，可从主机页的接入记录再次查看。"}服务端连通检查不等于移动网络实测。</p>
+  </div>`;
+}
+
+function openProvisioningJob(job) {
+  openDrawer({ title: "自动接入进度", eyebrow: "VPS 自动接入", content: provisioningProgressMarkup(job), saveLabel: "关闭" });
+  provisioning.drawerJobId = job.id;
+}
+
+function renderProvisioningJobs() {
+  const target = document.querySelector("#provisioning-jobs");
+  target.innerHTML = provisioning.jobs.length ? provisioning.jobs.map((job) => `<button type="button" class="provision-job" data-open-provision="${escapeHtml(job.id)}"><span><strong>${escapeHtml(job.input.name)}</strong><small>${escapeHtml(job.input.host)} · ${escapeHtml(job.message)}</small></span><span class="status-badge ${job.status === "succeeded" ? "good" : ["failed", "interrupted"].includes(job.status) ? "danger" : "warning"}">${escapeHtml(provisioningLabels[job.status] || job.status)} · ${job.progress}%</span></button>`).join("") : '<p class="field-hint">暂无自动接入记录。</p>';
+}
+
+async function loadProvisioningJobs() {
+  if (!canProvision() || provisioning.loading || bootstrapRefreshInFlight || controlPlaneConnection.disconnected || document.hidden || navigator.onLine === false) return;
+  const generation = provisioning.generation;
+  const adminId = controlPlane.currentAdmin.id;
+  provisioning.loading = true;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  try {
+    const { jobs } = await api("/api/hosts/provision", { signal: AbortSignal.timeout(15_000) });
+    if (generation !== provisioning.generation || adminId !== controlPlane.currentAdmin?.id || !canProvision()) return;
+    const changedToTerminal = jobs.some((job) => !["queued", "running"].includes(job.status) && provisioning.jobs.some((previous) => previous.id === job.id && ["queued", "running"].includes(previous.status)));
+    provisioning.jobs = jobs;
+    renderProvisioningJobs();
+    const current = jobs.find((job) => job.id === provisioning.drawerJobId);
+    if (current && elements.drawer.classList.contains("open")) elements.drawerContent.innerHTML = provisioningProgressMarkup(current);
+    setText("#provisioning-status", jobs.some((job) => ["queued", "running"].includes(job.status)) ? "接入任务进行中，每 2 秒更新。" : "进度已同步；失败或中断任务可重试，已在线节点可直接继续验证。");
+    if (changedToTerminal) await loadBootstrap();
+  } catch (error) {
+    if (generation !== provisioning.generation) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    setText("#provisioning-status", `暂时无法更新接入进度：${error.message}`);
+    if (!error.status || error.status >= 500) {
+      markControlPlaneDisconnected();
+      scheduleBootstrapRefresh();
+    }
+  } finally {
+    if (generation === provisioning.generation) {
+      provisioning.loading = false;
+      if (canProvision() && !controlPlaneConnection.disconnected && !document.hidden && navigator.onLine !== false && provisioning.jobs.some((job) => ["queued", "running"].includes(job.status))) {
+        provisioning.timer = setTimeout(() => loadProvisioningJobs(), 2_000);
+      }
+    }
+  }
 }
 
 function shellQuote(value) {
@@ -2154,7 +2858,9 @@ function showDrawerFormError(form, error) {
     message = document.createElement("p");
     message.className = "auth-error";
     message.dataset.formError = "";
-    form.querySelector(".drawer-profile")?.after(message);
+    const profile = form.querySelector(".drawer-profile");
+    if (profile) profile.after(message);
+    else form.prepend(message);
   }
   message.textContent = error.message;
   message.classList.add("visible");
@@ -2179,7 +2885,13 @@ async function saveUserForm(form) {
     method: userId ? "PATCH" : "POST",
     body: JSON.stringify(payload)
   });
-  await loadBootstrap();
+  // The write is committed. A failed refresh must not turn a retry into another POST.
+  form.dataset.userId = result.id;
+  try {
+    await loadBootstrap();
+  } catch {
+    result.refreshWarning = "用户已保存，但列表刷新失败，请刷新页面查看最新状态。";
+  }
   return result;
 }
 
@@ -2351,7 +3063,39 @@ async function saveDrawer() {
     closeDrawer();
     return;
   }
+  if (["account-profile-form", "account-password-form"].includes(form.id)) {
+    if (form.reportValidity()) await savePersonalAccountForm(form);
+    return;
+  }
   if (!validateDrawerForm(form)) return;
+
+  if (form.id === "provision-host-form") {
+    const generation = provisioning.generation;
+    const adminId = controlPlane.currentAdmin?.id;
+    elements.drawerSave.disabled = true;
+    elements.drawerSave.textContent = "提交接入任务…";
+    try {
+      const job = await submitProvisioningForm(form);
+      if (generation !== provisioning.generation || adminId !== controlPlane.currentAdmin?.id || !canProvision()) return;
+      provisioning.jobs = [job, ...provisioning.jobs.filter((entry) => entry.id !== job.id)];
+      renderProvisioningJobs();
+      if (form.isConnected && elements.drawer.classList.contains("open")) openProvisioningJob(job);
+      showToast("接入任务已接受", "后台正在安装并验证，关闭面板不影响任务。");
+      void loadProvisioningJobs();
+    } catch (error) {
+      if (generation !== provisioning.generation) return;
+      if (error.status === 401) { showAdminLogin(); return; }
+      if (form.isConnected) showDrawerFormError(form, error);
+      showToast("提交失败", error.message);
+      void loadProvisioningJobs();
+    } finally {
+      if (form.isConnected) {
+        elements.drawerSave.disabled = false;
+        elements.drawerSave.textContent = form.dataset.jobId ? "重试接入" : "一键接入";
+      }
+    }
+    return;
+  }
 
   if (form.id === "portal-login-form") {
     const email = form.elements.portalEmail.value.trim();
@@ -2429,8 +3173,13 @@ async function saveDrawer() {
       elements.drawerSave.textContent = "保存更改";
       elements.drawerSave.disabled = false;
       showToast(
-        "用户已创建",
-        "可立即复制用户中心入口，并生成订阅链接或二维码。"
+        userSaveResult.runtimeSync?.status === "pending" ? "用户已创建，等待应用" : "用户已创建",
+        [
+          userSaveResult.runtimeSync?.status === "pending"
+            ? userSaveResult.runtimeSync.message
+            : "可立即复制用户中心入口，并生成订阅链接或二维码。",
+          userSaveResult.refreshWarning
+        ].filter(Boolean).join("；")
       );
       return;
     }
@@ -2464,7 +3213,7 @@ async function saveDrawer() {
     protocolSaveResult?.oneClick
       ? protocolSaveResult.activation?.state === "deploying" ? "正在远程部署" : "协议已启用"
       : userSaveResult?.runtimeSync?.status === "pending" ? "已保存，等待应用" : "已保存",
-    message
+    [message, userSaveResult?.refreshWarning].filter(Boolean).join("；")
   );
   elements.drawerSave.disabled = false;
 }
@@ -2541,20 +3290,142 @@ async function rollbackConfig() {
   }
 }
 
-async function installSingBox() {
-  const button = document.querySelector("#install-sing-box");
-  if (!button || button.disabled) return;
-  button.disabled = true;
-  button.innerHTML = `${icon("refresh")} 正在安装`;
+function maintenanceSessionIsCurrent(generation, adminId) {
+  return generation === controlPlaneConnection.generation && adminId === controlPlane.currentAdmin?.id;
+}
+
+async function checkSystemUpdate() {
+  if (systemUpdateRequest.checking) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  systemUpdateRequest.checking = true;
+  systemUpdateRequest.error = "";
+  renderSystemUpdate();
   try {
-    const installation = await api("/api/runtime/install", { method: "POST" });
-    await loadBootstrap();
-    if (elements.drawer.classList.contains("open")) openHost("local");
-    showToast("sing-box 已安装", `当前版本 ${installation.version}，可以开始配置协议。`);
+    const result = await api("/api/system/update", { signal: AbortSignal.timeout(30_000) });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    controlPlane.systemUpdate = result.systemUpdate || result;
   } catch (error) {
-    showToast("安装失败", error.message);
-    button.disabled = false;
-    button.innerHTML = `${icon("terminal")} 重试安装`;
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    systemUpdateRequest.error = `检查失败：${error.message}`;
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    systemUpdateRequest.checking = false;
+    renderSystemUpdate();
+  }
+}
+
+async function upgradeSystem() {
+  if (!systemUpdatePresentation().canUpgrade) return;
+  if (!window.confirm("更新 RayLink 主控会短暂重启管理服务。现有节点继续运行；页面恢复连接后请核对更新结果。确认继续？")) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  systemUpdateRequest.upgrading = true;
+  systemUpdateRequest.error = "";
+  renderSystemUpdate();
+  try {
+    const result = await api("/api/system/upgrade", { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    controlPlane.systemUpdate = { ...controlPlane.systemUpdate, ...(result.systemUpdate || result) };
+    showToast("主控更新已接受", "等待后台更新与重启完成，页面会自动恢复连接并读取最终结果。");
+    try { await loadBootstrap(); } catch { /* Restart can temporarily interrupt the read. */ }
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    systemUpdateRequest.error = !error.status ? "请求中断，更新是否已接受尚未确认。请重连后查看后台任务状态，再决定是否重试。" : error.message;
+    showToast("主控更新结果待确认", systemUpdateRequest.error);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    systemUpdateRequest.upgrading = false;
+    renderSystemUpdate();
+  }
+}
+
+async function upgradeNode(hostId, button) {
+  const host = controlPlane.hosts.find(item => item.id === hostId);
+  if (!host || button?.disabled || controlPlane.currentAdmin?.role !== "owner"
+    || !nodeVersionSupports(host.agentVersion, "0.9.0") || host.nodeUpgrade?.supported === false || host.nodeUpgrade?.pending || host.status !== "online") return;
+  if (!window.confirm("更新该主机的 RayLink Node 管理服务，现有 sing-box 连接继续运行。确认继续？")) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  if (button) { button.disabled = true; button.textContent = "正在下发更新…"; }
+  try {
+    await api(`/api/hosts/${encodeURIComponent(hostId)}/node-upgrade`, { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    host.nodeUpgrade = { ...host.nodeUpgrade, pending: true, status: "queued", message: "更新任务已下发，等待节点执行并以心跳确认版本。" };
+    renderSystemUpdate();
+    showToast("Node 更新任务已下发", "等待节点执行；最终结果以版本心跳和任务状态为准。");
+    try { await loadBootstrap(); } catch { /* Preserve the accepted task state. */ }
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    showToast("Node 更新未完成", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (button) { button.disabled = false; button.textContent = "重试 Node 更新"; }
+    renderSystemUpdate();
+  }
+}
+
+async function configureHostBbr(hostId, button) {
+  if (button?.disabled) return;
+  const host = controlPlane.hosts.find(item => item.id === hostId);
+  if (!host || !hostBbrPresentation(host).canConfigure) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  const previous = button?.innerHTML;
+  if (button) { button.disabled = true; button.innerHTML = `${icon("refresh")}正在配置 BBR`; }
+  try {
+    const result = await api(`/api/hosts/${encodeURIComponent(hostId)}/bbr`, { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (host.kind !== "remote") controlPlane.bbr = result.bbr || result;
+    else host.bbrTask = { pending: true, status: "pending" };
+    let refreshWarning = "";
+    try { await loadBootstrap(); } catch { refreshWarning = "状态刷新暂时失败，请稍后刷新主机诊断。"; }
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (host.kind === "remote") {
+      showToast("BBR 配置任务已下发", `等待节点执行与心跳确认。${refreshWarning}`);
+    } else {
+      const state = result.bbr || result;
+      showToast(state.status === "enabled" ? "BBR 已启用" : "BBR 尚未启用", `${state.error || (state.status === "enabled" ? "已读取内核状态确认 TCP 拥塞控制。" : "请检查内核能力和系统权限后重试。")}${refreshWarning}`);
+    }
+    if (!refreshWarning && elements.drawer?.classList.contains("open")) openHost(hostId);
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    showToast("BBR 配置失败", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (button) { button.disabled = false; button.innerHTML = previous; }
+    renderSystemUpdate();
+  }
+}
+
+async function installSingBox() {
+  if (runtimeSetupRequest.running || controlPlane.runtimeSetup?.status === "running"
+    || runtimeSetupPresentation().blocked || !["owner", "operator"].includes(controlPlane.currentAdmin?.role)) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  runtimeSetupRequest.running = true;
+  runtimeSetupRequest.error = "";
+  renderRuntimeSetup();
+  try {
+    const result = await api("/api/runtime/install", { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (result.runtimeSetup) controlPlane.runtimeSetup = result.runtimeSetup;
+    else if (result.setup) controlPlane.runtimeSetup = result.setup;
+    else if (result.status) controlPlane.runtimeSetup = result;
+    let refreshWarning = "";
+    try { await loadBootstrap(); } catch { refreshWarning = " 最新运行状态暂时无法读取，请稍后刷新确认。"; }
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    runtimeSetupRequest.running = false;
+    const presentation = runtimeSetupPresentation();
+    showToast(presentation.title, `${presentation.message}${refreshWarning}`);
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    if (error.status === 401) { showAdminLogin(); return; }
+    runtimeSetupRequest.error = error.message;
+    showToast("安装配置未完成", error.message);
+  } finally {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    runtimeSetupRequest.running = false;
+    renderRuntimeSetup();
   }
 }
 
@@ -2587,7 +3458,7 @@ async function checkRuntimeUpdate() {
 
 async function upgradeLocalRuntime() {
   const button = document.querySelector("#upgrade-local-runtime");
-  if (!button || button.hidden || button.disabled) return;
+  if (!button || button.hidden || button.disabled || controlPlane.runtime?.mode !== "systemd") return;
   if (!window.confirm(
     "升级会重启本机 sing-box。RayLink 控制面、用户和订阅不会中断，但连接到这台 Runtime 的现有会话可能短暂重连。确认继续？"
   )) return;
@@ -2680,6 +3551,7 @@ async function generateRealityKeypair(form) {
 }
 
 function selectWorkspaceTab(kind, value) {
+  if (kind === "system" && ["mcp", "access"].includes(value) && controlPlane.currentAdmin?.role !== "owner") value = "hosts";
   const buttons = [...document.querySelectorAll(`[data-${kind}-tab]`)];
   buttons.forEach((button) => {
     const active = button.dataset[`${kind}Tab`] === value;
@@ -2712,7 +3584,19 @@ function openAdvancedConfig() {
   });
 }
 
+document.addEventListener("change", (event) => {
+  if (event.target.matches("[data-provision-auth]")) syncProvisioningAuthentication(event.target.form);
+  if (event.target.matches("[data-provision-domain]")) syncProvisioningDomain(event.target.form);
+});
+document.addEventListener("submit", (event) => {
+  if (event.target.id === "provision-host-form" || event.target.matches("[data-personal-account]")) { event.preventDefault(); if (!elements.drawerSave.disabled) void saveDrawer(); }
+});
+
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-reconnect-control-plane]")) { await reconnectControlPlane(); return; }
+  if (event.target.closest("[data-open-account]")) { openPersonalAccount(); return; }
+  const accountMode = event.target.closest("[data-account-mode]");
+  if (accountMode) { openPersonalAccount(accountMode.dataset.accountMode); return; }
   const logoutButton = event.target.closest("[data-logout]");
   if (logoutButton) {
     await logoutControlPlane(logoutButton);
@@ -2721,7 +3605,7 @@ document.addEventListener("click", async (event) => {
 
   if (event.target.closest("#profile-menu-trigger")) {
     setProfileMenu(elements.profileMenu.hidden);
-    if (!elements.profileMenu.hidden) elements.profileMenu.querySelector("[data-logout]").focus();
+    if (!elements.profileMenu.hidden) elements.profileMenu.querySelector("button").focus();
     return;
   }
 
@@ -2752,7 +3636,25 @@ document.addEventListener("click", async (event) => {
   }
 
   if (event.target.closest("[data-new-host]")) {
-    openNewHost();
+    const adminId = controlPlane.currentAdmin?.id;
+    await loadNodeDomainSettings();
+    if (adminId === controlPlane.currentAdmin?.id && canProvision()) openNewHost();
+    return;
+  }
+
+  if (event.target.closest("[data-manual-provision]")) { openNewHost(true); return; }
+  if (event.target.closest("[data-auto-provision]")) { openNewHost(); return; }
+  if (event.target.closest("[data-refresh-provisioning]")) { await loadProvisioningJobs(); return; }
+  const jobButton = event.target.closest("[data-open-provision]");
+  if (jobButton) {
+    const job = provisioning.jobs.find((entry) => entry.id === jobButton.dataset.openProvision);
+    if (job) openProvisioningJob(job);
+    return;
+  }
+  const retryJobButton = event.target.closest("[data-retry-provision]");
+  if (retryJobButton) {
+    const job = provisioning.jobs.find((entry) => entry.id === retryJobButton.dataset.retryProvision);
+    if (job) openDrawer({ title: "重试自动接入", eyebrow: "保留原 Host", content: provisioningFormMarkup(job), saveLabel: "重试接入" });
     return;
   }
 
@@ -2819,6 +3721,47 @@ document.addEventListener("click", async (event) => {
   const systemTab = event.target.closest("[data-system-tab]");
   if (systemTab) {
     selectWorkspaceTab("system", systemTab.dataset.systemTab);
+    if (systemTab.dataset.systemTab === "readiness" && !controlPlane.readiness) {
+      await refreshReadiness(document.querySelector("[data-refresh-readiness]"));
+    }
+    if (systemTab.dataset.systemTab === "mcp") await loadMcpAccess();
+    if (systemTab.dataset.systemTab === "certificates") await loadNodeDomainSettings();
+    if (systemTab.dataset.systemTab === "hosts") await loadProvisioningJobs();
+    return;
+  }
+
+  if (event.target.closest("[data-refresh-mcp]")) { await loadMcpAccess(); return; }
+  const mcpPreset = event.target.closest("[data-mcp-preset]");
+  if (mcpPreset) { applyMcpPreset(mcpPreset.dataset.mcpPreset); return; }
+  if (event.target.closest("[data-dismiss-mcp]")) {
+    clearMcpSecret();
+    setText("#mcp-access-status", "一次性显示已关闭。令牌仍然有效，无法再次查看；不再使用时请撤销。");
+    document.querySelector("#mcp-create-submit").focus();
+    return;
+  }
+  const copyMcp = event.target.closest("[data-copy-mcp]");
+  if (copyMcp) {
+    if (controlPlane.currentAdmin?.role !== "owner" || !mcpAccess.issued) return;
+    const value = document.querySelector(copyMcp.dataset.copyMcp === "config" ? "#mcp-issued-config" : "#mcp-issued-token").value;
+    if (value) await copyText(value, "连接凭据已复制，请仅粘贴到受信任的 Agent 客户端。");
+    return;
+  }
+  const revokeMcp = event.target.closest("[data-revoke-mcp]");
+  if (revokeMcp) { await revokeMcpCredential(revokeMcp); return; }
+
+  const readinessButton = event.target.closest("[data-refresh-readiness], [data-export-readiness]");
+  if (readinessButton) {
+    await refreshReadiness(readinessButton, readinessButton.hasAttribute("data-export-readiness"));
+    return;
+  }
+  const readinessTarget = event.target.closest("[data-readiness-target]");
+  if (readinessTarget) {
+    const target = readinessTarget.dataset.readinessTarget;
+    if (target === "routing") {
+      navigate("policies");
+    } else {
+      selectWorkspaceTab("system", target);
+    }
     return;
   }
 
@@ -2855,6 +3798,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest("[data-check-system-update]")) { await checkSystemUpdate(); return; }
+  if (event.target.closest("[data-upgrade-system]")) { await upgradeSystem(); return; }
+  const nodeUpgradeButton = event.target.closest("[data-upgrade-node]");
+  if (nodeUpgradeButton) { await upgradeNode(nodeUpgradeButton.dataset.upgradeNode, nodeUpgradeButton); return; }
+
   if (event.target.closest("[data-create-backup]")) {
     await createDatabaseBackup();
     return;
@@ -2871,13 +3819,19 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const bbrButton = event.target.closest("[data-configure-bbr]");
+  if (bbrButton) {
+    await configureHostBbr(bbrButton.dataset.configureBbr, bbrButton);
+    return;
+  }
+
   const saveAdminButton = event.target.closest("[data-save-admin]");
   if (saveAdminButton) {
     await saveAdministrator(saveAdminButton.dataset.saveAdmin);
     return;
   }
 
-  if (event.target.closest("#install-sing-box")) {
+  if (event.target.closest("#install-sing-box, [data-install-runtime]")) {
     await installSingBox();
     return;
   }
@@ -2946,7 +3900,7 @@ document.addEventListener("click", async (event) => {
       (target.value || target.textContent).trim(),
       target.id.includes("subscription")
         ? "订阅地址已复制，请通过安全渠道交付。"
-        : "用户中心入口已复制到剪贴板。"
+        : target.id === "mcp-endpoint" ? "MCP Server Endpoint 已复制。" : "内容已复制到剪贴板。"
     );
     return;
   }
@@ -2972,7 +3926,13 @@ elements.drawerCancel.addEventListener("click", closeDrawer);
 elements.drawerScrim.addEventListener("click", closeDrawer);
 elements.drawerSave.addEventListener("click", saveDrawer);
 document.querySelector("#certificate-settings-form").addEventListener("submit", saveCertificateSettings);
+document.querySelector("#node-domain-settings-form").addEventListener("submit", saveNodeDomainSettings);
+document.querySelector("#node-domain-provider").addEventListener("change", syncNodeDomainProvider);
 document.querySelector("#admin-create-form")?.addEventListener("submit", createAdministrator);
+document.querySelector("#mcp-create-form").addEventListener("submit", createMcpCredential);
+document.querySelector("#mcp-scope-list").addEventListener("change", () => {
+  document.querySelectorAll("[data-mcp-preset]").forEach((button) => button.setAttribute("aria-pressed", "false"));
+});
 document.querySelector("#routing-mode-form")?.addEventListener("submit", saveRoutingMode);
 document.querySelector("#routing-rule-form")?.addEventListener("submit", addRoutingRule);
 document.querySelector("#routing-diagnose-form")?.addEventListener("submit", diagnoseRouting);
@@ -3030,31 +3990,160 @@ function syncResponsiveNavigation() {
 
 window.addEventListener("resize", syncResponsiveNavigation);
 
-async function enterControlPlane() {
-  await loadBootstrap();
+function renderControlPlaneConnection() {
+  const notice = document.querySelector("#connection-notice");
+  notice.hidden = !controlPlaneConnection.disconnected;
+  setText("#connection-title", "无法连接控制面服务");
+  const retry = navigator.onLine === false ? "网络已离线，重新联网后将重连。" : "将自动重试，也可立即重连。";
+  setText("#connection-copy", `当前地址 ${location.origin}。页面数据可能已过期，请检查服务是否运行。${retry}SSH 接入表单内容会保留。`);
+  const button = document.querySelector("[data-reconnect-control-plane]");
+  button.disabled = bootstrapRefreshInFlight;
+  button.textContent = bootstrapRefreshInFlight ? "正在重连…" : "立即重连";
+}
+
+function markControlPlaneDisconnected() {
+  controlPlaneConnection.disconnected = true;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  renderControlPlaneConnection();
+}
+
+function stopControlPlaneRefresh() {
+  controlPlaneConnection.active = false;
+  controlPlaneConnection.generation += 1;
+  controlPlaneConnection.controller?.abort();
+  controlPlaneConnection.controller = null;
+  bootstrapReadPromise = null;
+  bootstrapRefreshInFlight = false;
+  bootstrapRefreshPromise = null;
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  controlPlaneConnection.disconnected = false;
+  controlPlaneConnection.failures = 0;
+  renderControlPlaneConnection();
+}
+
+function scheduleBootstrapRefresh(delay = 10_000) {
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  if (!controlPlaneConnection.active || document.hidden || navigator.onLine === false) return;
+  bootstrapRefreshTimer = setTimeout(() => {
+    bootstrapRefreshTimer = null;
+    return refreshControlPlane();
+  }, delay);
+}
+
+async function refreshControlPlane() {
+  if (!controlPlaneConnection.active || document.hidden || navigator.onLine === false) return;
+  if (bootstrapRefreshInFlight) return bootstrapRefreshPromise;
+  // Let an in-flight progress read finish before starting another background read.
+  if (provisioning.loading) { scheduleBootstrapRefresh(1_000); return; }
+  const generation = controlPlaneConnection.generation;
+  const recovering = controlPlaneConnection.disconnected;
+  clearTimeout(bootstrapRefreshTimer);
+  bootstrapRefreshTimer = null;
+  clearTimeout(provisioning.timer);
+  provisioning.timer = null;
+  bootstrapRefreshInFlight = true;
+  renderControlPlaneConnection();
+  const request = (async () => {
+    let delay = 10_000;
+    let refreshed = false;
+    try {
+      await loadBootstrap({ share: true });
+      if (generation !== controlPlaneConnection.generation) return;
+      if (navigator.onLine === false) { markControlPlaneDisconnected(); return; }
+      controlPlaneConnection.disconnected = false;
+      controlPlaneConnection.failures = 0;
+      refreshed = true;
+      if (elements.appShell.hidden) displayControlPlane();
+    } catch (error) {
+      if (generation !== controlPlaneConnection.generation) return;
+      if (error.status === 401) { stopControlPlaneRefresh(); showAdminLogin(); return; }
+      controlPlaneConnection.failures += 1;
+      delay = Math.min(60_000, 10_000 * (2 ** Math.min(controlPlaneConnection.failures - 1, 3)));
+      markControlPlaneDisconnected();
+    } finally {
+      if (generation === controlPlaneConnection.generation) {
+        bootstrapRefreshInFlight = false;
+        renderControlPlaneConnection();
+        if (refreshed && (recovering || provisioning.jobs.some((job) => ["queued", "running"].includes(job.status)))) await loadProvisioningJobs();
+        scheduleBootstrapRefresh(delay);
+      }
+    }
+  })();
+  bootstrapRefreshPromise = request;
+  try { return await request; }
+  finally { if (bootstrapRefreshPromise === request) bootstrapRefreshPromise = null; }
+}
+
+function displayControlPlane() {
   elements.authScreen.hidden = true;
   elements.appShell.hidden = false;
   elements.mobileNav.hidden = false;
+  elements.authError.textContent = "";
   syncResponsiveNavigation();
   const initialRoute = location.hash.replace(/^#\//, "") || "dashboard";
   navigate(initialRoute, false);
-  if (!bootstrapRefreshTimer) {
-    bootstrapRefreshTimer = setInterval(async () => {
-      if (document.hidden || bootstrapRefreshInFlight) return;
-      bootstrapRefreshInFlight = true;
-      try {
-        await loadBootstrap();
-      } catch (error) {
-        if (error.status === 401) showAdminLogin();
-      } finally {
-        bootstrapRefreshInFlight = false;
-      }
-    }, 10_000);
+}
+
+async function reconnectControlPlane() {
+  if (!controlPlaneConnection.active && !controlPlaneConnection.disconnected) return;
+  controlPlaneConnection.active = true;
+  if (navigator.onLine === false) { markControlPlaneDisconnected(); return; }
+  return refreshControlPlane();
+}
+
+function handleControlPlaneConnectivityChange() {
+  if (!controlPlaneConnection.active) return;
+  if (document.hidden || navigator.onLine === false) {
+    clearTimeout(bootstrapRefreshTimer);
+    bootstrapRefreshTimer = null;
+    clearTimeout(provisioning.timer);
+    provisioning.timer = null;
+    if (navigator.onLine === false) markControlPlaneDisconnected();
+    return;
   }
+  return reconnectControlPlane();
+}
+
+window.addEventListener("online", handleControlPlaneConnectivityChange);
+window.addEventListener("offline", handleControlPlaneConnectivityChange);
+document.addEventListener("visibilitychange", handleControlPlaneConnectivityChange);
+
+async function initializeControlPlane() {
+  const generation = controlPlaneConnection.generation;
+  try {
+    await enterControlPlane();
+  } catch (error) {
+    if (generation !== controlPlaneConnection.generation) return;
+    if (error.status !== 401) {
+      elements.authError.textContent = `无法连接控制面 ${location.origin}，请确认服务已启动后重连。`;
+      controlPlaneConnection.active = true;
+      markControlPlaneDisconnected();
+      scheduleBootstrapRefresh();
+    }
+    elements.authScreen.hidden = false;
+    elements.appShell.hidden = true;
+  }
+}
+
+async function enterControlPlane() {
+  const generation = controlPlaneConnection.generation;
+  await loadBootstrap();
+  if (generation !== controlPlaneConnection.generation) return;
+  controlPlaneConnection.active = true;
+  controlPlaneConnection.disconnected = false;
+  controlPlaneConnection.failures = 0;
+  renderControlPlaneConnection();
+  displayControlPlane();
+  void loadProvisioningJobs();
+  scheduleBootstrapRefresh();
 }
 
 elements.authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  stopControlPlaneRefresh();
   elements.authError.textContent = "";
   const submit = elements.authForm.querySelector('button[type="submit"]');
   submit.disabled = true;
@@ -3077,8 +4166,4 @@ elements.authForm.addEventListener("submit", async (event) => {
   }
 });
 
-enterControlPlane().catch((error) => {
-  if (error.status !== 401) elements.authError.textContent = `无法连接控制面：${error.message}`;
-  elements.authScreen.hidden = false;
-  elements.appShell.hidden = true;
-});
+void initializeControlPlane();

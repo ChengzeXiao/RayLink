@@ -195,11 +195,16 @@ export class V2RayStatsCollector {
   }
 
   async collect() {
+    const runtimeInstanceId = String(await this.runtimeInstanceProvider());
+    const users = normalizeV2RayUserStats(await this.query());
+    if (String(await this.runtimeInstanceProvider()) !== runtimeInstanceId) {
+      throw new Error("采样期间 Runtime 实例发生变化，等待下一轮重新采样");
+    }
     return {
       sampleId: this.sampleId(),
-      runtimeInstanceId: String(await this.runtimeInstanceProvider()),
+      runtimeInstanceId,
       observedAt: this.clock().toISOString(),
-      users: normalizeV2RayUserStats(await this.query())
+      users
     };
   }
 }

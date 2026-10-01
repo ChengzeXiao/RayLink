@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
-export const APPROVED_METERED_RUNTIME_VERSION = "1.13.14";
+export const APPROVED_METERED_RUNTIME_VERSION = "1.14.2";
 const TARGET_VERSION = APPROVED_METERED_RUNTIME_VERSION;
-const SUPPORTED_VERSION_SERIES = "1.13";
+const SUPPORTED_VERSION_SERIES = "1.13 / 1.14";
 const LATEST_RELEASE_URL = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
 const LATEST_RELEASE_REDIRECT_URL = "https://github.com/SagerNet/sing-box/releases/latest";
 const defaultMeteredRuntimeBuilder = fileURLToPath(
@@ -610,7 +610,7 @@ function normalizeVersion(value) {
   return match?.[1] || null;
 }
 
-function compareVersions(left, right) {
+export function compareVersions(left, right) {
   const leftParts = normalizeVersion(left)?.split(".").map(Number);
   const rightParts = normalizeVersion(right)?.split(".").map(Number);
   if (!leftParts || !rightParts) return 0;
@@ -621,7 +621,7 @@ function compareVersions(left, right) {
 }
 
 function isSupportedVersion(version) {
-  return String(version).startsWith(`${SUPPORTED_VERSION_SERIES}.`);
+  return /^1\.(?:13|14)\.\d+$/.test(String(version || ""));
 }
 
 function installerError(code, message, statusCode) {

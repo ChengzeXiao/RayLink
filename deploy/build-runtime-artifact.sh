@@ -7,7 +7,7 @@ fail() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail "请以 root 运行"
-runtime_version="${1:-1.13.14}"
+runtime_version="${1:-1.14.2}"
 script_directory="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 output_root="${2:-$script_directory/../web/node/runtime}"
 requested_arch="${3:-}"

@@ -7,19 +7,25 @@
 - 环境：`/etc/raylink/raylink.env`
 - 受管配置：`/var/lib/raylink/sing-box/config.json`
 
+正式发布包包含 `package-lock.json` 和生产 `node_modules`，构建时在隔离目录执行
+`npm ci --omit=dev --ignore-scripts`。安装与升级会在候选目录校验锁文件、已安装版本和控制面模块导入；
+依赖检查失败不会切换应用或停止旧控制面。完整发布包的依赖检查无需访问 npm registry；
+直接从源码安装时需要 npm registry 可达（或本机已有完整 npm 缓存）。
+远程 RayLink Node 使用独立脚本，不安装控制面的 MCP SDK 依赖。
+
 ## 推荐：一键安装与首次初始化
 
-v0.2.32 Release 当前支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。
+v0.2.33 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。发布产物与升级说明见 GitHub Release。
 使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
 ```
 
 脚本检测 CPU 架构和公网 IP，自动补齐 Debian/Ubuntu 上缺少的归档校验工具，
@@ -27,30 +33,31 @@ bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/dow
 云主机若有 NAT、多块网卡，建议显式提供实际访问地址：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 安装指定版本：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --version 0.2.32'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --version 0.2.33'
 ```
 
 只验证下载、校验和解压，不修改系统：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash -s -- --dry-run'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --dry-run'
 ```
 
 一键安装会完成：
 
 - 从 Node.js 官方源安装并校验 Node.js 22；
-- 优先校验并安装发布包内预编译的 sing-box 1.13.14 计量版；
+- 优先校验并安装发布包内预编译的 sing-box 1.14.2 计量版；
 - 开发源码包未携带预编译 Runtime 时，才回退到本机编译；
 - 从 Caddy 官方 APT 仓库安装 Caddy，并配置 systemd 自启动；
 - 安装 RayLink 和 sing-box systemd 服务；
 - 为服务器 IP 生成带 SAN 的首次访问证书；
-- 输出仅显示一次的 `https://服务器IP/setup#token=...` 初始化地址。
+- 自动创建管理员、启用 Shadowsocks、配置 BBR、发布配置并验证服务与监听端口；
+- 将初始登录信息写入 `/etc/raylink/initial-login.json`（权限 0600）。
 
 已经下载发布包时，也可以在发布包根目录直接执行底层安装器：
 
@@ -59,10 +66,17 @@ sudo env RAYLINK_PUBLIC_IP=203.0.113.10 bash deploy/install-control-plane.sh
 ```
 
 浏览器首次访问 IP 证书会提示证书由本机签发。继续前应核对安装器输出的
-SHA-256 证书指纹。初始化令牌只以哈希形式写入服务器，默认 30 分钟后失效；
-初始化成功后立即作废。
+SHA-256 证书指纹。受管 Node 经 SSH 获得主控证书并保持严格 HTTPS 校验；浏览器、MCP 和订阅客户端仍需要信任该证书。自动化安装使用一次性初始化令牌，成功后立即作废。
 
-### 升级到 v0.2.32
+已有解析到服务器的域名时，可以执行：
+
+```bash
+sudo env RAYLINK_PUBLIC_IP=203.0.113.10 RAYLINK_DOMAIN=panel.example.com RAYLINK_ACME_EMAIL=ops@example.com bash deploy/install-control-plane.sh
+```
+
+Caddy 自动申请并续期域名证书；控制台和订阅使用该域名，仍保留 IP 恢复入口。需要分别配置域名时，设置 `RAYLINK_INTERACTIVE_SETUP=true` 保留交互向导。详见 [自动安装与维护](../docs/automatic-installation.md)。
+
+### 升级到 v0.2.33
 
 在已安装 RayLink 的服务器上重新执行同一条一键命令即可。安装器会识别
 `/opt/raylink`，保持 sing-box Runtime 运行，备份当前应用和
@@ -70,10 +84,10 @@ SHA-256 证书指纹。初始化令牌只以哈希形式写入服务器，默认
 升级器会自动恢复应用、数据和 systemd 服务单元：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/Zanetach/RayLink/releases/download/v0.2.32/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash'
 ```
 
-升级备份保存在 `/var/backups/raylink/`。
+升级备份保存在 `/var/backups/raylink/`。新版还支持在「系统 → 版本与备份」检查正式 Release 并更新控制面；独立 systemd 更新任务在主控重启后保留结果，重新验证实际版本及服务状态。Node 0.9.0 起支持同样的远程程序更新；更旧 Node 需先执行一次升级命令。软件更新不执行发行版升级，也不自动重启服务器。
 
 ### 从旧版本升级到 v0.2.12
 
@@ -100,7 +114,7 @@ sudo bash deploy/migrate-default-tls.sh
 Linux Runner 上执行：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14
+sudo bash deploy/build-runtime-artifact.sh 1.14.2
 ```
 
 默认产物写入 `web/node/runtime/`。每个架构包含计量版 sing-box、独立
@@ -112,30 +126,30 @@ SHA-256，以及从同版本官方发布包提取并按固定 SHA-256 验证的 
 也可以指定自定义目录；相对路径会先转换为绝对路径，避免构建器拒绝：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14 ./release-runtime
+sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime
 ```
 
 第三个参数可以指定目标架构，例如在 ARM64 构建机上交叉构建 AMD64：
 
 ```bash
-sudo bash deploy/build-runtime-artifact.sh 1.13.14 ./release-runtime amd64
+sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime amd64
 ```
 
 交叉构建阶段会验证目标 ELF 架构；发布前还必须在 AMD64 Linux 用户空间执行
-`raylink-sing-box-1.13.14-linux-amd64 version`，确认版本和完整审批 build tags。
+`raylink-sing-box-1.14.2-linux-amd64 version`，确认版本和完整审批 build tags。
 原生架构构建会在脚本内部直接完成这项执行校验。
 
-本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.32 默认装配
+本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.33 默认装配
 AMD64 Runtime：
 
 ```bash
-bash deploy/package-release.sh 0.2.32
+bash deploy/package-release.sh 0.2.33
 ```
 
 也可以显式指定本次发布需要装配的架构：
 
 ```bash
-RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.32
+RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.33
 ```
 
 发布包包含运行程序、部署工具、README、变更日志和生产门槛文档，不会打包本地
@@ -160,7 +174,7 @@ GitHub Build Provenance 证明并发布 Release。ARM64 安装器使用与 AMD64
 bash /opt/raylink/deploy/rotate-setup-token.sh
 ```
 
-首次初始化包含五步：
+默认自动执行首次初始化。选择 `RAYLINK_INTERACTIVE_SETUP=true` 时，向导包含五步：
 
 1. 验证一次性安装令牌；
 2. 选择域名或 IP 访问入口；域名模式分别填写控制台域名和订阅域名，由 Caddy
@@ -174,7 +188,7 @@ bash /opt/raylink/deploy/rotate-setup-token.sh
 `net.ipv4.tcp_congestion_control=bbr`。配置会持久化到
 `/var/lib/raylink/managed/99-raylink-bbr.conf`，并通过
 `/etc/sysctl.d/99-raylink-bbr.conf` 在重启后继续生效。初始化界面会实时显示
-BBR 配置进度；内核不支持或配置验证失败时，初始化保持可重试状态并给出明确错误。
+安装与 BBR 配置进度；内核不支持或配置失败会记录待处理项，不阻断其余可用服务。主机页可查看真实状态并重试配置，不会把不支持的内核标为已启用。
 
 没有域名时可以长期使用 IP HTTPS；浏览器需要信任安装器生成的本机证书。使用域名时
 必须先把 A/AAAA 记录直接解析到该 VPS（初始化时关闭 CDN 代理），并开放 TCP 80/443。

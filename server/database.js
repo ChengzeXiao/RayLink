@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -135,8 +136,8 @@ function validateAdminUsername(username) {
 }
 
 function validateAdminPassword(password) {
-  if (typeof password !== "string" || password.length < 12) {
-    throw domainError("INVALID_ADMIN_PASSWORD", "管理员密码至少需要 12 位");
+  if (typeof password !== "string" || password.length < 12 || password.length > 1024 || !password.trim()) {
+    throw domainError("INVALID_ADMIN_PASSWORD", "管理员密码需要 12–1024 位，且不能全为空白");
   }
   return password;
 }
@@ -187,6 +188,18 @@ function normalizeTelemetry(input = {}) {
   };
 }
 
+function normalizeBbr(input, checkedAt) {
+  if (!input || typeof input !== "object") return null;
+  const statuses = ["enabled", "available", "unsupported", "unavailable", "failed", "development"];
+  let status = statuses.includes(input.status) ? input.status : "unavailable";
+  const parameter = (value) => typeof value === "string" && /^[a-z0-9_-]{1,40}$/i.test(value) ? value : null;
+  const congestionControl = parameter(input.congestionControl);
+  const qdisc = parameter(input.qdisc);
+  if (status === "enabled" && (congestionControl !== "bbr" || qdisc !== "fq")) status = "unavailable";
+  return { status, congestionControl, qdisc, checkedAt,
+    error: input.error ? String(input.error).replace(/[\r\n\t]+/g, " ").slice(0, 400) : null };
+}
+
 function hostFromRow(row) {
   const lastSeenAt = row.last_seen_at || null;
   const buildTags = parseJson(row.build_tags_json, []);
@@ -216,6 +229,7 @@ function hostFromRow(row) {
     id: row.id,
     name: row.name,
     address: row.address,
+    endpointDomain: row.endpoint_domain || null,
     region: row.region,
     status: remoteOffline ? "offline" : row.status,
     kind: row.kind || "local",
@@ -250,6 +264,7 @@ function hostFromRow(row) {
       networkRxBps: row.network_rx_bps ?? null,
       networkTxBps: row.network_tx_bps ?? null,
       serviceStatus: row.service_status || "unknown",
+      bbr: parseJson(row.bbr_json, null),
       updatedAt: row.metrics_updated_at || null
     },
     deploymentSync: {
@@ -288,7 +303,7 @@ function normalizedHostInput(input, current = {}) {
   if (!host.name || host.name.length > 80) {
     throw domainError("INVALID_HOST_NAME", "主机名称不能为空且不能超过 80 个字符");
   }
-  if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])$/i.test(host.address)) {
+  if (!isIP(host.address) && !/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])$/i.test(host.address)) {
     throw domainError("INVALID_HOST_ADDRESS", "请输入有效的主机域名或 IP 地址");
   }
   if (!/^[a-z0-9-]{2,32}$/i.test(host.region)) {
@@ -512,7 +527,8 @@ export class RayLinkStore {
         uplink_bytes INTEGER NOT NULL,
         downlink_bytes INTEGER NOT NULL,
         updated_at TEXT NOT NULL,
-        PRIMARY KEY(host_id, user_name)
+        baseline_pending INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(host_id, user_name, runtime_instance_id)
       );
       CREATE TABLE IF NOT EXISTS user_usage_ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -537,6 +553,61 @@ export class RayLinkStore {
       CREATE INDEX IF NOT EXISTS daily_user_usage_user_date
       ON daily_user_usage(user_id, usage_date);
     `);
+    // Older databases kept only the latest Runtime's watermarks. Keep one
+    // checkpoint per instance so delayed samples cannot charge old bytes again.
+    // Only reconstruct exact totals if every sample sequence slot survives.
+    // Pruning or sequence gaps make summed deltas uncertain; those instances
+    // establish a baseline on their next sample instead of charging old bytes.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const checkpointColumns = this.db.prepare("PRAGMA table_info(usage_counter_checkpoints)").all();
+      if (!checkpointColumns.find((column) => column.name === "runtime_instance_id")?.pk) {
+        this.db.exec(`
+          CREATE TABLE usage_counter_checkpoints_migration (
+            host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+            user_name TEXT NOT NULL,
+            runtime_instance_id TEXT NOT NULL,
+            uplink_bytes INTEGER NOT NULL,
+            downlink_bytes INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            baseline_pending INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(host_id, user_name, runtime_instance_id)
+          );
+          INSERT INTO usage_counter_checkpoints_migration (
+            host_id, user_name, runtime_instance_id, uplink_bytes, downlink_bytes, updated_at
+          ) SELECT host_id, user_name, runtime_instance_id, uplink_bytes, downlink_bytes, updated_at
+            FROM usage_counter_checkpoints;
+          INSERT INTO usage_counter_checkpoints_migration (
+            host_id, user_name, runtime_instance_id, uplink_bytes, downlink_bytes, updated_at, baseline_pending
+          )
+          SELECT ledger.host_id, users.email, samples.runtime_instance_id,
+                 SUM(ledger.uplink_bytes), SUM(ledger.downlink_bytes), MAX(samples.received_at),
+                 CASE WHEN (SELECT COUNT(*) FROM usage_samples) =
+                   COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'usage_samples'), 0)
+                   THEN 0 ELSE 1 END
+          FROM user_usage_ledger AS ledger
+          JOIN usage_samples AS samples ON samples.id = ledger.sample_id
+          JOIN users ON users.id = ledger.user_id
+          GROUP BY ledger.host_id, users.email, samples.runtime_instance_id
+          ON CONFLICT(host_id, user_name, runtime_instance_id) DO NOTHING;
+          DROP TABLE usage_counter_checkpoints;
+          ALTER TABLE usage_counter_checkpoints_migration RENAME TO usage_counter_checkpoints;
+        `);
+        const migratedAt = new Date(this.clock()).toISOString();
+        this.db.prepare(`
+          INSERT OR IGNORE INTO settings (key, value, updated_at)
+          VALUES ('usage_checkpoint_migrated_at', ?, ?)
+        `).run(migratedAt, migratedAt);
+      }
+      if (!this.db.prepare("PRAGMA table_info(usage_counter_checkpoints)").all()
+        .some((column) => column.name === "baseline_pending")) {
+        this.db.exec("ALTER TABLE usage_counter_checkpoints ADD COLUMN baseline_pending INTEGER NOT NULL DEFAULT 0");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     const adminColumns = this.db.prepare("PRAGMA table_info(admins)").all();
     if (!adminColumns.some((column) => column.name === "role")) {
       this.db.exec("ALTER TABLE admins ADD COLUMN role TEXT NOT NULL DEFAULT 'owner'");
@@ -597,6 +668,7 @@ export class RayLinkStore {
     `);
     const hostColumns = this.db.prepare("PRAGMA table_info(hosts)").all();
     const hostMigrations = [
+      ["endpoint_domain", "TEXT"],
       ["kind", "TEXT NOT NULL DEFAULT 'local'"],
       ["enrollment_secret_hash", "TEXT"],
       ["node_secret_hash", "TEXT"],
@@ -623,6 +695,7 @@ export class RayLinkStore {
       ["network_rx_bps", "REAL"],
       ["network_tx_bps", "REAL"],
       ["service_status", "TEXT"],
+      ["bbr_json", "TEXT"],
       ["metrics_updated_at", "TEXT"]
     ];
     for (const [column, definition] of hostMigrations) {
@@ -646,9 +719,12 @@ export class RayLinkStore {
 
   seed({ adminUsername, adminPassword, initialHostAddress, initialListenPort, seedDemoData }) {
     const createdAt = nowIso();
+    // Bootstrap credentials initialize an empty database only. Reusing them on
+    // restart must not recreate an account renamed through account settings.
     const insertAdmin = this.db.prepare(`
       INSERT OR IGNORE INTO admins (id, username, password_hash, role, created_at)
-      VALUES (?, ?, ?, 'owner', ?)
+      SELECT ?, ?, ?, 'owner', ?
+      WHERE NOT EXISTS (SELECT 1 FROM admins)
     `);
     insertAdmin.run(randomUUID(), adminUsername, hashPassword(adminPassword), createdAt);
 
@@ -768,7 +844,58 @@ export class RayLinkStore {
     const admin = this.db.prepare("SELECT * FROM admins WHERE username = ?").get(username);
     const valid = await verifyPassword(password, admin?.password_hash || DUMMY_PASSWORD_HASH);
     if (!admin || !valid) return null;
-    return { id: admin.id, username: admin.username, role: admin.role || "owner" };
+    // Password verification yields to the event loop; a concurrent rotation may
+    // have revoked this identity while scrypt was running.
+    const current = this.db.prepare("SELECT * FROM admins WHERE id = ?").get(admin.id);
+    if (!current || current.password_hash !== admin.password_hash || current.username !== admin.username) return null;
+    return { id: current.id, username: current.username, role: current.role || "owner" };
+  }
+
+  revokeAdminCredentials(id, { revokeMcp = false } = {}) {
+    const sessionsRevoked = Number(this.db.prepare("DELETE FROM sessions WHERE admin_id = ?").run(id).changes);
+    let mcpTokensRevoked = 0;
+    if (revokeMcp && this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mcp_credentials'").get()) {
+      mcpTokensRevoked = Number(this.db.prepare(`
+        UPDATE mcp_credentials SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL
+      `).run(nowIso(), id).changes);
+    }
+    return { sessionsRevoked, mcpTokensRevoked };
+  }
+
+  async changeAdminAccount(id, input = {}, { changePassword = false } = {}) {
+    const { currentPassword } = input || {};
+    const value = changePassword ? validateAdminPassword(input?.newPassword) : validateAdminUsername(input?.username);
+    const snapshot = this.db.prepare("SELECT username, password_hash FROM admins WHERE id = ?").get(id);
+    if (typeof currentPassword !== "string" || currentPassword.length > 4096
+      || !await verifyPassword(currentPassword, snapshot?.password_hash || DUMMY_PASSWORD_HASH) || !snapshot) {
+      throw domainError("CURRENT_PASSWORD_INVALID", "当前密码不正确", 403);
+    }
+    if (changePassword && currentPassword === value) throw domainError("PASSWORD_UNCHANGED", "新密码不能与当前密码相同");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare("SELECT username, password_hash FROM admins WHERE id = ?").get(id);
+      if (!current || current.password_hash !== snapshot.password_hash || current.username !== snapshot.username) {
+        throw domainError("ACCOUNT_CHANGED", "账号已变更，请重新登录后重试", 409);
+      }
+      if (changePassword) {
+        this.db.prepare("UPDATE admins SET password_hash = ? WHERE id = ?").run(hashPassword(value), id);
+      } else {
+        this.db.prepare("UPDATE admins SET username = ? WHERE id = ?").run(value, id);
+      }
+      const revoked = this.revokeAdminCredentials(id, { revokeMcp: changePassword });
+      this.db.exec("COMMIT");
+      return {
+        ...(changePassword ? { passwordChanged: true } : { profileUpdated: true, username: value }),
+        reauthenticationRequired: true,
+        ...revoked
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      if (/UNIQUE constraint failed: admins\.username/i.test(error.message)) {
+        throw domainError("ADMIN_USERNAME_EXISTS", "管理员用户名已经存在", 409);
+      }
+      throw error;
+    }
   }
 
   listAdmins() {
@@ -818,53 +945,62 @@ export class RayLinkStore {
   }
 
   updateAdmin(id, input) {
-    const current = this.db.prepare(
-      "SELECT id, username, role, created_at FROM admins WHERE id = ?"
-    ).get(id);
-    if (!current) throw domainError("ADMIN_NOT_FOUND", "管理员不存在", 404);
-    const username = input.username === undefined
-      ? current.username
-      : validateAdminUsername(input.username);
-    const role = input.role === undefined
-      ? current.role
-      : validateAdminRole(input.role);
-    if (current.role === "owner" && role !== "owner") {
-      const owners = this.db.prepare(
-        "SELECT COUNT(*) AS count FROM admins WHERE role = 'owner'"
-      ).get().count;
-      if (Number(owners) <= 1) {
-        throw domainError("LAST_OWNER_REQUIRED", "系统必须保留至少一个 Owner", 409);
-      }
-    }
-    const password = input.password === undefined
-      ? null
-      : validateAdminPassword(input.password);
+    this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare(`
-        UPDATE admins
-        SET username = ?, role = ?,
-            password_hash = CASE WHEN ? IS NULL THEN password_hash ELSE ? END
-        WHERE id = ?
-      `).run(
+      const current = this.db.prepare(
+        "SELECT id, username, role, created_at FROM admins WHERE id = ?"
+      ).get(id);
+      if (!current) throw domainError("ADMIN_NOT_FOUND", "管理员不存在", 404);
+      const username = input.username === undefined
+        ? current.username
+        : validateAdminUsername(input.username);
+      const role = input.role === undefined
+        ? current.role
+        : validateAdminRole(input.role);
+      if (current.role === "owner" && role !== "owner") {
+        const owners = this.db.prepare(
+          "SELECT COUNT(*) AS count FROM admins WHERE role = 'owner'"
+        ).get().count;
+        if (Number(owners) <= 1) {
+          throw domainError("LAST_OWNER_REQUIRED", "系统必须保留至少一个 Owner", 409);
+        }
+      }
+      const password = input.password === undefined
+        ? null
+        : validateAdminPassword(input.password);
+      try {
+        this.db.prepare(`
+          UPDATE admins
+          SET username = ?, role = ?,
+              password_hash = CASE WHEN ? IS NULL THEN password_hash ELSE ? END
+          WHERE id = ?
+        `).run(
+          username,
+          role,
+          password,
+          password ? hashPassword(password) : null,
+          id
+        );
+      } catch (error) {
+        if (/UNIQUE constraint failed: admins\.username/i.test(error.message)) {
+          throw domainError("ADMIN_USERNAME_EXISTS", "管理员用户名已经存在", 409);
+        }
+        throw error;
+      }
+      if (password || username !== current.username) {
+        this.revokeAdminCredentials(id, { revokeMcp: Boolean(password) });
+      }
+      this.db.exec("COMMIT");
+      return {
+        id,
         username,
         role,
-        password,
-        password ? hashPassword(password) : null,
-        id
-      );
+        createdAt: current.created_at
+      };
     } catch (error) {
-      if (/UNIQUE constraint failed: admins\.username/i.test(error.message)) {
-        throw domainError("ADMIN_USERNAME_EXISTS", "管理员用户名已经存在", 409);
-      }
+      this.db.exec("ROLLBACK");
       throw error;
     }
-    if (password) this.db.prepare("DELETE FROM sessions WHERE admin_id = ?").run(id);
-    return {
-      id,
-      username,
-      role,
-      createdAt: current.created_at
-    };
   }
 
   recordAuditEvent({
@@ -1524,6 +1660,8 @@ export class RayLinkStore {
       const host = hostFromRow(row);
       return {
         ...host,
+        nodeUpgrade: this.hostTaskStatus(host.id, "upgrade-node"),
+        bbrTask: this.hostTaskStatus(host.id, "configure-bbr"),
         protocols: this.listHostProtocolConfigs(host.id),
         protocolActivations: this.listProtocolActivations(host.id)
       };
@@ -1594,6 +1732,9 @@ export class RayLinkStore {
         return { applied: false, duplicate: true, appliedBytes: 0, quotaExceededUserIds: [] };
       }
       const usageSampleId = Number(inserted.lastInsertRowid);
+      const migrationTime = this.db.prepare(
+        "SELECT value FROM settings WHERE key = 'usage_checkpoint_migrated_at'"
+      ).get()?.value;
       let appliedBytes = 0;
       const quotaExceededUserIds = [];
       for (const usage of normalized) {
@@ -1604,31 +1745,37 @@ export class RayLinkStore {
         `).get(usage.userName);
         if (!user) continue;
         const checkpoint = this.db.prepare(`
-          SELECT runtime_instance_id, uplink_bytes, downlink_bytes
+          SELECT runtime_instance_id, uplink_bytes, downlink_bytes, baseline_pending
           FROM usage_counter_checkpoints
-          WHERE host_id = ? AND user_name = ?
-        `).get(hostId, usage.userName);
+          WHERE host_id = ? AND user_name = ? AND runtime_instance_id = ?
+        `).get(hostId, usage.userName, runtimeInstanceId);
         const sameRuntime = checkpoint?.runtime_instance_id === runtimeInstanceId;
+        // A pre-upgrade delayed counter with no surviving watermark/ledger
+        // cannot safely be treated as wholly new usage. Establish a baseline;
+        // future increments (and genuinely new post-upgrade instances) bill normally.
+        const baselineOnly = Boolean(checkpoint?.baseline_pending)
+          || (!checkpoint && migrationTime && observedAt.getTime() <= Date.parse(migrationTime));
         const previousUplink = Number(checkpoint?.uplink_bytes || 0);
         const previousDownlink = Number(checkpoint?.downlink_bytes || 0);
-        const uplinkDelta = sameRuntime
+        const uplinkDelta = baselineOnly ? 0 : sameRuntime
           ? Math.max(0, usage.uplinkBytes - previousUplink)
           : usage.uplinkBytes;
-        const downlinkDelta = sameRuntime
+        const downlinkDelta = baselineOnly ? 0 : sameRuntime
           ? Math.max(0, usage.downlinkBytes - previousDownlink)
           : usage.downlinkBytes;
-        const checkpointUplink = sameRuntime
+        const checkpointUplink = sameRuntime && !baselineOnly
           ? Math.max(previousUplink, usage.uplinkBytes)
           : usage.uplinkBytes;
-        const checkpointDownlink = sameRuntime
+        const checkpointDownlink = sameRuntime && !baselineOnly
           ? Math.max(previousDownlink, usage.downlinkBytes)
           : usage.downlinkBytes;
         this.db.prepare(`
           INSERT INTO usage_counter_checkpoints (
             host_id, user_name, runtime_instance_id, uplink_bytes, downlink_bytes, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(host_id, user_name) DO UPDATE SET
+          ON CONFLICT(host_id, user_name, runtime_instance_id) DO UPDATE SET
             runtime_instance_id = excluded.runtime_instance_id,
+            baseline_pending = 0,
             uplink_bytes = excluded.uplink_bytes,
             downlink_bytes = excluded.downlink_bytes,
             updated_at = excluded.updated_at
@@ -1755,9 +1902,21 @@ export class RayLinkStore {
     const host = hostFromRow(row);
     return {
       ...host,
+      nodeUpgrade: this.hostTaskStatus(id, "upgrade-node"),
+      bbrTask: this.hostTaskStatus(id, "configure-bbr"),
       protocols: this.listHostProtocolConfigs(id),
       protocolActivations: this.listProtocolActivations(id)
     };
+  }
+
+  hostTaskStatus(hostId, kind) {
+    const row = this.db.prepare("SELECT * FROM node_tasks WHERE host_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(hostId, kind);
+    const payload = parseJson(row?.payload_json, {});
+    const envelope = parseJson(row?.result_json, {});
+    const result = envelope?.result || {};
+    return { pending: ["pending", "claimed"].includes(row?.status), status: row?.status || "never",
+      targetVersion: payload.targetVersion || null, agentVersion: result.agentVersion || null,
+      error: result.error || null, finishedAt: row?.finished_at || null };
   }
 
   nodeEncryptionPublicKey(hostId) {
@@ -1766,6 +1925,27 @@ export class RayLinkStore {
       FROM hosts
       WHERE id = ? AND kind = 'remote'
     `).get(hostId)?.encryption_public_key || null;
+  }
+
+  setHostEndpointDomain(hostId, domain) {
+    const current = this.getHost(hostId);
+    if (!current) throw domainError("HOST_NOT_FOUND", "主机不存在", 404);
+    if (typeof domain !== "string" || isIP(domain) || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(domain)) {
+      throw domainError("INVALID_HOST_ADDRESS", "请输入有效的节点业务域名");
+    }
+    domain = domain.toLowerCase();
+    this.db.exec("SAVEPOINT host_endpoint_domain");
+    try {
+      this.db.prepare("UPDATE hosts SET endpoint_domain=?, updated_at=? WHERE id=?").run(domain, nowIso(), hostId);
+      if (current.endpointDomain !== domain) {
+        this.db.prepare("UPDATE protocol_activations SET state_json=json_remove(state_json, '$.publicCheck'), updated_at=? WHERE host_id=?").run(nowIso(), hostId);
+      }
+      this.db.exec("RELEASE host_endpoint_domain");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO host_endpoint_domain; RELEASE host_endpoint_domain");
+      throw error;
+    }
+    return this.getHost(hostId);
   }
 
   createRemoteHost(input) {
@@ -1812,17 +1992,40 @@ export class RayLinkStore {
   }
 
   updateHost(id, input) {
-    const next = this.normalizeHostUpdate(id, input);
-    this.db.prepare(`
-      UPDATE hosts SET name = ?, address = ?, region = ?, updated_at = ? WHERE id = ?
-    `).run(next.name, next.address, next.region, nowIso(), id);
-    return this.getHost(id);
+    this.db.exec("SAVEPOINT update_host");
+    try {
+      const current = this.getHost(id);
+      const next = this.normalizeHostUpdate(id, input);
+      this.db.prepare(`
+        UPDATE hosts SET name = ?, address = ?, region = ?, updated_at = ? WHERE id = ?
+      `).run(next.name, next.address, next.region, nowIso(), id);
+      if (current.address !== next.address) {
+        this.db.prepare(`
+          UPDATE protocol_activations
+          SET state_json = json_remove(state_json, '$.publicCheck'), updated_at = ?
+          WHERE host_id = ?
+        `).run(nowIso(), id);
+      }
+      this.db.exec("RELEASE update_host");
+      return this.getHost(id);
+    } catch (error) {
+      this.db.exec("ROLLBACK TO update_host; RELEASE update_host");
+      throw error;
+    }
   }
 
   normalizeHostUpdate(id, input) {
     const current = this.getHost(id);
     if (!current) throw domainError("HOST_NOT_FOUND", "主机不存在", 404);
-    return normalizedHostInput(input, current);
+    const next = normalizedHostInput(input, current);
+    if (current.endpointDomain && current.address !== next.address) {
+      throw domainError(
+        "HOST_DOMAIN_MIGRATION_REQUIRED",
+        "此主机已绑定业务域名，不能直接修改 IP；请先规划节点与 DNS 绑定迁移。原地址和订阅保持不变",
+        409
+      );
+    }
+    return next;
   }
 
   updateLocalRuntimeCapabilities(runtime = {}) {
@@ -1951,6 +2154,7 @@ export class RayLinkStore {
             disk_used_bytes = ?, disk_total_bytes = ?,
             network_rx_bytes = ?, network_tx_bytes = ?,
             network_rx_bps = ?, network_tx_bps = ?, service_status = ?,
+            bbr_json = ?,
             metrics_updated_at = ?, updated_at = ?
         WHERE id = ?
       `).run(
@@ -1964,6 +2168,7 @@ export class RayLinkStore {
         telemetry.networkRxBps,
         telemetry.networkTxBps,
         telemetry.serviceStatus,
+        JSON.stringify(normalizeBbr(input.bbr, timestamp)),
         timestamp,
         timestamp,
         hostId
@@ -2095,11 +2300,11 @@ export class RayLinkStore {
           DELETE FROM node_tasks
           WHERE host_id = ? AND kind = 'publish-config' AND status = 'pending'
         `).run(hostId);
-      } else if (kind === "upgrade-runtime") {
+      } else if (["upgrade-runtime", "upgrade-node", "configure-bbr"].includes(kind)) {
         this.db.prepare(`
           DELETE FROM node_tasks
-          WHERE host_id = ? AND kind = 'upgrade-runtime' AND status = 'pending'
-        `).run(hostId);
+          WHERE host_id = ? AND kind = ? AND status = 'pending'
+        `).run(hostId, kind);
       }
       this.db.prepare(`
         INSERT INTO node_tasks (
@@ -2133,6 +2338,20 @@ export class RayLinkStore {
     const retryBefore = new Date(Date.now() - 60_000).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // A missing completion must not let an expired lease resurrect a
+      // superseded configuration after a newer publication was applied.
+      this.db.prepare(`
+        UPDATE node_tasks AS older
+        SET status = 'failed', result_json = '{"superseded":true}',
+            finished_at = ?, next_attempt_at = NULL
+        WHERE host_id = ? AND kind = 'publish-config'
+          AND status IN ('pending', 'claimed')
+          AND EXISTS (
+            SELECT 1 FROM node_tasks AS newer
+            WHERE newer.host_id = older.host_id AND newer.kind = 'publish-config'
+              AND newer.rowid > older.rowid
+          )
+      `).run(now, hostId);
       const task = this.db.prepare(`
         SELECT id, kind, payload_json, priority, attempt_count
         FROM node_tasks
@@ -2174,140 +2393,163 @@ export class RayLinkStore {
   }
 
   completeNodeTask(hostId, taskId, input = {}) {
-    const task = this.db.prepare(`
-      SELECT id, kind, status, attempt_count, max_attempts, payload_json
-      FROM node_tasks
-      WHERE id = ? AND host_id = ?
-    `).get(taskId, hostId);
-    if (!task) throw domainError("NODE_TASK_NOT_FOUND", "节点任务不存在", 404);
-    const attempt = Number(input.attempt);
-    if (
-      task.status !== "claimed"
-      || !Number.isInteger(attempt)
-      || attempt !== Number(task.attempt_count)
-    ) {
-      return { id: taskId, status: task.status, ignored: true };
-    }
-    const succeeded = input.status === "succeeded";
-    const payload = parseJson(task.payload_json, {});
-    const activationPortOccupied = input.result?.code === "PROTOCOL_PORT_OCCUPIED"
-      && payload.activation?.type;
-    const canRetryActivationPort = activationPortOccupied
-      && Number.isInteger(input.result?.suggestedPort);
-    const retryable = !succeeded
-      && task.kind === "publish-config"
-      && !activationPortOccupied
-      && (Number(task.max_attempts) === 0 || Number(task.attempt_count) < Number(task.max_attempts));
-    const status = succeeded ? "succeeded" : retryable ? "pending" : "failed";
-    const timestamp = nowIso();
-    const retryDelayMs = this.nodeTaskRetryBaseMs * Math.min(
-      16,
-      2 ** Math.max(0, Number(task.attempt_count) - 1)
-    );
-    const retryAt = retryable
-      ? new Date(Date.now() + retryDelayMs).toISOString()
-      : null;
-    this.db.prepare(`
-      UPDATE node_tasks
-      SET status = ?, result_json = ?, finished_at = ?,
-          claimed_at = ?, next_attempt_at = ?
-      WHERE id = ? AND host_id = ? AND status = 'claimed' AND attempt_count = ?
-    `).run(
-      status,
-      JSON.stringify(input),
-      retryable ? null : timestamp,
-      retryable ? null : timestamp,
-      retryAt,
-      taskId,
-      hostId,
-      attempt
-    );
-    this.db.prepare(`
-      UPDATE hosts
-      SET status = ?, runtime_version = COALESCE(?, runtime_version),
-          last_seen_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      succeeded ? "online" : "degraded",
-      input.result?.runtimeVersion
-        ? String(input.result.runtimeVersion).slice(0, 64)
-        : input.runtimeVersion
-          ? String(input.runtimeVersion).slice(0, 64)
-          : null,
-      timestamp,
-      timestamp,
-      hostId
-    );
-    if (succeeded && task.kind === "publish-config") {
-      if (Array.isArray(payload.protocols)) {
-        this.markHostProtocolsApplied(hostId, payload.protocols);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.db.prepare(`
+        SELECT rowid AS sequence, id, kind, status, attempt_count, max_attempts, payload_json
+        FROM node_tasks
+        WHERE id = ? AND host_id = ?
+      `).get(taskId, hostId);
+      if (!task) throw domainError("NODE_TASK_NOT_FOUND", "节点任务不存在", 404);
+      const attempt = Number(input.attempt);
+      if (
+        task.status !== "claimed"
+        || !Number.isInteger(attempt)
+        || attempt !== Number(task.attempt_count)
+      ) {
+        this.db.exec("COMMIT");
+        return { id: taskId, status: task.status, ignored: true };
       }
-      if (payload.activation?.type) {
-        const publicCheck = input.result?.activation?.publicCheck;
-        const persistedPublicCheck = publicCheck
+      const superseded = task.kind === "publish-config" && this.db.prepare(`
+        SELECT 1 FROM node_tasks
+        WHERE host_id = ? AND kind = 'publish-config' AND rowid > ?
+        LIMIT 1
+      `).get(hostId, task.sequence);
+      if (superseded) {
+        const timestamp = nowIso();
+        this.db.prepare(`
+          UPDATE node_tasks
+          SET status = 'failed', result_json = ?, finished_at = ?, next_attempt_at = NULL
+          WHERE id = ? AND host_id = ?
+        `).run(JSON.stringify({ ...input, superseded: true }), timestamp, taskId, hostId);
+        this.db.exec("COMMIT");
+        return { id: taskId, status: "failed", ignored: true, superseded: true };
+      }
+      const succeeded = input.status === "succeeded";
+      const payload = parseJson(task.payload_json, {});
+      const activationPortOccupied = input.result?.code === "PROTOCOL_PORT_OCCUPIED"
+        && payload.activation?.type;
+      const canRetryActivationPort = activationPortOccupied
+        && Number.isInteger(input.result?.suggestedPort);
+      const retryable = !succeeded
+        && task.kind === "publish-config"
+        && !activationPortOccupied
+        && (Number(task.max_attempts) === 0 || Number(task.attempt_count) < Number(task.max_attempts));
+      const status = succeeded ? "succeeded" : retryable ? "pending" : "failed";
+      const timestamp = nowIso();
+      const retryDelayMs = this.nodeTaskRetryBaseMs * Math.min(
+        16,
+        2 ** Math.max(0, Number(task.attempt_count) - 1)
+      );
+      const retryAt = retryable
+        ? new Date(Date.now() + retryDelayMs).toISOString()
+        : null;
+      this.db.prepare(`
+        UPDATE node_tasks
+        SET status = ?, result_json = ?, finished_at = ?,
+            claimed_at = ?, next_attempt_at = ?
+        WHERE id = ? AND host_id = ? AND status = 'claimed' AND attempt_count = ?
+      `).run(
+        status,
+        JSON.stringify(input),
+        retryable ? null : timestamp,
+        retryable ? null : timestamp,
+        retryAt,
+        taskId,
+        hostId,
+        attempt
+      );
+      this.db.prepare(`
+        UPDATE hosts
+        SET status = ?, runtime_version = COALESCE(?, runtime_version),
+            last_seen_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        succeeded ? "online" : "degraded",
+        input.result?.runtimeVersion
+          ? String(input.result.runtimeVersion).slice(0, 64)
+          : input.runtimeVersion
+            ? String(input.runtimeVersion).slice(0, 64)
+            : null,
+        timestamp,
+        timestamp,
+        hostId
+      );
+      if (succeeded && task.kind === "publish-config") {
+        if (Array.isArray(payload.protocols)) {
+          this.markHostProtocolsApplied(hostId, payload.protocols);
+        }
+        if (payload.activation?.type) {
+          const publicCheck = input.result?.activation?.publicCheck;
+          const persistedPublicCheck = publicCheck
+            ? {
+                ...publicCheck,
+                checkedAt: publicCheck.checkedAt || timestamp
+              }
+            : null;
+          this.setProtocolActivation(
+            hostId,
+            payload.activation.type,
+            {
+              state: publicCheck?.reachable === true ? "public-ready" : "port-listening",
+              progress: 100,
+              port: payload.activation.port,
+              network: payload.activation.network,
+              firewallManaged: input.result?.activation?.firewallManaged === true,
+              publicCheck: persistedPublicCheck,
+              updatedAt: timestamp
+            }
+          );
+        }
+      } else if (!succeeded && task.kind === "publish-config" && payload.activation?.type) {
+        if (!retryable && payload.activation.previousProfile) {
+          this.updateHostProtocolConfig(
+            hostId,
+            payload.activation.type,
+            payload.activation.previousProfile
+          );
+        }
+        this.setProtocolActivation(hostId, payload.activation.type, {
+          state: retryable ? "deploying" : "failed",
+          progress: retryable ? 60 : 100,
+          port: payload.activation.port,
+          network: payload.activation.network,
+          errorCode: input.result?.code || null,
+          ...(Number.isInteger(input.result?.suggestedPort)
+            ? { suggestedPort: input.result.suggestedPort }
+            : {}),
+          error: String(
+            [
+              input.result?.error || input.error || "远程节点部署失败",
+              input.result?.rollbackError
+                ? `回滚异常：${input.result.rollbackError}`
+                : ""
+            ].filter(Boolean).join("；")
+          ).slice(0, 500),
+          rolledBack: !retryable && input.result?.rolledBack !== false,
+          updatedAt: timestamp
+        });
+      }
+      this.db.exec("COMMIT");
+      return {
+        id: taskId,
+        status,
+        ...(canRetryActivationPort && status === "failed"
           ? {
-              ...publicCheck,
-              checkedAt: publicCheck.checkedAt || timestamp
+              retryActivation: {
+                hostId,
+                type: payload.activation.type,
+                failedPort: payload.activation.port,
+                suggestedPort: input.result.suggestedPort
+              }
             }
-          : null;
-        this.setProtocolActivation(
-          hostId,
-          payload.activation.type,
-          {
-            state: publicCheck?.reachable === true ? "public-ready" : "port-listening",
-            progress: 100,
-            port: payload.activation.port,
-            network: payload.activation.network,
-            firewallManaged: input.result?.activation?.firewallManaged === true,
-            publicCheck: persistedPublicCheck,
-            updatedAt: timestamp
-          }
-        );
-      }
-    } else if (!succeeded && task.kind === "publish-config" && payload.activation?.type) {
-      if (!retryable && payload.activation.previousProfile) {
-        this.updateHostProtocolConfig(
-          hostId,
-          payload.activation.type,
-          payload.activation.previousProfile
-        );
-      }
-      this.setProtocolActivation(hostId, payload.activation.type, {
-        state: retryable ? "deploying" : "failed",
-        progress: retryable ? 60 : 100,
-        port: payload.activation.port,
-        network: payload.activation.network,
-        errorCode: input.result?.code || null,
-        ...(Number.isInteger(input.result?.suggestedPort)
-          ? { suggestedPort: input.result.suggestedPort }
           : {}),
-        error: String(
-          [
-            input.result?.error || input.error || "远程节点部署失败",
-            input.result?.rollbackError
-              ? `回滚异常：${input.result.rollbackError}`
-              : ""
-          ].filter(Boolean).join("；")
-        ).slice(0, 500),
-        rolledBack: !retryable && input.result?.rolledBack !== false,
-        updatedAt: timestamp
-      });
+        ...(retryAt ? { retryAt } : {})
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    return {
-      id: taskId,
-      status,
-      ...(canRetryActivationPort && status === "failed"
-        ? {
-            retryActivation: {
-              hostId,
-              type: payload.activation.type,
-              failedPort: payload.activation.port,
-              suggestedPort: input.result.suggestedPort
-            }
-          }
-        : {}),
-      ...(retryAt ? { retryAt } : {})
-    };
   }
 
   bootstrap(admin) {
@@ -2493,7 +2735,7 @@ export class RayLinkStore {
 
   runtimeSnapshot(hostId = "local") {
     const host = this.db.prepare(`
-      SELECT id, name, address, region, status, build_tags_json
+      SELECT id, name, address, endpoint_domain AS endpointDomain, kind, region, status, build_tags_json, runtime_version AS runtimeVersion
       FROM hosts
       WHERE id = ?
     `).get(hostId);
@@ -2587,15 +2829,32 @@ export class RayLinkStore {
   }
 
   updateHostProtocolConfig(hostId, type, input) {
-    const next = this.prepareHostProtocolConfig(hostId, type, input);
-    this.db.prepare(`
-      INSERT INTO host_protocols (host_id, type, config_json, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(host_id, type) DO UPDATE SET
-        config_json = excluded.config_json,
-        updated_at = excluded.updated_at
-    `).run(hostId, type, JSON.stringify(next), nowIso());
-    return next;
+    // This can also run during a task-completion rollback; a savepoint keeps
+    // the configuration and evidence atomic within that outer transaction.
+    this.db.exec("SAVEPOINT update_protocol");
+    try {
+      const current = this.listHostProtocolConfigs(hostId).find((profile) => profile.type === type);
+      const next = this.prepareHostProtocolConfig(hostId, type, input);
+      this.db.prepare(`
+        INSERT INTO host_protocols (host_id, type, config_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(host_id, type) DO UPDATE SET
+          config_json = excluded.config_json,
+          updated_at = excluded.updated_at
+      `).run(hostId, type, JSON.stringify(next), nowIso());
+      if (JSON.stringify(current) !== JSON.stringify(next)) {
+        this.db.prepare(`
+          UPDATE protocol_activations
+          SET state_json = json_remove(state_json, '$.publicCheck'), updated_at = ?
+          WHERE host_id = ? AND type = ?
+        `).run(nowIso(), hostId, type);
+      }
+      this.db.exec("RELEASE update_protocol");
+      return next;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO update_protocol; RELEASE update_protocol");
+      throw error;
+    }
   }
 
   createDeployment({

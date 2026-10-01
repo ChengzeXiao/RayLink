@@ -4,4 +4,6 @@ data/sing-box/*.json
 data/sing-box/*.bak
 data/sing-box/*.tmp
 coverage/
+node_modules/
 .env
+.raylink-local/
