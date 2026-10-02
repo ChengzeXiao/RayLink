@@ -3,6 +3,7 @@ import test from 'node:test';
 import { buildProtocolInbounds, buildProtocolClientConfig, defaultProtocolConfigs } from '../server/singbox/protocol-catalog.js';
 import { buildProtocolProbeConfig } from '../server/singbox/protocol-probe.js';
 import { buildSubscriptionArtifact } from '../server/subscriptions/formats.js';
+import { buildProtocolProbeConfig as buildNodeProtocolProbeConfig } from '../web/node/raylink-node.mjs';
 
 for (const mode of ['certificate', 'acme']) {
   test(`managed TUIC ${mode} TLS negotiates the same ALPN in subscriptions and external probes`, () => {
@@ -15,6 +16,8 @@ for (const mode of ['certificate', 'acme']) {
     assert.deepEqual(client.outbounds.find(item => item.type === 'tuic').tls.alpn, ['h3']);
     const probe = buildProtocolProbeConfig({ type: 'tuic', address: 'node.example.com', port: profile.port, serverConfig: { inbounds } });
     assert.deepEqual(probe.outbounds[0].tls.alpn, ['h3']);
+    const nodeProbe = buildNodeProtocolProbeConfig({ activation: { type: 'tuic', address: 'node.example.com', port: profile.port }, configText: JSON.stringify({ inbounds }) });
+    assert.deepEqual(nodeProbe, probe, 'remote Node probes must negotiate the same TLS ALPN as the control plane');
     for (const format of ['mihomo', 'egern', 'egern-profile']) {
       assert.match(buildSubscriptionArtifact({ format, singBoxConfig: client }).body, /alpn:\n\s+- "h3"/);
     }

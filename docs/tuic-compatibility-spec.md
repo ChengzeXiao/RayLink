@@ -8,7 +8,7 @@
 
 ## 验收要求
 
-1. RayLink 管理的 TUIC 服务端与生成客户端统一使用 `tls.alpn: ["h3"]`，覆盖手动证书及 ACME；公网探测沿用服务端 ALPN。
+1. RayLink 管理的 TUIC 服务端与生成客户端统一使用 `tls.alpn: ["h3"]`，覆盖手动证书及 ACME；本机及远程 RayLink Node 的协议探测均沿用服务端 ALPN。远端修复发布为 Node 0.9.1，保留 0.9.0 的心跳、维护及滚动升级能力。
 2. sing-box、Mihomo、Egern 和 Egern Profile 订阅保持相同 ALPN、凭据、SNI 和端口，继续验证生产证书；格式转换器不替外部导入配置凭空添加 ALPN。
 3. 真实 Mihomo 与 sing-box 客户端使用生成配置经 TUIC 完整传输测试内容。去掉服务端 ALPN 的负向控制必须复现握手失败，排除 DIRECT 绕行。CI 使用批准的 sing-box 1.14.2 和校验 SHA-256 的固定 Mihomo 版本。
 4. 新版本明确提醒更新 TUIC 订阅：旧 sing-box 空 ALPN 配置不能直接沿用。升级发布运行配置可能造成短暂重连；保留用户、凭据、额度和自然月历史，不再次清零。

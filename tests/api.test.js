@@ -1162,6 +1162,50 @@ test("old Nodes and non-owner administrators cannot be queued for unsupported so
   }
 });
 
+for (const agentVersion of ["0.9.0", "0.9.1"]) {
+  test(`Node ${agentVersion} retains heartbeat, maintenance and Runtime upgrade support during a rolling Node upgrade`, async (t) => {
+    const f = await startTestApp({ seedDemoData: false, installer: {
+      ...createTestInstaller(), checkForUpdates: async () => ({ compatible: true, latestVersion: "1.14.2", approvedVersion: "1.14.2" })
+    } });
+    t.after(() => f.close());
+    const cookie = await login(f.baseUrl);
+    const created = await (await api(f.baseUrl, cookie, "/api/hosts", { method: "POST", body: JSON.stringify({ name: "Rolling Node", address: "rolling.example.com", region: "test" }) })).json();
+    const enrolledResponse = await fetch(`${f.baseUrl}/api/node/enroll`, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: created.enrollmentToken, agentVersion, platform: "linux", runtimeVersion: "1.13.14", buildTags: ["with_v2ray_api"] }) });
+    assert.equal(enrolledResponse.status, 201);
+    const credential = await enrolledResponse.json();
+    const headers = { authorization: `Bearer ${credential.nodeSecret}`, "x-raylink-host-id": credential.hostId, "content-type": "application/json" };
+    assert.equal((await fetch(`${f.baseUrl}/api/node/heartbeat`, { method: "POST", headers,
+      body: JSON.stringify({ agentVersion, runtimeVersion: "1.13.14", telemetry: { serviceStatus: "running" } }) })).status, 200);
+    for (const [path, expectedKind] of [["bbr", "configure-bbr"], ["runtime-upgrade", "upgrade-runtime"]]) {
+      assert.equal((await api(f.baseUrl, cookie, `/api/hosts/${credential.hostId}/${path}`, { method: "POST" })).status, 202);
+      const claimed = await fetch(`${f.baseUrl}/api/node/tasks/next`, { headers });
+      assert.equal(claimed.status, 200);
+      const task = await claimed.json();
+      assert.equal(task.kind, expectedKind);
+      if (expectedKind === "upgrade-runtime") assert.equal(task.payload.targetVersion, "1.14.2");
+      assert.equal((await fetch(`${f.baseUrl}/api/node/tasks/${task.id}/complete`, { method: "POST", headers,
+        body: JSON.stringify({ attempt: task.attempt, status: "succeeded", result: expectedKind === "upgrade-runtime" ? { runtimeVersion: "1.14.2" } : {} }) })).status, 200);
+    }
+    const bootstrap = await (await api(f.baseUrl, cookie, "/api/bootstrap")).json();
+    const host = bootstrap.hosts.find(entry => entry.id === credential.hostId);
+    assert.equal(host.nodeUpgrade.availableVersion, "0.9.1");
+    assert.equal(host.nodeUpgrade.supported, true);
+    const upgrade = await api(f.baseUrl, cookie, `/api/hosts/${credential.hostId}/node-upgrade`, { method: "POST" });
+    if (agentVersion === "0.9.0") {
+      assert.equal(upgrade.status, 202);
+      assert.equal((await upgrade.json()).targetVersion, "0.9.1");
+      const task = await (await fetch(`${f.baseUrl}/api/node/tasks/next`, { headers })).json();
+      assert.equal(task.kind, "upgrade-node");
+      assert.equal(task.payload.targetVersion, "0.9.1");
+      assert.match(task.payload.scriptSha256, /^[a-f0-9]{64}$/);
+    } else {
+      assert.equal(upgrade.status, 409);
+      assert.equal((await upgrade.json()).error.code, "NODE_ALREADY_CURRENT");
+    }
+  });
+}
+
 test("a durable system update blocks Runtime changes after the request that scheduled it has finished", async (t) => {
   const f = await startTestApp({
     seedDemoData: false,
@@ -3340,7 +3384,7 @@ test("control plane serves the RayLink web application on the same origin", asyn
   assert.match(nodeRuntimeResponse.headers.get("content-type"), /javascript/);
   const nodeRuntime = await nodeRuntimeResponse.text();
   assert.match(nodeRuntime, /class RayLinkNode/);
-  assert.match(nodeRuntime, /AGENT_VERSION = "0\.9\.0"/);
+  assert.match(nodeRuntime, /AGENT_VERSION = "0\.9\.1"/);
   assert.match(nodeRuntime, /upgrade-runtime/);
 
   const portalResponse = await fetch(`${testApp.baseUrl}/portal/`);
