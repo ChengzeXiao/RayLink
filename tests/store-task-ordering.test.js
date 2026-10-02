@@ -40,3 +40,42 @@ test("expired lease of an unreported older task cannot replay after its replacem
   assert.equal(store.completeNodeTask(host.id, oldTask.id, { status: "succeeded", attempt: oldTask.attempt }).ignored, true);
   assert.deepEqual(store.latestAppliedNodeConfig(host.id), { version: "new" });
 });
+
+for (const claimed of [false, true]) test(`replacement inherits unlimited monthly retry from a ${claimed ? "claimed" : "pending"} normal task`, async t => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-monthly-retry-"));
+  const store = new RayLinkStore({ dbPath: join(directory, "store.db"), adminUsername: "admin",
+    adminPassword: "monthly-task-test", seedDemoData: false, nodeTaskRetryBaseMs: 0 });
+  t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+  const { host, enrollmentToken } = store.createRemoteHost({ name: "Task Host", address: "192.0.2.1", region: "hk" });
+  store.enrollNode(enrollmentToken);
+  store.queueNodeTask(host.id, "publish-config", { version: "monthly", configText: "{}" }, { maxAttempts: 0 });
+  const old = claimed ? store.nextNodeTask(host.id) : null;
+  const replacement = store.queueNodeTask(host.id, "publish-config", { version: "latest", configText: '{"version":"latest"}' });
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    const task = store.nextNodeTask(host.id);
+    assert.equal(task?.id, replacement);
+    assert.equal(task.priority, "normal");
+    assert.equal(store.completeNodeTask(host.id, task.id, { status: "failed", attempt: task.attempt, error: "offline" }).status, "pending");
+  }
+  const final = store.nextNodeTask(host.id);
+  store.completeNodeTask(host.id, final.id, { status: "succeeded", attempt: final.attempt });
+  assert.equal(store.nextNodeTask(host.id), null);
+  if (old) assert.equal(store.completeNodeTask(host.id, old.id, { status: "succeeded", attempt: old.attempt }).ignored, true);
+  assert.equal(store.latestAppliedNodeConfig(host.id).version, "latest");
+});
+
+test("ordinary publication without a predecessor retains the finite retry limit", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-finite-retry-"));
+  const store = new RayLinkStore({ dbPath: join(directory, "store.db"), adminUsername: "admin",
+    adminPassword: "monthly-task-test", seedDemoData: false, nodeTaskRetryBaseMs: 0 });
+  t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
+  const { host, enrollmentToken } = store.createRemoteHost({ name: "Task Host", address: "192.0.2.1", region: "hk" });
+  store.enrollNode(enrollmentToken);
+  store.queueNodeTask(host.id, "publish-config", { version: "ordinary", configText: "{}" });
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const task = store.nextNodeTask(host.id);
+    assert.ok(task);
+    assert.equal(store.completeNodeTask(host.id, task.id, { status: "failed", attempt: task.attempt }).status, attempt < 5 ? "pending" : "failed");
+  }
+  assert.equal(store.nextNodeTask(host.id), null);
+});

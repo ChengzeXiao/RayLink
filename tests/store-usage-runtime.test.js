@@ -104,8 +104,9 @@ for (const retainLedger of [true, false]) test(`legacy migration ${retainLedger 
 test("migration never bills a partially retained ledger as a complete cumulative watermark", async (t) => {
   const { DatabaseSync } = await import("node:sqlite");
   const directory = await mkdtemp(join(tmpdir(), "raylink-pruned-epochs-"));
-  const now = Date.now();
-  let clock = now - 40 * 86_400_000;
+  // Keep this checkpoint-migration scenario inside one quota period.
+  const now = Date.parse("2026-10-20T12:00:00.000Z");
+  let clock = now - 10 * 86_400_000;
   const options = { dbPath: join(directory, "store.db"), adminUsername: "admin", adminPassword: "test-password-123", seedDemoData: false, clock: () => new Date(clock) };
   let store = new RayLinkStore(options);
   t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
@@ -116,7 +117,7 @@ test("migration never bills a partially retained ledger as a complete cumulative
   sample("sample-later-a", "runtime-a", 120);
   sample("sample-first-b", "runtime-b", 10);
   clock = now;
-  assert.equal(store.performOperationalMaintenance({ now: new Date(clock).toISOString() }).history.usageSamples, 1);
+  assert.equal(store.performOperationalMaintenance({ now: new Date(clock).toISOString(), usageDetailRetentionDays: 7 }).history.usageSamples, 1);
   store.close();
   const legacy = new DatabaseSync(options.dbPath);
   legacy.exec(`

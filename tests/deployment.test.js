@@ -509,3 +509,109 @@ test("publication migrates ACME only after the Host reports a 1.14 Runtime", asy
     assert.equal(Boolean(tls.acme), version === "1.13.14");
   }
 });
+
+async function monthlyDeploymentFixture(t, nodeTaskRetryBaseMs = 0) {
+  const dataDir = await mkdtemp(join(tmpdir(), "raylink-monthly-deploy-"));
+  const store = new RayLinkStore({ dbPath: join(dataDir, "store.db"), adminUsername: "admin",
+    adminPassword: "monthly-deployment-test", seedDemoData: false, nodeTaskRetryBaseMs });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const { host, enrollmentToken } = store.createRemoteHost({ name: "Monthly Host", address: "192.0.2.5", region: "hk" });
+  store.enrollNode(enrollmentToken, { agentVersion: "0.9.0", runtimeVersion: "1.14.2" });
+  store.updateHostProtocolConfig(host.id, "shadowsocks", { enabled: true });
+  const manager = new RuntimeManager({ store, adapter: new RecordingRuntimeAdapter() });
+  return { store, host, manager };
+}
+
+test("current monthly publication remains pending until the remote receipt and survives more than five failures", async t => {
+  const { store, host, manager } = await monthlyDeploymentFixture(t);
+  await manager.publish();
+  const initial = await manager.reconcile(null, { retryUntilApplied: true });
+  assert.equal(initial.changed, false);
+  assert.equal(initial.remotePending, 1);
+  assert.equal(initial.remoteQueued, 0);
+  let id;
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    const task = store.nextNodeTask(host.id);
+    id ||= task.id;
+    assert.equal(task.id, id);
+    assert.equal(task.attempt, attempt);
+    const claimed = await manager.reconcile(null, { retryUntilApplied: true });
+    assert.equal(claimed.remotePending, 1);
+    assert.equal(claimed.remoteQueued, 0);
+    assert.equal(store.completeNodeTask(host.id, task.id, { status: "failed", attempt: task.attempt }).status, "pending");
+  }
+  const final = store.nextNodeTask(host.id);
+  store.completeNodeTask(host.id, final.id, { status: "succeeded", attempt: final.attempt });
+  assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remotePending, 0);
+  assert.equal(store.nextNodeTask(host.id), null);
+  assert.equal(store.listDeployments().length, 1, "retrying a remote must not republish the local Runtime");
+});
+
+test("a terminally failed remote task is recovered without republishing the current local configuration", async t => {
+  const { store, host, manager } = await monthlyDeploymentFixture(t);
+  const deployment = await manager.publish();
+  let oldId;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const task = store.nextNodeTask(host.id);
+    oldId = task.id;
+    store.completeNodeTask(host.id, task.id, { status: "failed", attempt: task.attempt });
+  }
+  assert.equal(store.nextNodeTask(host.id), null);
+  const recovered = await manager.reconcile(null, { retryUntilApplied: true });
+  assert.equal(recovered.changed, false);
+  assert.equal(recovered.remotePending, 1);
+  assert.equal(recovered.remoteQueued, 1);
+  const replacement = store.nextNodeTask(host.id);
+  assert.notEqual(replacement.id, oldId);
+  assert.equal(replacement.payload.version, deployment.version);
+  store.completeNodeTask(host.id, replacement.id, { status: "succeeded", attempt: replacement.attempt });
+  const current = await manager.reconcile(null, { retryUntilApplied: true });
+  assert.equal(current.remotePending, 0);
+  assert.equal(current.remoteQueued, 0);
+  assert.equal(store.listDeployments().length, 1);
+});
+
+test("monthly synchronization preserves matching task leases and scheduled retry backoff", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { store, host, manager } = await monthlyDeploymentFixture(t, 30_000);
+  await manager.publish();
+  const initial = store.nextNodeTask(host.id);
+  store.completeNodeTask(host.id, initial.id, { status: "failed", attempt: initial.attempt });
+  for (let poll = 0; poll < 3; poll++) {
+    const waiting = await manager.reconcile(null, { retryUntilApplied: true });
+    assert.equal(waiting.remoteQueued, 0);
+    assert.equal(waiting.remotePending, 1);
+    assert.equal(store.nextNodeTask(host.id), null);
+  }
+  t.mock.timers.tick(29_999);
+  assert.equal(store.nextNodeTask(host.id), null);
+  t.mock.timers.tick(1);
+  const retried = store.nextNodeTask(host.id);
+  assert.equal(retried.id, initial.id);
+  assert.equal(retried.attempt, 2);
+  assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remoteQueued, 0);
+  assert.equal(store.nextNodeTask(host.id), null, "an in-flight matching task keeps its lease");
+  store.completeNodeTask(host.id, retried.id, { status: "succeeded", attempt: retried.attempt });
+  assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remotePending, 0);
+});
+
+test("a monthly entitlement change waits for the new remote config and ignores unenrolled Hosts", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { store, host, manager } = await monthlyDeploymentFixture(t);
+  store.createRemoteHost({ name: "Not yet enrolled", address: "192.0.2.6", region: "hk" });
+  await manager.publish();
+  const before = store.nextNodeTask(host.id);
+  store.completeNodeTask(host.id, before.id, { status: "succeeded", attempt: before.attempt });
+  assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remotePending, 0);
+  const user = store.createUser({ name: "Restored User", email: "monthly-restored@example.test", quotaGb: 10,
+    nodeScope: ["all"], portalStatus: "active", expiresAt: "2099-12-31" });
+  const changed = await manager.reconcile(null, { retryUntilApplied: true });
+  assert.equal(changed.changed, true);
+  assert.equal(changed.remotePending, 1);
+  assert.equal(changed.remoteQueued, 1);
+  const task = store.nextNodeTask(host.id);
+  assert.ok(JSON.parse(task.payload.configText).inbounds.some(inbound => inbound.users?.some(entry => entry.name === user.email)));
+  store.completeNodeTask(host.id, task.id, { status: "succeeded", attempt: task.attempt });
+  assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remotePending, 0);
+  assert.equal(store.listDeployments().length, 2);
+});

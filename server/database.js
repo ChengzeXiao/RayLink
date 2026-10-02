@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { isIP } from "node:net";
+import { isDeepStrictEqual } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -16,6 +17,7 @@ import {
   verifyPassword
 } from "./security.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
+import { MonthlyUsagePeriods, monthlyUsagePeriod } from "./usage/monthly-periods.js";
 import {
   DEFAULT_ROUTING_POLICY,
   normalizeRoutingPolicy
@@ -338,8 +340,27 @@ export class RayLinkStore {
     this.subscriptionEncryptionKey = subscriptionEncryptionKey || adminPassword;
     this.clock = clock;
     this.migrate();
+    this.monthlyUsage = new MonthlyUsagePeriods(this.db, this.clock);
+    this.rolloverUsagePeriods();
     this.seed({ adminUsername, adminPassword, initialHostAddress, initialListenPort, seedDemoData });
     this.initializeSetup({ setupRequired, setupTokenHash, setupTokenExpiresAt });
+  }
+
+  rolloverUsagePeriods() { return this.monthlyUsage.rollover(); }
+
+  usagePeriodStatus() { return this.monthlyUsage.status(); }
+
+  acknowledgeUsagePeriodSync(periodKey) { return this.monthlyUsage.acknowledge(periodKey); }
+
+  userUsageHistory(userId, options = {}) {
+    const user = this.db.prepare("SELECT id,used_bytes,quota_gb FROM users WHERE id=?").get(userId);
+    if (!user) throw domainError("USER_NOT_FOUND", "用户不存在", 404);
+    return this.monthlyUsage.history(user, options);
+  }
+
+  userUsagePeriod(row) {
+    const { key, timeZone, startsAt, resetsAt } = this.usagePeriodStatus();
+    return { key, timeZone, startsAt, resetsAt, lastResetAt: row.usage_last_reset_at || null };
   }
 
   migrate() {
@@ -1466,7 +1487,7 @@ export class RayLinkStore {
   portalProfile(userId) {
     const row = this.db.prepare(`
       SELECT users.id, users.name, users.initials, users.email, users.portal_status,
-             users.state, users.used_gb, users.quota_gb,
+             users.state, users.used_gb, users.quota_gb, users.usage_last_reset_at,
              users.node_scope_json, users.expires_at,
              users.subscription_public_id, users.subscription_secret_hash,
              users.subscription_secret_encrypted
@@ -1475,7 +1496,7 @@ export class RayLinkStore {
     `).get(userId);
     if (!row) return null;
     return {
-      user: userFromRow(row),
+      user: { ...userFromRow(row), usagePeriod: this.userUsagePeriod(row) },
       entitlement: {
         quotaGb: row.quota_gb,
         nodeScope: parseJson(row.node_scope_json, [])
@@ -1600,12 +1621,12 @@ export class RayLinkStore {
   listUsers() {
     return this.db.prepare(`
       SELECT id, name, initials, email, portal_status, state, used_gb, used_bytes, quota_gb,
-             node_scope_json, expires_at,
+             node_scope_json, expires_at, usage_last_reset_at,
              subscription_public_id, subscription_secret_hash,
              subscription_secret_encrypted
       FROM users
       ORDER BY created_at, name
-    `).all().map(userFromRow);
+    `).all().map(row => ({ ...userFromRow(row), usagePeriod: this.userUsagePeriod(row) }));
   }
 
   listHosts() {
@@ -1697,6 +1718,9 @@ export class RayLinkStore {
     if (sampleAgeMs < -MAX_USAGE_SAMPLE_FUTURE_SKEW_MS) {
       throw domainError("FUTURE_USAGE_SAMPLE", "流量样本时间超前超过 5 分钟，已拒绝");
     }
+    if (monthlyUsagePeriod(observedAt).key > monthlyUsagePeriod(receivedAtDate).key) {
+      throw domainError("FUTURE_USAGE_PERIOD", "流量样本属于尚未开始的月份，已拒绝");
+    }
     const normalized = input.users.map((usage) => {
       const userName = String(usage.name || "").trim();
       const uplinkBytes = Number(usage.uplinkBytes);
@@ -1714,6 +1738,7 @@ export class RayLinkStore {
       return { userName, uplinkBytes, downlinkBytes };
     });
     const receivedAt = receivedAtDate.toISOString();
+    this.rolloverUsagePeriods();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const inserted = this.db.prepare(`
@@ -1757,12 +1782,8 @@ export class RayLinkStore {
           || (!checkpoint && migrationTime && observedAt.getTime() <= Date.parse(migrationTime));
         const previousUplink = Number(checkpoint?.uplink_bytes || 0);
         const previousDownlink = Number(checkpoint?.downlink_bytes || 0);
-        const uplinkDelta = baselineOnly ? 0 : sameRuntime
-          ? Math.max(0, usage.uplinkBytes - previousUplink)
-          : usage.uplinkBytes;
-        const downlinkDelta = baselineOnly ? 0 : sameRuntime
-          ? Math.max(0, usage.downlinkBytes - previousDownlink)
-          : usage.downlinkBytes;
+        const periodUsage = this.monthlyUsage.counterDelta({ hostId, runtimeInstanceId, usage, observedAt, checkpoint, baselineOnly });
+        const { uplinkDelta, downlinkDelta } = periodUsage;
         const checkpointUplink = sameRuntime && !baselineOnly
           ? Math.max(previousUplink, usage.uplinkBytes)
           : usage.uplinkBytes;
@@ -1817,19 +1838,18 @@ export class RayLinkStore {
           downlinkDelta,
           receivedAt
         );
-        const beforeBytes = Number(user.used_bytes || 0);
-        const afterBytes = beforeBytes + delta;
-        if (!Number.isSafeInteger(afterBytes)) {
-          throw domainError("USAGE_COUNTER_OVERFLOW", "用户累计流量超过安全计量范围");
-        }
-        this.db.prepare(`
-          UPDATE users
-          SET used_bytes = ?, used_gb = ?, updated_at = ?
-          WHERE id = ?
-        `).run(afterBytes, afterBytes / GIBIBYTE, receivedAt, user.id);
-        const quotaBytes = Number(user.quota_gb) * GIBIBYTE;
-        if (beforeBytes < quotaBytes && afterBytes >= quotaBytes) {
-          quotaExceededUserIds.push(user.id);
+        if (periodUsage.current) {
+          const beforeBytes = Number(user.used_bytes || 0);
+          const afterBytes = beforeBytes + delta;
+          if (!Number.isSafeInteger(afterBytes)) {
+            throw domainError("USAGE_COUNTER_OVERFLOW", "用户累计流量超过安全计量范围");
+          }
+          this.db.prepare(`UPDATE users SET used_bytes=?,used_gb=?,updated_at=? WHERE id=?`)
+            .run(afterBytes, afterBytes / GIBIBYTE, receivedAt, user.id);
+          const quotaBytes = Number(user.quota_gb) * GIBIBYTE;
+          if (beforeBytes < quotaBytes && afterBytes >= quotaBytes) quotaExceededUserIds.push(user.id);
+        } else {
+          this.monthlyUsage.addHistoricalUsage(user.id, periodUsage.period, delta, receivedAt);
         }
         appliedBytes += delta;
       }
@@ -2290,10 +2310,10 @@ export class RayLinkStore {
           SELECT MAX(priority) AS priority,
                  MIN(CASE WHEN max_attempts = 0 THEN 0 ELSE max_attempts END) AS max_attempts
           FROM node_tasks
-          WHERE host_id = ? AND kind = 'publish-config' AND status = 'pending'
+          WHERE host_id = ? AND kind = 'publish-config' AND status IN ('pending', 'claimed')
         `).get(hostId);
         priority = Math.max(priority, Number(superseded?.priority || 0));
-        if (Number(superseded?.max_attempts) === 0 && Number(superseded?.priority) >= 100) {
+        if (superseded?.max_attempts === 0) {
           maxAttempts = 0;
         }
         this.db.prepare(`
@@ -2325,12 +2345,29 @@ export class RayLinkStore {
       SELECT payload_json
       FROM node_tasks
       WHERE host_id = ? AND kind = 'publish-config' AND status = 'succeeded'
-      ORDER BY finished_at DESC
+      ORDER BY finished_at DESC, rowid DESC
       LIMIT 1
     `).get(hostId);
     const payload = parseJson(row?.payload_json, {});
     if (!payload.configText) return null;
     return parseJson(payload.configText, null);
+  }
+
+  ensurePendingNodeConfigRetry(hostId, configText) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.db.prepare(`SELECT id,status,payload_json FROM node_tasks
+        WHERE host_id=? AND kind='publish-config' ORDER BY rowid DESC LIMIT 1`).get(hostId);
+      const desired = parseJson(configText, null);
+      const pending = task && ["pending", "claimed"].includes(task.status)
+        && desired !== null
+        && isDeepStrictEqual(parseJson(parseJson(task.payload_json, {}).configText, null), desired);
+      // Preserve the existing attempt, lease and backoff. Polling must never
+      // replace a matching task just to extend its retry budget.
+      if (pending) this.db.prepare("UPDATE node_tasks SET max_attempts=0 WHERE id=?").run(task.id);
+      this.db.exec("COMMIT");
+      return Boolean(pending);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   nextNodeTask(hostId) {
@@ -2561,6 +2598,7 @@ export class RayLinkStore {
   }
 
   createUser(input) {
+    this.rolloverUsagePeriods();
     const name = String(input.name || "").trim();
     const email = String(input.email || "").trim().toLowerCase();
     const entitlement = {
@@ -2634,15 +2672,16 @@ export class RayLinkStore {
   getUser(id) {
     const row = this.db.prepare(`
       SELECT id, name, initials, email, portal_status, state, used_gb, used_bytes, quota_gb,
-             node_scope_json, expires_at,
+             node_scope_json, expires_at, usage_last_reset_at,
              subscription_public_id, subscription_secret_hash,
              subscription_secret_encrypted
       FROM users WHERE id = ?
     `).get(id);
-    return row ? userFromRow(row) : null;
+    return row ? { ...userFromRow(row), usagePeriod: this.userUsagePeriod(row) } : null;
   }
 
   updateUser(id, input) {
+    this.rolloverUsagePeriods();
     const current = this.getUser(id);
     if (!current) throw domainError("USER_NOT_FOUND", "用户不存在", 404);
     const next = {
@@ -2672,14 +2711,25 @@ export class RayLinkStore {
     if (!Number.isFinite(next.usedGb) || next.usedGb < 0) {
       throw domainError("INVALID_USAGE", "已用流量必须是大于或等于 0 的数值");
     }
+    if (!Number.isSafeInteger(Math.round(next.usedGb * GIBIBYTE))) {
+      throw domainError("INVALID_USAGE", "已用流量超过安全计量范围");
+    }
     if (input.password !== undefined) validateUserPassword(input.password);
     const initials = next.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || current.initials;
+    this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (input.usedGb !== undefined && input.usagePeriodKey !== undefined
+        && input.usagePeriodKey !== this.usagePeriodStatus().key) {
+        throw domainError("USAGE_PERIOD_CHANGED", "流量周期已变更，请刷新后重新调整本月用量", 409);
+      }
+      const beforeBytes = Number(this.db.prepare("SELECT used_bytes FROM users WHERE id=?").get(id).used_bytes);
       this.db.prepare(`
         UPDATE users
         SET name = ?, initials = ?, email = ?, quota_gb = ?,
             node_scope_json = ?, expires_at = ?,
-            state = ?, portal_status = ?, used_gb = ?, used_bytes = ?, updated_at = ?
+            state = ?, portal_status = ?,
+            used_gb = CASE WHEN ? THEN ? ELSE used_gb END,
+            used_bytes = CASE WHEN ? THEN ? ELSE used_bytes END, updated_at = ?
         WHERE id = ?
       `).run(
         next.name,
@@ -2690,15 +2740,20 @@ export class RayLinkStore {
         next.expiresAt,
         next.state,
         next.portalStatus,
+        Number(input.usedGb !== undefined),
         next.usedGb,
+        Number(input.usedGb !== undefined),
         Math.round(next.usedGb * GIBIBYTE),
         nowIso(),
         id
       );
+      if (input.usedGb !== undefined) this.monthlyUsage.recordAdjustment(id, beforeBytes, Math.round(next.usedGb * GIBIBYTE));
       if (input.password !== undefined) {
         this.resetUserPassword(id, input.password);
       }
+      this.db.exec("COMMIT");
     } catch (error) {
+      this.db.exec("ROLLBACK");
       if (String(error.message).includes("UNIQUE")) {
         throw domainError("USER_EXISTS", "邮箱已经存在", 409);
       }
@@ -2712,7 +2767,7 @@ export class RayLinkStore {
       throw domainError("USER_NOT_FOUND", "用户不存在", 404);
     }
     const nextPassword = validateUserPassword(password);
-    this.db.exec("BEGIN IMMEDIATE");
+    this.db.exec("SAVEPOINT user_password_reset");
     try {
       this.db.prepare(`
         UPDATE users
@@ -2722,13 +2777,13 @@ export class RayLinkStore {
       const sessions = this.db.prepare(
         "DELETE FROM user_sessions WHERE user_id = ?"
       ).run(id);
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE user_password_reset");
       return {
         passwordReset: true,
         sessionsRevoked: Number(sessions.changes)
       };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.db.exec("ROLLBACK TO user_password_reset; RELEASE user_password_reset");
       throw error;
     }
   }

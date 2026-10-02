@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.33&amp;rev=runtime-automation-bbr-2">
+  <link rel="stylesheet" href="./styles.css?v=0.2.34&amp;rev=monthly-usage-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -241,6 +241,7 @@
               <span><i class="good-dot"></i><span id="user-policy-status">尚未发布账号策略</span></span>
               <span id="user-policy-meta">用户权益修改后需要重新发布配置</span>
             </div>
+            <p class="usage-period-note" id="user-usage-period">正在读取流量周期…</p>
             <div class="toolbar">
               <label class="search-field"><svg><use href="#i-search"/></svg><input id="user-search" type="search" placeholder="搜索姓名、邮箱或节点范围"></label>
               <div class="filter-group" role="group" aria-label="用户状态筛选">
@@ -253,7 +254,7 @@
             <section class="table-panel">
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>用户</th><th>状态</th><th>已用 / 配额</th><th>节点 / 订阅</th><th>到期时间</th><th>订阅</th><th><span class="sr-only">操作</span></th></tr></thead>
+                  <thead><tr><th>用户</th><th>状态</th><th id="user-usage-heading">已用流量 / 流量额度</th><th>节点 / 订阅</th><th>到期时间</th><th>订阅</th><th><span class="sr-only">操作</span></th></tr></thead>
                   <tbody id="user-table-body"></tbody>
                 </table>
               </div>
@@ -539,11 +540,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.33"></script>
-  <script src="./subscription-session.js?v=0.2.33"></script>
-  <script src="./subscription-client-url.js?v=0.2.33"></script>
-  <script src="./subscription-quick.js?v=0.2.33"></script>
-  <script src="./protocol-health.js?v=0.2.33"></script>
-  <script src="./app.js?v=0.2.33&amp;rev=runtime-automation-bbr-2"></script>
+  <script src="./subscription-qr.js?v=0.2.34"></script>
+  <script src="./subscription-session.js?v=0.2.34"></script>
+  <script src="./subscription-client-url.js?v=0.2.34"></script>
+  <script src="./subscription-quick.js?v=0.2.34"></script>
+  <script src="./protocol-health.js?v=0.2.34"></script>
+  <script src="./app.js?v=0.2.34&amp;rev=monthly-usage-1"></script>
 </body>
 </html>

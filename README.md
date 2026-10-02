@@ -29,7 +29,7 @@ RayLink 面向自建服务和团队内部网络管理：管理员在 Web 控制�
 | 安全发布 | `sing-box check`、原子替换、版本快照、失败恢复和历史回滚 |
 | 真实流量计量 | 使用 sing-box 用户级统计，不以 Host 网卡总流量估算用户配额 |
 | Host 可观测性 | 汇总 CPU、内存、上下行速率、服务状态、心跳和 Runtime 版本 |
-| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 52 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
+| Agent 管理 | [HTTP MCP Server](docs/mcp-server.md) 提供 53 个管理工具，支持独立令牌、权限限制、审计和写入重试 |
 | 自动接入 VPS | [SSH 一键接入](docs/ssh-node-provisioning.md)：填写 IP 和登录凭据，自动安装、注册、配置协议、发布并验证订阅 |
 | 在线升级 | 发现已验证的 sing-box 新版本后提示升级，失败自动恢复旧二进制和服务状态 |
 
@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.33/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -272,7 +272,7 @@ npm run check:production
 当前代码已覆盖单控制面、多 Host、用户客户端配置、安全发布、真实流量计量，以及由 Caddy 管理的首次初始化与域名配置。以下功能仍在后续范围：
 
 - TLS 证书到期告警与更多 DNS 提供商 API 集成
-- 财务账单、周期重置、退款和人工调账
+- 财务账单、退款和财务级人工调账
 - 多 Host 灰度升级与维护窗口
 - 同一种协议的多个独立 inbound 实例
 - 完整 outbound、endpoint、DNS 和路由规则图形化编辑器
@@ -295,8 +295,10 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
-### v0.2.33 / sing-box 1.14.2 迁移
+### v0.2.34 / 自然月额度
 
-当前源码的发布目标为 v0.2.33；上面的 Release 下载命令需等对应版本发布后使用。
+流量额度按北京时间自然月重置。首次升级先归档旧累计用量并清零；每月 1 日 00:00 开始新额度。管理界面、用户中心和 MCP 显示当前周期及下次重置；MCP 支持月度用量历史。详见[月度流量规则](docs/monthly-usage.md)。
+
+当前源码的发布目标为 v0.2.34；上面的 Release 下载命令需等对应版本发布后使用。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。
