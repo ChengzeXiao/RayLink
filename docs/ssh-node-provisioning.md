@@ -17,6 +17,8 @@
 
 默认先启用无需证书的 Shadowsocks，再根据域名设置继承本机已启用、可自动部署的公网协议。IP-only 或未启用 DNS 自动化时保留 Shadowsocks；需要域名的协议记录为 `DOMAIN_REQUIRED`，高级/私有协议记录为 `MANUAL_CONFIGURATION_REQUIRED`，结果列出跳过项。继承协议类型、传输参数、协议选项及首选端口，遇到端口冲突自动避让。用户凭据、权益、智能分流规则继续由控制面统一管理。
 
+这不是仅安装 Shadowsocks 的流程：主控已启用 VMess、VLESS、Trojan、AnyTLS、Hysteria、TUIC、Hysteria2 时，具备独立域名、证书邮箱及对应 Runtime 能力的新节点会依次配置这些协议。TCP 与 UDP 入口分别下发防火墙规则，ACME HTTP-01 另需 TCP80；完成标准包含每个协议的应用回执、公网测量及有效用户订阅输出。续接任务保留已经配置的节点端口和传输选项，不因主控模板后来修改而重新覆盖。未启用协议不会自动继承，缺少证书条件不会静默降为不安全的明文入口。
+
 在 **系统 → 证书** 配置一次：
 
 1. DNS 服务商选择 Cloudflare，填写 Zone ID、节点基础域名（如 `nodes.example.com`）、仅限目标 Zone 的 **Zone Read + DNS Edit** API Token，勾选自动分配域名；Token 留空保留已保存值。

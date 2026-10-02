@@ -953,16 +953,16 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.doesNotMatch(releaseWorkflow, /roms\//);
   assert.match(productionWorkflow, /build-runtime-artifact\.sh/);
   assert.match(productionWorkflow, /needs:\s+runtime/);
-  assert.match(productionWorkflow, /SING_BOX_BIN=.*npm run check:production/);
+  assert.match(productionWorkflow.replace(/\\\r?\n\s*/g, " "), /SING_BOX_BIN=.*MIHOMO_BIN=.*npm run check:production/);
   assert.doesNotMatch(productionWorkflow, /env:\s*\n\s+SING_BOX_BIN:/);
   assert.match(releaseWorkflow, /runner:\s+ubuntu-24\.04-arm/);
   assert.match(releaseWorkflow, /arch:\s+amd64/);
   assert.match(releaseWorkflow, /arch:\s+arm64/);
   assert.match(releaseWorkflow, /attest-build-provenance@v2/);
   assert.match(releaseWorkflow, /needs:\s+verify/);
-  assert.match(releaseWorkflow, /SING_BOX_BIN=.*npm run check:production/);
+  assert.match(releaseWorkflow.replace(/\\\r?\n\s*/g, " "), /SING_BOX_BIN=.*MIHOMO_BIN=.*npm run check:production/);
   const { scripts } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  for (const name of ["check", "check:protocols", "check:traffic", "check:dns", "check:routing", "check:soak"]) {
+  for (const name of ["check", "check:protocols", "check:traffic", "check:tuic", "check:dns", "check:routing", "check:soak"]) {
     assert.ok(scripts["check:production"].split(" && ").includes(`npm run ${name}`), `${name} must gate releases`);
   }
   assert.match(releaseWorkflow, /build-runtime-artifact\.sh/);

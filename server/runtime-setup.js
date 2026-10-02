@@ -1,20 +1,36 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { BlockList, isIP } from "node:net";
 import { platform as currentPlatform } from "node:os";
 import { dirname } from "node:path";
 
-import { LocalPortManager, UfwFirewallManager } from "./protocol-activation.js";
+import { LocalPortManager, UfwFirewallManager, protocolActivationPolicy } from "./protocol-activation.js";
 import { APPROVED_METERED_RUNTIME_VERSION, compareVersions } from "./singbox/installer.js";
 
 const stepLabels = [
   ["install", "安装计量版 sing-box"],
   ["bbr", "配置 BBR 与 fq 队列"],
-  ["protocol", "配置 Shadowsocks 与防火墙"],
+  ["protocol", "配置入口协议与防火墙"],
   ["publish", "校验并发布 Runtime 配置"],
   ["health", "验证服务与协议监听"]
 ];
 
+const loopbackAddresses = new BlockList();
+loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
+loopbackAddresses.addAddress("::1", "ipv6");
+
 function setupError(code, message, statusCode = 500) {
   return Object.assign(new Error(message), { code, statusCode });
+}
+
+function listenerNetworks(inbound, policy) {
+  if (!inbound.listen_port) return [];
+  if (inbound.transport?.type === "quic" || policy.network === "udp") return ["udp"];
+  // These inbounds bind both networks when network is omitted. SOCKS/Mixed
+  // negotiate UDP associations dynamically, rather than on this listening port.
+  if (["shadowsocks", "naive", "direct", "tproxy"].includes(inbound.type)) {
+    return ["tcp", "udp"].includes(inbound.network) ? [inbound.network] : ["tcp", "udp"];
+  }
+  return [policy.network];
 }
 
 export class RuntimeSetupManager {
@@ -44,6 +60,13 @@ export class RuntimeSetupManager {
           throw new Error("安装进度格式无效");
         }
         this.state = saved;
+        this.state.steps = saved.steps.map(step => ({ ...step,
+          label: stepLabels.find(([id]) => id === step.id)?.[1] || step.label,
+          ...(step.message === "配置 Shadowsocks 与防火墙"
+            ? { message: "上次已配置默认入口；可重新检查全部已启用协议" } : {}) }));
+        if (this.state.status === "succeeded" && this.state.message === "Runtime、Shadowsocks 与 BBR 已配置并运行") {
+          this.state.message = "上次 Runtime 安装已完成；可重新检查全部已启用协议与防火墙";
+        }
         if (saved.status === "running") {
           Object.assign(this.state, {
             status: "failed", ready: false, message: "上次自动安装因服务重启中断，可以重试",
@@ -157,14 +180,36 @@ export class RuntimeSetupManager {
       const profile = originalProfile.enabled ? originalProfile
         : this.store.updateHostProtocolConfig("local", "shadowsocks", { ...originalProfile, enabled: true });
       changedProfile = !originalProfile.enabled;
-      const inbound = this.runtimeManager.compileHostRuntimeConfig("local")
-        .inbounds.find((entry) => entry.type === "shadowsocks");
-      if (!inbound) throw setupError("PROTOCOL_NOT_CONFIGURED", "生成的配置中没有 Shadowsocks 入站");
-      const networks = ["tcp", "udp"].includes(inbound.network) ? [inbound.network] : ["tcp", "udp"];
-      for (const network of networks) {
-        firewalls.push(await this.firewallManager.open({ port: profile.port, network }));
+      const config = this.runtimeManager.compileHostRuntimeConfig("local");
+      const protocols = this.store.listHostProtocolConfigs("local").filter(entry => entry.enabled).map(entry => {
+        const tag = entry.type === "shadowsocks" ? "managed-shadowsocks" : `raylink-${entry.type}`;
+        const inbound = config.inbounds.find(candidate => candidate.tag === tag);
+        if (!inbound) throw setupError("PROTOCOL_NOT_CONFIGURED", `生成的配置中没有 ${entry.type} 入站`);
+        const policy = protocolActivationPolicy(entry.type);
+        return { profile: entry, networks: listenerNetworks(inbound, policy), policy, firewalls: [] };
+      });
+      const openedRules = new Map();
+      const openRule = async (rule) => {
+        const key = `${rule.port}/${rule.network}`;
+        if (!openedRules.has(key)) {
+          const firewall = await this.firewallManager.open(rule);
+          openedRules.set(key, firewall);
+          firewalls.push(firewall);
+        }
+        return openedRules.get(key);
+      };
+      for (const protocol of protocols) {
+        const loopback = loopbackAddresses.check(protocol.profile.listen, isIP(protocol.profile.listen) === 6 ? "ipv6" : "ipv4");
+        if (protocol.policy.exposure !== "public" || loopback) continue;
+        for (const network of protocol.networks) {
+          protocol.firewalls.push(await openRule({ port: protocol.profile.port, network }));
+        }
+        if (protocol.profile.tls.mode === "acme") {
+          protocol.firewalls.push(await openRule({ port: 80, network: "tcp", purpose: "acme-http-01" }));
+        }
       }
-      this.step("protocol", "succeeded");
+      const protocolNames = protocols.map(entry => entry.profile.type).join("、");
+      this.step("protocol", "succeeded", `保留并配置已启用入口：${protocolNames}`);
 
       this.step("publish", "running");
       const deployment = await this.runtimeManager.publish(publisherAdminId, { reason: "automatic-runtime-setup" });
@@ -172,30 +217,36 @@ export class RuntimeSetupManager {
       this.step("publish", "succeeded");
 
       this.step("health", "running");
-      for (const network of networks) {
-        await this.portManager.waitForListening({ listen: profile.listen, port: profile.port, network });
+      for (const protocol of protocols) {
+        for (const network of protocol.networks) {
+          await this.portManager.waitForListening({ listen: protocol.profile.listen, port: protocol.profile.port, network });
+        }
       }
       const runtime = await this.runtimeManager.status();
       if (runtime.mode !== "systemd" || runtime.state !== "running") {
         throw setupError("RUNTIME_NOT_RUNNING", "配置已发布，但 sing-box 服务未确认运行");
       }
       const checkedAt = this.clock().toISOString();
-      this.store.setProtocolActivation("local", "shadowsocks", {
-        state: "port-listening", progress: 100, port: profile.port,
-        network: networks.join(","), firewallManaged: firewalls.some((item) => item.managed),
-        publicCheck: { reachable: null, checkedAt, reason: "本机服务与端口已验证，等待公网协议探测" },
-        updatedAt: checkedAt
-      });
-      this.step("health", "succeeded");
+      for (const protocol of protocols.filter(entry => entry.networks.length)) {
+        this.store.setProtocolActivation("local", protocol.profile.type, {
+          state: "port-listening", progress: 100, port: protocol.profile.port,
+          network: protocol.networks.join(","), firewallManaged: protocol.firewalls.some(item => item.managed),
+          publicCheck: { reachable: null, checkedAt, reason: protocol.policy.exposure === "public"
+            ? "本机服务与端口已验证，等待公网协议探测" : "本机监听已验证，此入口不执行公网探测" },
+          updatedAt: checkedAt
+        });
+      }
+      this.step("health", "succeeded", `服务运行与已启用协议监听检查通过：${protocolNames}`);
       Object.assign(this.state, {
         status: "succeeded", ready: true,
-        message: this.state.warnings.length ? "Runtime 已运行，网络加速存在待处理项" : "Runtime、Shadowsocks 与 BBR 已配置并运行",
+        message: this.state.warnings.length ? "Runtime 与入口协议已运行，网络加速存在待处理项" : "Runtime、已启用入口协议与 BBR 已配置并运行",
         finishedAt: this.clock().toISOString()
       });
       this.persist();
       return {
         ...installation, installation, runtime, bbr, deployment, ready: true,
         defaultProtocol: { type: "shadowsocks", port: profile.port },
+        protocols: protocols.map(entry => ({ type: entry.profile.type, port: entry.profile.port, networks: entry.networks })),
         warnings: [...this.state.warnings]
       };
     } catch (error) {

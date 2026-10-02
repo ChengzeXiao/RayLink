@@ -36,7 +36,7 @@ import { BbrManager } from "./network-tuning.mjs";
 import { NodeSoftwareUpdater } from "./software-update.mjs";
 
 const execFile = promisify(execFileCallback);
-export const AGENT_VERSION = "0.9.0";
+export const AGENT_VERSION = "0.9.1";
 const SECRET_ENVELOPE_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm";
 const SECRET_ENVELOPE_CONTEXT = Buffer.from("raylink-node-secret-v1", "utf8");
 const PROTOCOL_PROBE_TYPES = new Set([
@@ -74,6 +74,9 @@ function applyProbeTls(outbound, inbound) {
     throw new Error(`${inbound.type} 外部探针缺少 TLS 服务器名称`);
   }
   outbound.tls = { enabled: true, server_name: serverName };
+  if (Array.isArray(inbound.tls.alpn) && inbound.tls.alpn.length) {
+    outbound.tls.alpn = [...inbound.tls.alpn];
+  }
   if (inbound.tls.reality?.enabled === true) {
     outbound.tls.reality = {
       enabled: true,

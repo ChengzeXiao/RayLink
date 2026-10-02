@@ -36,6 +36,9 @@ function applyTls(outbound, inbound) {
   const serverName = inbound.tls.server_name;
   if (!serverName) throw new Error(`${inbound.type} 外部探针缺少 TLS 服务器名称`);
   outbound.tls = { enabled: true, server_name: serverName };
+  if (Array.isArray(inbound.tls.alpn) && inbound.tls.alpn.length) {
+    outbound.tls.alpn = [...inbound.tls.alpn];
+  }
   if (inbound.tls.reality?.enabled === true) {
     outbound.tls.reality = {
       enabled: true,

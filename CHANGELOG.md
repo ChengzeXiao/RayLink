@@ -1,5 +1,19 @@
 # RayLink Changelog
 
+## 0.2.35 - 2026-10-02
+
+- Negotiate h3 ALPN consistently for managed TUIC listeners, client subscriptions and local/remote probes; existing TUIC subscriptions must be refreshed after upgrading.
+- Release RayLink Node 0.9.1 with the remote probe fix while retaining 0.9.0 maintenance and rolling upgrade support.
+- Configure firewall rules and verify listeners for every enabled protocol during automatic Runtime setup, preserving existing settings and private/loopback exposure boundaries.
+- Rename setup progress to “配置入口协议与防火墙”, including persisted historical labels, and verify multi-protocol remote provisioning and retries.
+- Gate releases on real Mihomo and sing-box TUIC transfers plus an ALPN failure control, using a checksum-pinned Mihomo test client.
+
+## 0.2.34 - 2026-10-02
+
+- Reset traffic allowances at the beginning of each Asia/Shanghai calendar month, including catch-up after downtime, with durable usage history and idempotent migration.
+- Archive and clear legacy usage once on first activation; preserve credentials, entitlements and monthly usage on subsequent upgrades.
+- Expose usage periods and history in the administrator UI, User Center and MCP; reject stale-period usage adjustments and retry remote entitlement publication until applied.
+
 ## 0.2.33 - 2026-10-02
 
 - Fix Linux Node installer/updater preflight imports inadvertently starting the daemon and blocking completion.

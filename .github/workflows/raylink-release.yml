@@ -34,9 +34,12 @@ jobs:
           )
       - name: Install dependencies
         run: npm ci --ignore-scripts
+      - name: Prepare pinned Mihomo interoperability client
+        run: bash tests/download-mihomo-ci.sh "${RUNNER_TEMP}/raylink-mihomo"
       - name: Run production acceptance suite
         run: |
-          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" npm run check:production
+          SING_BOX_BIN="${RUNNER_TEMP}/raylink-protocol-runtime/raylink-sing-box-1.14.2-linux-amd64" \
+            MIHOMO_BIN="${RUNNER_TEMP}/raylink-mihomo/mihomo" npm run check:production
 
   build:
     name: linux-${{ matrix.arch }}
