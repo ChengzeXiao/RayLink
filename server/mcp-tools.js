@@ -123,6 +123,8 @@ const routingFields = {
 };
 
 export const mcpTools = [
+  defineTool({ name: "runtime_certificates", description: "Read local managed certificate expiration and last renewal synchronization status. Never returns keys or certificate paths and never restarts the Runtime.", path: "/api/runtime/certificates" }),
+  defineTool({ name: "runtime_certificates_sync", description: "Retry synchronization of renewed Caddy certificates into the local Runtime. Changed certificates trigger one verified Runtime restart; failures roll back. Inspect returned status and certificate validity.", permission: "runtime.manage", mutating: true, method: "POST", path: "/api/runtime/certificates/sync" }),
   defineTool({ name: "system_update_check", description: "Check the official RayLink control-plane release and installation capability; never installs packages.", path: "/api/system/update" }),
   defineTool({ name: "system_upgrade", description: "Start a durable RayLink control-plane update with archive checksum verification, backup and rollback. The control plane restarts; inspect system_overview afterward.", permission: "system.manage", mutating: true, method: "POST", path: "/api/system/upgrade" }),
   defineTool({ name: "hosts_bbr_configure", description: "Enable Linux BBR and fq on a local Host or queue the operation on Node 0.9+. Inspect Host telemetry and bbrTask; queued does not mean enabled. Does not upgrade the kernel or reboot.", permission: "runtime.manage", mutating: true, fields: { hostId: id }, method: "POST", path: (args) => `${hostPath(args)}/bbr` }),
@@ -141,7 +143,7 @@ export const mcpTools = [
   defineTool({ name: "system_overview", description: "Read a curated control-plane overview; excludes user records, administrator lists, audit records and credentials.", path: "/api/bootstrap",
     select: (payload) => ({ currentAdmin: pick(payload.currentAdmin, ["id", "username", "role"]), userCount: payload.users?.length || 0,
       hostCount: payload.hosts?.length || 0, runtime: runtimeView(payload.runtime), runtimePreview: previewView(payload.runtimePreview),
-      installation: runtimeView(payload.installation), bbr: payload.bbr, runtimeSetup: payload.runtimeSetup, systemUpdate: payload.systemUpdate, routingRuleSets: payload.routingRuleSets, usagePeriod: payload.usagePeriod }) }),
+      installation: runtimeView(payload.installation), bbr: payload.bbr, runtimeSetup: payload.runtimeSetup, systemUpdate: payload.systemUpdate, routingRuleSets: payload.routingRuleSets, usagePeriod: payload.usagePeriod, tlsRenewal: payload.tlsRenewal }) }),
   defineTool({ name: "users_list", description: "List users and their independent entitlements without subscription credentials.", path: "/api/bootstrap", select: (payload) => ({ users: payload.users.map(userView) }) }),
   defineTool({ name: "users_get", description: "Read one user's entitlement and state without subscription credentials.", fields: { userId: id }, path: "/api/bootstrap", select: (payload, args) => userView(findResource(payload.users, args.userId, "用户")) }),
   defineTool({ name: "users_usage_history", description: "Read current and archived monthly traffic usage, including the preserved pre-monthly total and manual adjustments. Months use Asia/Shanghai; this does not reset usage.",

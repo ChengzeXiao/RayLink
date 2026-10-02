@@ -1,5 +1,12 @@
 const subscriptionFormats = Object.freeze([
   Object.freeze({
+    id: "mihomo-modern",
+    responseKey: "mihomoModern",
+    aliases: Object.freeze(["mihomo-modern"]),
+    portalAliases: Object.freeze(["mihomo-modern"]),
+    pathSuffix: "mihomo-modern.yaml"
+  }),
+  Object.freeze({
     id: "mihomo",
     responseKey: "mihomo",
     aliases: Object.freeze(["mihomo", "clash", "clash-meta"]),

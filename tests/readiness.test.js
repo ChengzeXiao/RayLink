@@ -93,3 +93,15 @@ test("dry-run, TCP-only probes and unavailable rule sets cannot establish produc
     assert.notEqual(report.checks.find((check) => check.id === id).status, "pass");
   }
 });
+
+test("certificate synchronization must be fresh and healthy before readiness passes", () => {
+  const input = fixture();
+  input.tlsRenewal = { status: "error", checkedAt: fresh, certificates: [{ domain: "private-node.example", validTo: "2026-10-26" }] };
+  assert.equal(buildReadinessReport(input).checks.find((item) => item.id === "tls-renewal").status, "fail");
+  input.tlsRenewal.status = "healthy";
+  assert.equal(buildReadinessReport(input).checks.find((item) => item.id === "tls-renewal").status, "pass");
+  input.tlsRenewal.checkedAt = "2026-09-01T00:00:00Z";
+  const stale = buildReadinessReport(input);
+  assert.equal(stale.checks.find((item) => item.id === "tls-renewal").status, "warning");
+  assert.doesNotMatch(JSON.stringify(stale), /private-node/);
+});

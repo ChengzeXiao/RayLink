@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { access, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
@@ -88,18 +89,24 @@ async function waitForTrustedHttps(origin) {
 
 async function locateCaddyCertificate(dataDirectory, domain) {
   const issuers = await readdir(dataDirectory, { withFileTypes: true }).catch(() => []);
+  const candidates = [];
   for (const issuer of issuers) {
     if (!issuer.isDirectory()) continue;
     const base = join(dataDirectory, issuer.name, domain);
     const certificatePath = join(base, `${domain}.crt`);
     const keyPath = join(base, `${domain}.key`);
     try {
-      await access(certificatePath);
       await access(keyPath);
-      return { certificatePath, keyPath };
+      const certificate = new X509Certificate(await readFile(certificatePath));
+      const validFrom = Date.parse(certificate.validFrom);
+      const validTo = Date.parse(certificate.validTo);
+      if (validFrom <= Date.now() && validTo > Date.now() && certificate.checkHost(domain)) {
+        candidates.push({ certificatePath, keyPath, validFrom, validTo });
+      }
     } catch {}
   }
-  return null;
+  const latest = candidates.sort((a, b) => b.validFrom - a.validFrom || b.validTo - a.validTo)[0];
+  return latest ? { certificatePath: latest.certificatePath, keyPath: latest.keyPath } : null;
 }
 
 function caddyfileForDomains({
@@ -194,6 +201,18 @@ export class CaddySetupAccessManager {
     } finally {
       release();
     }
+  }
+
+  async findNodeCertificate(domain) {
+    const hostname = String(domain || "").trim().toLowerCase();
+    if (isIP(hostname) || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(hostname)) return null;
+    let caddyfile;
+    try { caddyfile = await readFile(this.caddyfilePath, "utf8"); }
+    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    const marker = `# RayLink managed node certificate: ${hostname}`;
+    if (!caddyfile.split(/\r?\n/).some((line) => line.trim() === marker)) return null;
+    const source = await this.locateCertificate(hostname);
+    return source ? { ...source, serverName: hostname, managedBy: "caddy" } : null;
   }
 
   async ensureNodeCertificate(domain) {

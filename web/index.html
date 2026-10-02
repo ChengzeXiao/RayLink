@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.35&amp;rev=tuic-alpn-1">
+  <link rel="stylesheet" href="./styles.css?v=0.2.36&amp;rev=tuic-alpn-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -401,6 +401,7 @@
             </div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">ACME 账户</p><h2>证书通知邮箱</h2><p>用于自动签发证书和接收证书到期通知。Naive、Hysteria、TUIC 与 Hysteria 2 一键启用时会自动读取这里的邮箱。</p><form class="certificate-settings-form" id="certificate-settings-form"><label class="field"><span>通知邮箱</span><input id="certificate-email" name="email" type="email" autocomplete="email" placeholder="ops@example.com" required><small class="field-error"></small></label><div class="heading-actions"><button class="button primary" type="submit">保存邮箱</button><span class="status-badge neutral" id="certificate-mode"><i></i>未配置</span></div></form></div></article>
             <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">TLS 资产</p><h2>证书路径由主机协议管理</h2><p>一键启用会优先使用主机域名自动签发证书；手动证书仍可在主机的“入口协议”中配置。</p><button class="text-button" data-system-tab="hosts">查看主机 <svg><use href="#i-arrow"/></svg></button></div></article>
+            <article class="panel system-card"><span class="resource-icon"><svg><use href="#i-shield"/></svg></span><div><p class="eyebrow">本机证书续期</p><h2 id="certificate-renewal-status">等待检查</h2><p id="certificate-renewal-checked"></p><div id="certificate-renewal-list"></div><p id="certificate-renewal-error" role="status"></p><p>仅同步本机由 RayLink 托管的 Caddy 证书。应用新证书会短暂重启代理；验证失败时自动回滚。</p><button type="button" class="button secondary" id="sync-runtime-certificates" disabled>检查并同步证书</button></div></article>
             <article class="panel system-card"><span class="resource-icon">R</span><div><p class="eyebrow">Reality</p><h2>密钥按协议生成</h2><p>VLESS 等协议可在编辑抽屉中一键生成 Reality 密钥对。</p></div></article>
           </section>
           <div data-system-panel="maintenance" hidden>
@@ -540,11 +541,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.35"></script>
-  <script src="./subscription-session.js?v=0.2.35"></script>
-  <script src="./subscription-client-url.js?v=0.2.35"></script>
-  <script src="./subscription-quick.js?v=0.2.35"></script>
-  <script src="./protocol-health.js?v=0.2.35"></script>
-  <script src="./app.js?v=0.2.35&amp;rev=tuic-alpn-1"></script>
+  <script src="./subscription-qr.js?v=0.2.36"></script>
+  <script src="./subscription-session.js?v=0.2.36"></script>
+  <script src="./subscription-client-url.js?v=0.2.36"></script>
+  <script src="./subscription-quick.js?v=0.2.36"></script>
+  <script src="./protocol-health.js?v=0.2.36"></script>
+  <script src="./app.js?v=0.2.36&amp;rev=tuic-alpn-1"></script>
 </body>
 </html>

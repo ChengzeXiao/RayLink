@@ -78,6 +78,36 @@ test("smart endpoint resolution uses configurable trusted DNS and probe timeout"
   );
 });
 
+test("Runtime DNS environment selects verified resolvers and private zones while validating startup settings", () => {
+  const defaults = loadConfig({}).runtimeDns;
+  assert.equal(defaults?.mode, "auto");
+  assert.equal(defaults.primary, "1.1.1.1");
+  assert.equal(defaults.secondary, "9.9.9.9");
+  const configured = loadConfig({ RAYLINK_RUNTIME_DNS_MODE: "auto", RAYLINK_RUNTIME_DNS_PRIMARY: "192.0.2.53",
+    RAYLINK_RUNTIME_DNS_PRIMARY_SERVER_NAME: " Resolver.Example. ", RAYLINK_RUNTIME_DNS_SECONDARY: "2001:db8::53",
+    RAYLINK_RUNTIME_DNS_SECONDARY_SERVER_NAME: "backup.example", RAYLINK_RUNTIME_DNS_PRIVATE_SUFFIXES: "corp.example, .Internal.Example.,corp.example" }).runtimeDns;
+  assert.equal(configured.primary, "192.0.2.53");
+  assert.equal(configured.primaryServerName, "resolver.example");
+  assert.equal(configured.secondary, "2001:db8::53");
+  assert.equal(configured.secondaryServerName, "backup.example");
+  assert.deepEqual(configured.privateSuffixes, ["corp.example", "internal.example"]);
+  assert.equal(loadConfig({ RAYLINK_RUNTIME_DNS_MODE: "system" }).runtimeDns.mode, "system");
+  for (const settings of [{ RAYLINK_RUNTIME_DNS_MODE: "typo" }, { RAYLINK_RUNTIME_DNS_PRIMARY: "resolver.example" },
+    { RAYLINK_RUNTIME_DNS_SECONDARY: "invalid" }, { RAYLINK_RUNTIME_DNS_PRIMARY_SERVER_NAME: "*.example" },
+    { RAYLINK_RUNTIME_DNS_SECONDARY_SERVER_NAME: "https://dns.example" }, { RAYLINK_RUNTIME_DNS_PRIVATE_SUFFIXES: "*.corp.example" }]) {
+    assert.throws(() => loadConfig(settings), { code: "INVALID_RUNTIME_DNS" });
+  }
+});
+
+test("TLS renewal inspection interval defaults to fifteen minutes and permits explicit disable", () => {
+  assert.equal(loadConfig({}).tlsRenewalIntervalMs, 900_000);
+  assert.equal(loadConfig({ RAYLINK_TLS_RENEWAL_INTERVAL_MS: "0" }).tlsRenewalIntervalMs, 0);
+  assert.equal(loadConfig({ RAYLINK_TLS_RENEWAL_INTERVAL_MS: "60000" }).tlsRenewalIntervalMs, 60_000);
+  for (const value of ["-1", "1.5", "NaN", "9007199254740992"]) {
+    assert.throws(() => loadConfig({ RAYLINK_TLS_RENEWAL_INTERVAL_MS: value }), /RAYLINK_TLS_RENEWAL_INTERVAL_MS must be a non-negative integer/);
+  }
+});
+
 test("subscription bearer encryption requires a dedicated production key", () => {
   const dedicated = loadConfig({
     RAYLINK_ADMIN_PASSWORD: "admin-password",

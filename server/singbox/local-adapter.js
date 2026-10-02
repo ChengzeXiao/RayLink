@@ -3,6 +3,7 @@ import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:f
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
+import { connect as tlsConnect } from "node:tls";
 
 import {
   buildProtocolProbeConfig,
@@ -91,6 +92,47 @@ export class LocalSingBoxAdapter {
     }
     if (!["inactive", "failed"].includes(state)) {
       throw new Error(`${this.systemdUnit} 停止后仍未确认退出（${state || "未知状态"}）`);
+    }
+  }
+
+  async activateCertificates({ config, certificates }) {
+    if (this.mode !== "systemd") throw new Error("TLS activation requires a live systemd Runtime");
+    await this.validate(this.activePath);
+    await this.restartSystemd();
+    const expected = new Map(certificates.map((certificate) => [certificate.domain, certificate]));
+    const inbounds = (config.inbounds || []).filter((inbound) => (
+      expected.get(inbound.tls?.server_name?.toLowerCase())?.inboundTags?.includes(inbound.tag)
+    ));
+    if (!inbounds.length) throw new Error("No managed TLS listeners to verify");
+    for (const inbound of inbounds) {
+      const address = inbound.listen === "::" ? "::1"
+        : !inbound.listen || inbound.listen === "0.0.0.0" ? "127.0.0.1" : inbound.listen;
+      if (["tuic", "hysteria", "hysteria2"].includes(inbound.type) || inbound.transport?.type === "quic") {
+        await this.probeProtocol({ type: inbound.type, address, port: inbound.listen_port,
+          serverConfig: config, attempts: 2, timeoutMs: 12_000 });
+        continue;
+      }
+      const verify = () => new Promise((resolve, reject) => {
+        const socket = tlsConnect({ host: address, port: inbound.listen_port,
+          servername: inbound.tls.server_name, rejectUnauthorized: true });
+        socket.setTimeout(5_000);
+        socket.once("secureConnect", () => {
+          const matches = socket.getPeerCertificate().fingerprint256 === expected.get(inbound.tls.server_name.toLowerCase()).fingerprint256;
+          socket.destroy();
+          if (matches) resolve();
+          else reject(new Error("Runtime TLS certificate fingerprint does not match the renewed certificate"));
+        });
+        socket.once("timeout", () => socket.destroy(new Error("Runtime TLS verification timed out")));
+        socket.once("error", reject);
+      });
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        try { await verify(); break; }
+        catch (error) {
+          if (Date.now() >= deadline) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
     }
   }
 

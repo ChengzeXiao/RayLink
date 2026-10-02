@@ -11,6 +11,7 @@ const requiredNodeAgentVersion = "0.9.0";
 
 const clientCatalog = {
   mihomo: { name: "Clash / Mihomo", platforms: "Windows / macOS / Android", action: "导入订阅" },
+  "mihomo-modern": { name: "Mihomo 共享测速", platforms: "内核 1.19.1+ · 减少重复探测", action: "下载配置" },
   loon: {
     name: "Loon 节点订阅",
     platforms: "iPhone / iPad / macOS · 保留现有规则",
@@ -28,7 +29,7 @@ const clientCatalog = {
   },
   "sing-box": { name: "sing-box", platforms: "1.14+ · iOS / Android / Desktop", action: "下载配置" }
 };
-const universalClientFormats = Object.freeze(["mihomo", "loon", "egern-profile", "egern", "sing-box"]);
+const universalClientFormats = Object.freeze(["mihomo", "mihomo-modern", "loon", "egern-profile", "egern", "sing-box"]);
 
 const accountSummary = { totalUsers: 0 };
 
@@ -40,6 +41,7 @@ const controlPlane = {
   runtimePreview: null,
   installation: null,
   runtimeSetup: null,
+  tlsRenewal: null,
   bbr: null,
   systemUpdate: null,
   runtimeUpdate: null,
@@ -62,6 +64,7 @@ const controlPlane = {
 const mcpAccess = { tokens: [], scopes: [], endpoint: "", issued: null, loading: false, creating: false, generation: 0 };
 const provisioning = { jobs: [], loading: false, timer: null, drawerJobId: null, generation: 0 };
 const runtimeSetupRequest = { running: false, error: "" };
+let certificateSyncRunning = false;
 const systemUpdateRequest = { checking: false, upgrading: false, error: "" };
 
 const scopeLabels = {
@@ -245,6 +248,7 @@ function applyBootstrap(data) {
   controlPlane.runtimePreview = data.runtimePreview;
   controlPlane.installation = data.installation;
   controlPlane.runtimeSetup = data.runtimeSetup || null;
+  controlPlane.tlsRenewal = data.tlsRenewal || null;
   if (["running", "succeeded"].includes(controlPlane.runtimeSetup?.status)) runtimeSetupRequest.error = "";
   controlPlane.bbr = data.bbr || null;
   controlPlane.systemUpdate = data.systemUpdate || null;
@@ -1249,6 +1253,7 @@ function renderSystem() {
     certificateMode.innerHTML = `<i></i>${configured ? "已配置" : "未配置"}`;
   }
   const latestBackup = controlPlane.backups[0];
+  renderCertificateRenewal();
   const backupTitle = document.querySelector("#system-backup-title");
   const backupState = document.querySelector("#system-backup-state");
   if (backupTitle) {
@@ -1262,6 +1267,21 @@ function renderSystem() {
       : "每天自动执行 SQLite 在线备份，并校验 SHA-256 与数据库完整性。";
   }
   renderAdminAccess();
+}
+
+function renderCertificateRenewal() {
+  const renewal = controlPlane.tlsRenewal;
+  const labels = { idle: "等待检查", healthy: "同步正常", warning: "需要关注", error: "同步失败", disabled: "当前运行模式不支持自动同步" };
+  setText("#certificate-renewal-status", labels[renewal?.status] || "等待检查");
+  setText("#certificate-renewal-checked", renewal?.checkedAt ? `最近检查：${new Date(renewal.checkedAt).toLocaleString("zh-CN")}` : "每 15 分钟检查 Caddy 续期结果；证书变化时自动应用并验证。检查周期可由管理员配置。");
+  const list = document.querySelector("#certificate-renewal-list");
+  if (list) list.innerHTML = (renewal?.certificates || []).map((cert) => `<p><strong>${escapeHtml(cert.domain)}</strong><br>到期：${escapeHtml(cert.validTo && Number.isFinite(Date.parse(cert.validTo)) ? new Date(cert.validTo).toLocaleString("zh-CN") : "未知（无法读取）")} · ${escapeHtml(cert.status === "expired" ? "已过期" : cert.status === "expiring" ? "即将到期" : cert.status === "healthy" ? "有效" : cert.status)}${cert.errorCode ? ` · ${escapeHtml(cert.errorCode)}` : ""}</p>`).join("") || "<p>没有已发布的本机托管证书。</p>";
+  setText("#certificate-renewal-error", renewal?.errorCode ? `错误：${renewal.errorCode}。请检查证书来源和运行状态后重试。` : "");
+  const button = document.querySelector("#sync-runtime-certificates");
+  if (button) {
+    button.disabled = certificateSyncRunning || renewal?.status === "disabled" || !["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+    button.textContent = certificateSyncRunning ? "正在同步并验证…" : "检查并同步证书";
+  }
 }
 
 function renderReadiness() {
@@ -2015,6 +2035,10 @@ function userSubscriptionAccessMarkup(user) {
               <a class="subscription-client-action" href="#" data-subscription-format="loon">
                 <span><strong>Loon 节点</strong><small>保留客户端现有规则</small></span>
                 <span class="subscription-client-badge">添加</span>
+              </a>
+              <a class="subscription-client-action" href="#" data-subscription-format="mihomo-modern" data-subscription-import="clash">
+                <span><strong>Mihomo 共享测速</strong><small>需要内核 1.19.1+；减少重复探测</small></span>
+                <span class="subscription-client-badge">导入</span>
               </a>
               <a class="subscription-client-action" href="#" data-subscription-format="egern-profile" data-subscription-import="egern-profile">
                 <span><strong>Egern 完整配置</strong><small>智能策略、分流与 DNS</small></span>
@@ -2813,6 +2837,7 @@ async function downloadPortalConfig(format = "sing-box") {
   const requestedFormat = format;
   const filenames = {
     mihomo: "raylink-mihomo.yaml",
+    "mihomo-modern": "raylink-mihomo-modern.yaml",
     egern: "raylink-egern.yaml",
     "egern-profile": "raylink-egern-profile.yaml",
     "sing-box": "raylink-sing-box.json"
@@ -3338,6 +3363,26 @@ async function rollbackConfig() {
 
 function maintenanceSessionIsCurrent(generation, adminId) {
   return generation === controlPlaneConnection.generation && adminId === controlPlane.currentAdmin?.id;
+}
+
+async function syncRuntimeCertificates() {
+  if (certificateSyncRunning) return;
+  const generation = controlPlaneConnection.generation, adminId = controlPlane.currentAdmin?.id;
+  certificateSyncRunning = true;
+  renderCertificateRenewal();
+  try {
+    const result = await api("/api/runtime/certificates/sync", { method: "POST" });
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    controlPlane.tlsRenewal = result;
+    showToast(result.status === "error" ? "证书同步失败" : "证书检查完成", result.status === "error" ? result.errorCode : result.changed ? "新证书已应用并验证。" : "当前证书无需更新。");
+    await loadBootstrap();
+  } catch (error) {
+    if (!maintenanceSessionIsCurrent(generation, adminId)) return;
+    showToast("证书检查失败", error.message);
+  } finally {
+    certificateSyncRunning = false;
+    if (maintenanceSessionIsCurrent(generation, adminId)) renderCertificateRenewal();
+  }
 }
 
 async function checkSystemUpdate() {
@@ -3879,6 +3924,11 @@ document.addEventListener("click", async (event) => {
 
   if (event.target.closest("#install-sing-box, [data-install-runtime]")) {
     await installSingBox();
+    return;
+  }
+
+  if (event.target.closest("#sync-runtime-certificates")) {
+    await syncRuntimeCertificates();
     return;
   }
 
