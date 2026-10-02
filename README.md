@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.35/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.35/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.34/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.35/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,10 +295,12 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
-### v0.2.34 / 自然月额度
+### v0.2.35 / TUIC 兼容与自动配置
 
-流量额度按北京时间自然月重置。首次升级先归档旧累计用量并清零；每月 1 日 00:00 开始新额度。管理界面、用户中心和 MCP 显示当前周期及下次重置；MCP 支持月度用量历史。详见[月度流量规则](docs/monthly-usage.md)。
+TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握手超时。**升级后请更新 TUIC 订阅再连接**；发布运行配置可能短暂重连。自动安装处理全部已启用入口协议的防火墙与监听。详见 [v0.2.35 发布说明](docs/release/v0.2.35.md)。
 
-当前源码的发布目标为 v0.2.34；上面的 Release 下载命令需等对应版本发布后使用。
+v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
+
+当前源码的发布目标为 v0.2.35；上面的 Release 下载命令需等对应版本发布后使用。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

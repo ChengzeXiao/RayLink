@@ -342,6 +342,9 @@ export function buildProtocolInbounds({ profiles, users, masterPassword, runtime
       base.listen_port = profile.port;
     }
     const tls = buildServerTls(profile, runtimeVersion);
+    // TUIC clients such as Mihomo require a negotiated ALPN, even though
+    // sing-box peers can both omit it. Keep managed server/client TLS aligned.
+    if (tls && profile.type === "tuic") tls.alpn = ["h3"];
     if (tls) base.tls = tls;
     const transport = buildTransport(profile);
     if (transport) base.transport = transport;
@@ -889,6 +892,7 @@ function addClientTls(outbound, profile) {
       }
     };
   }
+  if (profile.type === "tuic") outbound.tls.alpn = ["h3"];
   return outbound;
 }
 

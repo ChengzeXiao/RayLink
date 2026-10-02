@@ -129,17 +129,26 @@ test("SSH failures are safe, create no Host and can be explicitly retried", asyn
 
 test("a failed public protocol probe stays failed and resumes the same enrolled Host without SSH credentials", async (t) => {
   let reachable = false;
-  const f = await fixture(t, { protocolProbe: async () => ({ reachable, latencyMs: 12, probe: "sing-box-tools-fetch" }) });
-  const { job } = await (await f.start()).json();
+  const f = await fixture(t, { buildTags: ["with_v2ray_api", "with_acme"], nodeDomainLookup: async () => [{ address: "203.0.113.42" }],
+    protocolProbe: async () => ({ reachable, latencyMs: 12, probe: "sing-box-tools-fetch" }) });
+  await f.api("/api/settings/certificate", "PATCH", { email: "ops@example.com" });
+  f.app.store.updateHostProtocolConfig("local", "vless", { enabled: true, port: 48444,
+    tls: { mode: "certificate", serverName: "main.example.com", certificatePath: "/cert", keyPath: "/key" },
+    transport: { type: "ws", path: "/retain-node-transport" } });
+  const { job } = await (await f.start({ domainMode: "existing", endpointDomain: "retry.example.com", inheritProtocols: true })).json();
   const failed = await f.finish(job.id);
   assert.equal(failed.errorCode, "PROVISIONING_CONNECTIVITY");
   assert.equal(failed.status, "failed");
+  const nodeProfiles = f.app.store.listHostProtocolConfigs(failed.hostId);
+  f.app.store.updateHostProtocolConfig("local", "vless", { port: 49444, transport: { type: "ws", path: "/changed-main-template" } });
   reachable = true;
   const retried = await f.api(`/api/hosts/provision/${job.id}/retry`, "POST", { requestId: "retry-public-1" });
   assert.equal(retried.status, 202);
   const completed = await f.finish(job.id);
   assert.equal(completed.status, "succeeded", JSON.stringify(completed));
   assert.equal(completed.hostId, failed.hostId);
+  assert.deepEqual(f.app.store.listHostProtocolConfigs(completed.hostId), nodeProfiles, "retry must not replace already-configured node protocols with a changed main-host template");
+  assert.deepEqual(completed.result.protocols, ["shadowsocks", "vless"]);
   assert.equal(f.installations.length, 1);
   assert.equal(f.app.store.listHosts().length, 2);
   const replay = await f.api(`/api/hosts/provision/${job.id}/retry`, "POST", { requestId: "retry-public-1" });
@@ -198,7 +207,7 @@ test("HTTP MCP requires explicit SSH scope and completes onboarding through the 
 test("automatic node domain inherits main-host public protocols with independent shared ACME and five subscriptions", async (t) => {
   const records = [], dnsWrites = [];
   const f = await fixture(t, {
-    buildTags: ["with_v2ray_api", "with_acme"], nodeDomainPollMs: 1, nodeDomainWaitMs: 30,
+    buildTags: ["with_v2ray_api", "with_acme", "with_quic"], nodeDomainPollMs: 1, nodeDomainWaitMs: 30,
     nodeDomainLookup: async () => [{ address: "203.0.113.42" }],
     nodeDomainFetch: async (url, init) => {
       if (!url.includes("/dns_records")) return Response.json({ success: true, result: { name: "example.com" } });
@@ -211,7 +220,8 @@ test("automatic node domain inherits main-host public protocols with independent
   await f.api("/api/settings/certificate", "PATCH", { email: "ops@example.com" });
   const settings = await f.api("/api/settings/node-domains", "PATCH", { provider: "cloudflare", zoneId: "a".repeat(32), baseDomain: "nodes.example.com", apiToken: "CF-private-fixture", autoProvision: true, inheritProtocols: true });
   assert.equal(settings.status, 200);
-  for (const [type, port] of [["vless", 8443], ["trojan", 9443]]) {
+  const inherited = [["vmess", 8442], ["vless", 8443], ["trojan", 9443], ["anytls", 8445], ["hysteria", 8446], ["tuic", 8447], ["hysteria2", 8448]];
+  for (const [type, port] of inherited) {
     f.app.store.updateHostProtocolConfig("local", type, { enabled: true, port,
       tls: { mode: "certificate", serverName: "main.example.com", certificatePath: "/main-only/fullchain.pem", keyPath: "/main-only/private.key" },
       ...(type === "vless" ? { transport: { type: "ws", path: "/access" } } : {}) });
@@ -219,9 +229,9 @@ test("automatic node domain inherits main-host public protocols with independent
   const { job } = await (await f.start({ domainMode: "auto", inheritProtocols: true })).json();
   const finished = await f.finish(job.id);
   assert.equal(finished.status, "succeeded", JSON.stringify(finished));
-  assert.deepEqual([...finished.result.protocols].sort(), ["shadowsocks", "trojan", "vless"]);
+  assert.deepEqual([...finished.result.protocols].sort(), ["shadowsocks", ...inherited.map(([type]) => type)].sort());
   assert.equal(finished.result.subscriptionStatus, "verified");
-  assert.equal(finished.result.protocolChecks.length, 3);
+  assert.equal(finished.result.protocolChecks.length, 8);
   const host = f.app.store.getHost(finished.hostId);
   assert.equal(host.address, "203.0.113.42");
   assert.match(host.endpointDomain, /^node-.*\.nodes\.example\.com$/);
@@ -233,6 +243,13 @@ test("automatic node domain inherits main-host public protocols with independent
   assert.deepEqual(config.certificate_providers[0].domain, [host.endpointDomain]);
   assert.doesNotMatch(f.publications.at(-1).configText, /main-only|main\.example|CF-private-fixture/);
   assert.equal(config.inbounds.find((entry) => entry.type === "vless").transport.path, "/access");
+  for (const [type] of inherited) {
+    const activation = f.publications.find(payload => payload.activation?.type === type)?.activation;
+    assert.equal(activation?.network, ["hysteria", "tuic", "hysteria2"].includes(type) ? "udp" : "tcp");
+    assert.equal(activation?.exposure, "public");
+    assert.ok(activation.challengePorts.some(rule => rule.port === 80 && rule.network === "tcp"));
+    assert.ok(host.appliedProtocols.some(profile => profile.type === type && profile.enabled));
+  }
   for (const format of ["sing-box", "mihomo", "loon", "egern", "egern-profile"]) {
     const response = await fetch(`${f.base}${new URL(subscription.subscriptionUrl).pathname}?format=${format}`);
     assert.equal(response.status, 200, format);

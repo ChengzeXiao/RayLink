@@ -799,7 +799,7 @@ test("Mihomo, Egern and Loon exporters cover every compatible RayLink public pro
   assert.doesNotMatch(loon, /=hysteria,/i);
 });
 
-test("TUIC exporters do not require an ALPN the managed server did not advertise", () => {
+test("TUIC format conversion does not invent ALPN for an externally supplied outbound", () => {
   const config = {
     outbounds: [{
       type: "tuic",

@@ -222,7 +222,7 @@ export class NodeProvisioning {
     }, "PROVISIONING_ENROLLMENT_TIMEOUT", signal);
     if (!/^1\.14\./.test(host.runtimeVersion || "") || !host.buildTags.includes("with_v2ray_api") || !host.assetEncryptionReady
       || (this.acceptedNodeVersions && !this.acceptedNodeVersions.includes(host.agentVersion))) throw fail("PROVISIONING_CAPABILITIES", messages.PROVISIONING_CAPABILITIES);
-    update({ stage: "publishing", progress: 65, message: "启用稳定协议、配置端口并发布用户配置" });
+    update({ stage: "publishing", progress: 65, message: "准备默认入口，随后继承已启用协议与防火墙配置" });
     let deployment;
     await this.waitFor(async () => {
       try {
@@ -248,7 +248,7 @@ export class NodeProvisioning {
           skippedProtocols.push({ type: template.type, reason: policy.exposure !== "public" ? "MANUAL_CONFIGURATION_REQUIRED" : "DOMAIN_REQUIRED" });
           continue;
         }
-        update({ stage: "protocols", progress: 76, message: `继承主机协议 ${template.type}，自动配置节点证书和端口` });
+        update({ stage: "protocols", progress: 76, message: `继承主机协议 ${template.type}，配置节点证书、监听与防火墙` });
         await this.waitFor(async () => {
           try {
             deployment = await this.activate({ hostId: host.id, type: template.type, adminId, template,

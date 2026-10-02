@@ -1069,11 +1069,11 @@ function runtimeSetupPresentation() {
   const development = controlPlane.runtime?.mode !== "systemd" || setup.status === "development" || (controlPlane.runtime?.platform && controlPlane.runtime.platform !== "linux");
   const running = runtimeSetupRequest.running || setup.status === "running";
   const failed = runtimeSetupRequest.error || setup.status === "failed";
-  if (running) return { title: "正在安装与配置 Runtime", className: "warning", message: setup.message || "正在安装组件、准备服务、配置默认协议并检查运行状态。", button: "正在配置…", busy: true };
+  if (running) return { title: "正在安装与配置 Runtime", className: "warning", message: setup.message || "正在安装组件、准备服务、配置已启用入口协议与防火墙并检查运行状态。", button: "正在配置…", busy: true };
   if (development) return { title: "本地测试模式", className: "neutral", message: "此环境不运行 Linux 代理服务，也不启用 BBR 加速。已下载二进制不代表服务可用；自动安装与配置请在 Linux 正式部署上执行。", button: "仅支持 Linux 正式部署", busy: false, blocked: true };
   if (failed) return { title: "安装配置未完成", className: "danger", message: runtimeSetupRequest.error || setup.error?.message || setup.error || setup.message || "请查看失败步骤，修复后重试。", button: "重试完整配置", busy: false };
-  if (setup.status === "succeeded" && controlPlane.runtime?.state === "running") return { title: "安装与配置完成", className: "good", message: setup.message || "Runtime 服务与默认协议已配置，运行检查通过。BBR 结果请以独立内核状态为准。", button: "重新检查与配置", busy: false };
-  return { title: setup.status === "succeeded" ? "配置已完成，等待运行确认" : "一键安装与配置", className: "neutral", message: setup.message || "自动安装组件、配置系统服务与 Shadowsocks、发布配置并确认运行；内核支持时配置 BBR。", button: "一键安装与配置", busy: false };
+  if (setup.status === "succeeded" && controlPlane.runtime?.state === "running") return { title: "安装与配置完成", className: "good", message: setup.message || "Runtime 服务与已启用入口协议已配置，运行检查通过。BBR 结果请以独立内核状态为准。", button: "重新检查与配置", busy: false };
+  return { title: setup.status === "succeeded" ? "配置已完成，等待运行确认" : "一键安装与配置", className: "neutral", message: setup.message || "自动安装组件、保留并配置已启用入口协议与防火墙、发布并检查监听；默认入口为 Shadowsocks，内核支持时配置 BBR。", button: "一键安装与配置", busy: false };
 }
 
 function runtimeSetupMarkup() {
