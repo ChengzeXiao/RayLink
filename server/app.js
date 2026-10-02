@@ -532,7 +532,8 @@ export async function createRayLinkApp(options) {
     setupTokenHash: options.setupTokenHash,
     setupTokenExpiresAt: options.setupTokenExpiresAt,
     subscriptionEncryptionKey: options.subscriptionEncryptionKey
-      || options.adminPassword
+      || options.adminPassword,
+    clock: options.clock
   });
   const currentPublicOrigin = () => {
     const configured = store.setupStatus().access?.canonicalOrigin;
@@ -666,6 +667,11 @@ export async function createRayLinkApp(options) {
   let telemetryTimer = null;
   let telemetrySamplePromise = null;
   let entitlementReconcileTimer = null;
+  let usagePeriodTimer = null;
+  let usagePeriodPromise = null;
+  let usagePeriodClosing = false;
+  let lastUsagePeriodSyncAttempt = 0;
+  let lastUsagePeriodSyncKey = null;
   let ruleSetRefreshTimer = null;
   let runtimeUpdateTimer = null;
   let usageMeteringTimer = null;
@@ -1046,7 +1052,8 @@ export async function createRayLinkApp(options) {
       );
       return {
         status: result.changed ? "published" : "current",
-        reason: result.reason || null
+        reason: result.reason || null,
+        ...(result.remotePending !== undefined ? { remotePending: result.remotePending } : {})
       };
     } catch (error) {
       console.warn(`[RayLink] User entitlement saved; runtime publication pending: ${error.message}`);
@@ -1055,6 +1062,44 @@ export async function createRayLinkApp(options) {
         message: "用户变更已保存，运行配置发布失败，系统将自动重试"
       };
     }
+  };
+  // Persist the reset before publication so a crash cannot apply it twice.
+  // Keep the synchronization flag until a managed configuration is current.
+  const synchronizeUsagePeriod = () => {
+    if (usagePeriodPromise) return usagePeriodPromise;
+    usagePeriodPromise = (async () => {
+      const rollover = store.rolloverUsagePeriods();
+      const period = store.usagePeriodStatus();
+      if (!period.reconciliationPending) return;
+      if (!rollover.changed && lastUsagePeriodSyncKey === period.key
+        && Date.now() - lastUsagePeriodSyncAttempt < 5_000) return;
+      lastUsagePeriodSyncAttempt = Date.now();
+      lastUsagePeriodSyncKey = period.key;
+      const result = await reconcileUserEntitlements(null, {
+        reason: "monthly-usage-reset", retryUntilApplied: true
+      });
+      if (result.status !== "pending" && result.reason !== "deployment-in-progress"
+        && result.reason !== "initial-publication-required"
+        && result.remotePending === 0) {
+        store.acknowledgeUsagePeriodSync(period.key);
+      }
+    })().catch((error) => {
+      console.warn(`[RayLink] Monthly usage reset or publication pending: ${error.message}`);
+    }).finally(() => { usagePeriodPromise = null; });
+    return usagePeriodPromise;
+  };
+  const scheduleUsagePeriodCheck = () => {
+    if (usagePeriodClosing) return;
+    if (usagePeriodTimer) clearTimeout(usagePeriodTimer);
+    const period = store.usagePeriodStatus();
+    const now = new Date(options.clock?.() || new Date()).getTime();
+    const delay = period.reconciliationPending ? 5_000
+      : Math.max(1_000, Math.min(60 * 60_000, Date.parse(period.resetsAt) - now));
+    usagePeriodTimer = setTimeout(async () => {
+      await synchronizeUsagePeriod();
+      scheduleUsagePeriodCheck();
+    }, delay);
+    usagePeriodTimer.unref?.();
   };
   const authAttempts = new Map();
   const nodeHeartbeatWrites = new Map();
@@ -1292,6 +1337,7 @@ export async function createRayLinkApp(options) {
       const routingRuleSets = routingRuleSetStatus();
       sendJson(response, 200, {
         ...bootstrap,
+        usagePeriod: store.usagePeriodStatus(),
         hosts,
         admins: admin.role === "owner" ? store.listAdmins() : [],
         auditEvents: ["owner", "operator", "auditor"].includes(admin.role)
@@ -1624,6 +1670,18 @@ export async function createRayLinkApp(options) {
       return;
     }
 
+    const usageHistoryMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/usage-history$/);
+    if (request.method === "GET" && usageHistoryMatch) {
+      const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 12;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 36) {
+        throw httpError("INVALID_HISTORY_LIMIT", "历史周期数量需为 1–36 的整数", 422);
+      }
+      sendJson(response, 200, { periods: store.userUsageHistory(
+        decodeURIComponent(usageHistoryMatch[1]), { limit }
+      ) });
+      return;
+    }
+
     const resetUserPasswordMatch = url.pathname.match(
       /^\/api\/users\/([^/]+)\/password\/reset$/
     );
@@ -1746,6 +1804,7 @@ export async function createRayLinkApp(options) {
         response.emit("finish");
       };
       try {
+        await synchronizeUsagePeriod();
         await handleAdminRequest(request, response, admin);
         return result;
       } catch (error) {
@@ -1760,6 +1819,11 @@ export async function createRayLinkApp(options) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, currentPublicOrigin());
+      if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/sub/") || url.pathname === "/mcp") {
+        const synchronization = synchronizeUsagePeriod();
+        // Node heartbeats and receipts must remain able to finish a rollout.
+        if (!url.pathname.startsWith("/api/node/")) await synchronization;
+      }
       const setup = store.setupStatus();
       const subscriptionOrigin = currentSubscriptionOrigin();
       let requestHostname = "";
@@ -2097,6 +2161,10 @@ export async function createRayLinkApp(options) {
           sendJson(response, 200, profile);
           return;
         }
+        if (request.method === "GET" && url.pathname === "/api/portal/usage-history") {
+          sendJson(response, 200, { periods: store.userUsageHistory(sessionUser.id) });
+          return;
+        }
         if (request.method === "GET" && url.pathname === "/api/portal/subscription") {
           sendJson(response, 200, currentSubscription(sessionUser.id));
           return;
@@ -2324,6 +2392,8 @@ export async function createRayLinkApp(options) {
       });
       await sampleLocalTelemetry();
       await refreshLocalRuntimeCapabilities();
+      await synchronizeUsagePeriod();
+      scheduleUsagePeriodCheck();
       await sampleLocalUsage();
       runOperationalMaintenance();
       operationalMaintenanceTimer = setInterval(
@@ -2350,7 +2420,7 @@ export async function createRayLinkApp(options) {
       usageMeteringTimer = setInterval(sampleLocalUsage, usageMeteringIntervalMs);
       usageMeteringTimer.unref?.();
       entitlementReconcileTimer = setInterval(() => {
-        runLocalRuntimeOperation("配置同步", () => runtimeManager.reconcile()).catch((error) => {
+        synchronizeUsagePeriod().then(() => runLocalRuntimeOperation("配置同步", () => runtimeManager.reconcile())).catch((error) => {
           console.warn(`[RayLink] Entitlement reconciliation failed: ${error.message}`);
         });
       }, entitlementReconcileIntervalMs);
@@ -2373,6 +2443,9 @@ export async function createRayLinkApp(options) {
       }
     },
     async close() {
+      usagePeriodClosing = true;
+      if (usagePeriodTimer) clearTimeout(usagePeriodTimer);
+      if (usagePeriodPromise) await usagePeriodPromise;
       if (alertTimer) {
         clearInterval(alertTimer);
         alertTimer = null;

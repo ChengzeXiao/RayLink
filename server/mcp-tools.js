@@ -4,7 +4,7 @@ import { protocolCatalog } from "./singbox/protocol-catalog.js";
 const requestId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const pick = (value, keys) => Object.fromEntries(keys.filter((key) => value?.[key] !== undefined).map((key) => [key, value[key]]));
-const userView = (value) => pick(value, ["id", "name", "initials", "email", "portalStatus", "state", "usedGb", "quotaGb", "nodeScope", "expiresAt", "runtimeSync"]);
+const userView = (value) => pick(value, ["id", "name", "initials", "email", "portalStatus", "state", "usedGb", "quotaGb", "nodeScope", "expiresAt", "usagePeriod", "runtimeSync"]);
 const runtimeView = (value) => pick(value, ["state", "mode", "runtimeVersion", "version", "installed", "platform", "architecture", "tags", "binaryPath", "configPath", "validation", "checksum"]);
 const previewView = (value) => pick(value, ["checksum", "eligibleUsers", "inboundCount", "listenPort", "protocols"]);
 const profileView = (value) => pick(value, ["type", "enabled", "listen", "port", "tls", "transport"]);
@@ -141,15 +141,19 @@ export const mcpTools = [
   defineTool({ name: "system_overview", description: "Read a curated control-plane overview; excludes user records, administrator lists, audit records and credentials.", path: "/api/bootstrap",
     select: (payload) => ({ currentAdmin: pick(payload.currentAdmin, ["id", "username", "role"]), userCount: payload.users?.length || 0,
       hostCount: payload.hosts?.length || 0, runtime: runtimeView(payload.runtime), runtimePreview: previewView(payload.runtimePreview),
-      installation: runtimeView(payload.installation), bbr: payload.bbr, runtimeSetup: payload.runtimeSetup, systemUpdate: payload.systemUpdate, routingRuleSets: payload.routingRuleSets }) }),
+      installation: runtimeView(payload.installation), bbr: payload.bbr, runtimeSetup: payload.runtimeSetup, systemUpdate: payload.systemUpdate, routingRuleSets: payload.routingRuleSets, usagePeriod: payload.usagePeriod }) }),
   defineTool({ name: "users_list", description: "List users and their independent entitlements without subscription credentials.", path: "/api/bootstrap", select: (payload) => ({ users: payload.users.map(userView) }) }),
   defineTool({ name: "users_get", description: "Read one user's entitlement and state without subscription credentials.", fields: { userId: id }, path: "/api/bootstrap", select: (payload, args) => userView(findResource(payload.users, args.userId, "用户")) }),
+  defineTool({ name: "users_usage_history", description: "Read current and archived monthly traffic usage, including the preserved pre-monthly total and manual adjustments. Months use Asia/Shanghai; this does not reset usage.",
+    fields: { userId: id, limit: z.number().int().min(1).max(36).optional() },
+    path: (args) => `${userPath(args)}/usage-history${args.limit === undefined ? "" : `?limit=${args.limit}`}`,
+    select: (payload) => ({ periods: payload.periods.map((period) => pick(period, ["kind", "key", "timeZone", "startsAt", "resetsAt", "usedBytes", "usedGb", "quotaGb", "closedAt", "adjustments"])) }) }),
   defineTool({ name: "hosts_list", description: "List Hosts, applied protocol summaries and operational evidence without private keys or advanced configuration JSON.", path: "/api/bootstrap", select: (payload) => ({ hosts: payload.hosts.map(hostView) }) }),
   defineTool({ name: "hosts_get", description: "Read one Host without private keys or advanced configuration JSON.", fields: { hostId: id }, path: "/api/bootstrap", select: (payload, args) => hostView(findResource(payload.hosts, args.hostId, "主机")) }),
   defineTool({ name: "users_create", description: "Create a user-owned entitlement. Returns no subscription secret; runtimeSync distinguishes saved from published.",
     permission: "users.manage", mutating: true, fields: userFields, method: "POST", path: "/api/users", body: true, select: userView }),
   defineTool({ name: "users_update", description: "Update user entitlement or state. Disabling or exhausting quota schedules credential revocation; inspect runtimeSync for pending publication.",
-    permission: "users.manage", mutating: true, fields: { userId: id, ...optionalFields(userFields) }, method: "PATCH", path: userPath, params: ["userId"], body: true, select: userView }),
+    permission: "users.manage", mutating: true, fields: { userId: id, ...optionalFields(userFields), usagePeriodKey: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/).optional() }, method: "PATCH", path: userPath, params: ["userId"], body: true, select: userView }),
   defineTool({ name: "users_reset_password", description: "Replace a user's portal password and revoke portal sessions; preserves subscription and entitlement.",
     permission: "users.manage", mutating: true, fields: { userId: id, password: z.string().min(8) }, method: "POST", path: (args) => `${userPath(args)}/password/reset`, params: ["userId"], body: true,
     select: (value) => pick(value, ["passwordReset", "sessionsRevoked"]) }),

@@ -36,13 +36,37 @@ function scopeLabel(scope) {
   return scope.map((item) => labels[item] || item).join(" + ");
 }
 
+function usagePeriodPresentation(period) {
+  const resetsAt = typeof period?.resetsAt === "string" ? new Date(period.resetsAt) : null;
+  const monthly = period?.timeZone === "Asia/Shanghai"
+    && /^\d{4}-(0[1-9]|1[0-2])$/.test(period.key || "")
+    && /(?:Z|[+-]\d{2}:\d{2})$/i.test(period.resetsAt || "")
+    && resetsAt && Number.isFinite(resetsAt.getTime());
+  return {
+    monthly: Boolean(monthly),
+    reset: monthly
+      ? `下次重置（北京时间）：${new Intl.DateTimeFormat("zh-CN", {
+        timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+      }).format(resetsAt)}`
+      : "未收到月度周期信息，自动重置状态待确认。"
+  };
+}
+
 function renderAccount(profile) {
   const { user, entitlement } = profile;
+  const usage = usagePeriodPresentation(user.usagePeriod);
   document.querySelector("#portal-user-initials").textContent = user.initials;
   document.querySelector("#portal-user-name").textContent = user.name;
   document.querySelector("#portal-user-email").textContent = user.email;
   document.querySelector("#portal-account-title").textContent = `${user.name} 的访问权益`;
+  document.querySelector("#portal-used-label").textContent = usage.monthly ? "本月已用" : "已用流量";
+  document.querySelector("#portal-quota-label").textContent = usage.monthly ? "每月额度" : "流量额度";
+  document.querySelector("#portal-remaining-label").textContent = usage.monthly ? "本月剩余" : "剩余流量";
+  document.querySelector("#portal-used-quota").textContent = `${Number(user.usedGb).toFixed(1)} GB`;
+  document.querySelector("#portal-monthly-quota").textContent = `${Number(entitlement.quotaGb).toFixed(1)} GB`;
   document.querySelector("#portal-remaining-quota").textContent = `${Math.max(0, entitlement.quotaGb - user.usedGb).toFixed(1)} GB`;
+  document.querySelector("#portal-usage-period").textContent = `${usage.monthly ? "每月 1 日 00:00（北京时间）自动重置。" : ""}${usage.reset}`;
   document.querySelector("#portal-node-scope").textContent = scopeLabel(entitlement.nodeScope);
   downloadButton.hidden = false;
   const configured = Boolean(user.subscription?.configured);

@@ -34,6 +34,7 @@ const accountSummary = { totalUsers: 0 };
 
 const controlPlane = {
   currentAdmin: null,
+  usagePeriod: null,
   hosts: [],
   runtime: null,
   runtimePreview: null,
@@ -227,12 +228,14 @@ function applyBootstrap(data) {
     state: user.state,
     used: user.usedGb,
     quota: user.quotaGb,
+    usagePeriod: user.usagePeriod || data.usagePeriod || null,
     nodeScope: user.nodeScope,
     expires: user.expiresAt,
     subscription: user.subscription
   })));
   accountSummary.totalUsers = users.length;
   controlPlane.currentAdmin = data.currentAdmin;
+  controlPlane.usagePeriod = data.usagePeriod || null;
   controlPlane.provisioning = data.provisioning || null;
   if (!canProvision() || (previousAdminId && previousAdminId !== data.currentAdmin.id)) clearProvisioning();
   document.querySelector("#provisioning-history").hidden = !canProvision();
@@ -1673,7 +1676,31 @@ function formatDate(value) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(`${value}T00:00:00`));
 }
 
+function usagePeriodPresentation(period) {
+  const resetsAt = typeof period?.resetsAt === "string" ? new Date(period.resetsAt) : null;
+  const monthly = period?.timeZone === "Asia/Shanghai"
+    && /^\d{4}-(0[1-9]|1[0-2])$/.test(period.key || "")
+    && /(?:Z|[+-]\d{2}:\d{2})$/i.test(period.resetsAt || "")
+    && resetsAt && Number.isFinite(resetsAt.getTime());
+  return {
+    monthly: Boolean(monthly),
+    usedLabel: monthly ? "本月已用" : "已用流量",
+    quotaLabel: monthly ? "每月额度" : "流量额度",
+    reset: monthly
+      ? `下次重置（北京时间）：${new Intl.DateTimeFormat("zh-CN", {
+        timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+      }).format(resetsAt)}`
+      : "未收到月度周期信息，自动重置状态待确认。"
+  };
+}
+
 function renderUsers() {
+  const period = usagePeriodPresentation(controlPlane.usagePeriod);
+  setText("#user-usage-heading", `${period.usedLabel} / ${period.quotaLabel}`);
+  setText("#user-usage-period", period.monthly
+    ? `按自然月计量，每月 1 日 00:00（北京时间）自动重置。${period.reset}`
+    : period.reset);
   const query = elements.userSearch.value.trim().toLocaleLowerCase();
   const filtered = users.filter((user) => {
     const matchesFilter = activeUserFilter === "all" || user.state === activeUserFilter;
@@ -1685,6 +1712,7 @@ function renderUsers() {
     const status = stateLabels[user.state];
     const ratio = Math.min(100, (user.used / user.quota) * 100);
     const progressClass = ratio >= 80 ? "warning" : "";
+    const usage = usagePeriodPresentation(user.usagePeriod);
     return `
       <tr>
         <td>
@@ -1694,9 +1722,10 @@ function renderUsers() {
           </button>
         </td>
         <td><span class="status-badge ${status.className}"><i></i>${status.label}</span></td>
-        <td class="usage-cell">
+        <td class="usage-cell" data-usage-label="${usage.usedLabel} / ${usage.quotaLabel}">
           <div class="usage-copy"><span>${user.used.toFixed(1)} GB</span><span>${user.quota} GB</span></div>
           <div class="progress ${progressClass}"><i style="width:${ratio.toFixed(1)}%"></i></div>
+          <small class="usage-reset">${escapeHtml(usage.reset)}</small>
         </td>
         <td><span class="entitlement-cell"><strong>${escapeHtml(scopeToLabel(user.nodeScope))}</strong><small>通用订阅</small></span></td>
         <td class="numeric">${formatDate(user.expires)}</td>
@@ -1808,6 +1837,7 @@ function showAdminLogin() {
   closeDrawer({ restoreFocus: false, clearContent: true });
   document.documentElement.classList.remove("hide-root-scrollbar");
   controlPlane.currentAdmin = null;
+  controlPlane.usagePeriod = null;
   controlPlane.nodeDomains = null;
   document.querySelector("#node-domain-settings-form")?.reset();
   elements.authError.textContent = "";
@@ -2041,6 +2071,8 @@ function userPasswordResetMarkup(user) {
 
 function userDrawerMarkup(user = {}) {
   const isNew = !user.id;
+  const usage = usagePeriodPresentation(user.usagePeriod || controlPlane.usagePeriod);
+  const initialUsedGb = Number(user.used || 0).toFixed(1);
   const selectedNodeGroup = user.nodeScope?.length ? scopeToLabel(user.nodeScope) : "全部节点";
   const currentHostRegion = controlPlane.hosts[0]?.region;
   const standardNodeGroups = [
@@ -2053,7 +2085,7 @@ function userDrawerMarkup(user = {}) {
     .map((nodeGroup) => `<option ${nodeGroup === selectedNodeGroup ? "selected" : ""}>${escapeHtml(nodeGroup)}</option>`)
     .join("");
   return `
-    <form class="drawer-form" id="user-drawer-form" data-user-id="${escapeHtml(user.id || "")}">
+    <form class="drawer-form" id="user-drawer-form" data-user-id="${escapeHtml(user.id || "")}" data-initial-used-gb="${initialUsedGb}" data-usage-period-key="${escapeHtml(user.usagePeriod?.key || controlPlane.usagePeriod?.key || "")}">
       <div class="drawer-profile">
         <span class="avatar">${escapeHtml(user.initials || "新")}</span>
         <div><strong>${escapeHtml(user.name || "新用户")}</strong><small>${isNew ? "一次完成账号与权益设置" : escapeHtml(user.email)}</small></div>
@@ -2063,9 +2095,10 @@ function userDrawerMarkup(user = {}) {
       <label class="field"><span>邮箱</span><input name="email" type="email" value="${escapeHtml(user.email || "")}" placeholder="name@company.com" required><small class="field-error"></small></label>
       ${isNew ? '<label class="field"><span>初始密码</span><input name="password" type="password" minlength="8" autocomplete="new-password" placeholder="至少 8 位" required><small class="field-error"></small></label>' : ""}
       <label class="field"><span>到期时间</span><input name="expires" type="date" value="${escapeHtml(user.expires || "2026-12-31")}" required><small class="field-error"></small></label>
-      <label class="field"><span>已用流量</span><input name="usedGb" type="number" min="0" step="0.1" value="${Number(user.used || 0).toFixed(1)}" required><small class="field-error"></small><small class="field-hint">由支持 with_v2ray_api 的 Runtime 自动计量；管理员可在账务校正时调整</small></label>
+      <label class="field"><span>${usage.usedLabel}（GB）</span><input name="usedGb" type="number" min="0" step="0.1" value="${initialUsedGb}" required><small class="field-error"></small><small class="field-hint">${usage.monthly ? "本月用量自动计量；仅在需要账务校正时修改。" : "用量由 Runtime 自动计量；仅在需要账务校正时修改。"}</small></label>
       <p class="drawer-section-label">用户权益</p>
-      <label class="field"><span>流量额度（GB）</span><input name="quota" type="number" min="1" step="1" value="${Number(user.quota || 120)}" required><small class="field-error"></small></label>
+      <label class="field"><span>${usage.quotaLabel}（GB）</span><input name="quota" type="number" min="1" step="1" value="${Number(user.quota || 120)}" required><small class="field-error"></small></label>
+      <p class="usage-period-note">${usage.monthly ? "每月 1 日 00:00（北京时间）自动重置已用流量，额度不变。" : ""}${escapeHtml(usage.reset)}</p>
       <label class="field"><span>节点范围</span><select name="nodeGroup">${nodeGroupOptions}</select><small class="field-hint">该用户只能获取所选区域的客户端配置</small></label>
       <p class="drawer-section-label">平台订阅能力</p>
       <div class="switch-row"><div><strong>多客户端订阅</strong><small>自动提供 Mihomo、Egern 与 sing-box 三种兼容配置</small></div><span class="status-badge good"><i></i>固定启用</span></div>
@@ -2676,6 +2709,7 @@ function portalHomeMarkup() {
   const profile = controlPlane.portalProfile;
   const user = profile.user;
   const entitlement = profile.entitlement;
+  const usage = usagePeriodPresentation(user.usagePeriod);
   const clientEntries = universalClientFormats.map((clientId) => {
     const client = clientCatalog[clientId];
     if (!client) return "";
@@ -2692,7 +2726,13 @@ function portalHomeMarkup() {
         <p class="drawer-section-label">当前用户权益</p>
         <h3>${escapeHtml(user.name)} 的访问权益</h3>
         <p>流量和节点范围由管理员设置；通用订阅统一支持 Clash/Mihomo、Egern 与 sing-box。</p>
-        <div class="entitlement-preview"><span><small>剩余流量</small><strong>${Math.max(0, entitlement.quotaGb - user.usedGb).toFixed(1)} GB</strong></span><span><small>节点范围</small><strong>${escapeHtml(scopeToLabel(entitlement.nodeScope))}</strong></span></div>
+        <div class="entitlement-preview">
+          <span><small>${usage.usedLabel}</small><strong>${Number(user.usedGb).toFixed(1)} GB</strong></span>
+          <span><small>${usage.quotaLabel}</small><strong>${Number(entitlement.quotaGb).toFixed(1)} GB</strong></span>
+          <span><small>${usage.monthly ? "本月剩余" : "剩余流量"}</small><strong>${Math.max(0, entitlement.quotaGb - user.usedGb).toFixed(1)} GB</strong></span>
+          <span><small>节点范围</small><strong>${escapeHtml(scopeToLabel(entitlement.nodeScope))}</strong></span>
+        </div>
+        <p class="usage-period-note">${usage.monthly ? "每月 1 日 00:00（北京时间）自动重置。" : ""}${escapeHtml(usage.reset)}</p>
       </div>
       <p class="drawer-section-label">选择客户端</p>
       <div class="portal-client-list">
@@ -2821,6 +2861,7 @@ function validateDrawerForm(form) {
 
 function showDrawerFormError(form, error) {
   const fieldByCode = {
+    USAGE_PERIOD_CHANGED: "usedGb",
     INVALID_LISTEN: "listen",
     INVALID_PROTOCOL_PORT: "port",
     PROTOCOL_PORT_CONFLICT: "port",
@@ -2876,10 +2917,13 @@ async function saveUserForm(form) {
     quotaGb: Number(form.elements.quota.value),
     nodeScope: labelToScope(form.elements.nodeGroup.value),
     expiresAt: form.elements.expires.value,
-    usedGb: Number(form.elements.usedGb.value),
     state: form.querySelector("[data-user-enabled]").classList.contains("on") ? "active" : "disabled",
     portalStatus: form.querySelector("[data-portal-enabled]").classList.contains("on") ? "active" : "invited"
   };
+  if (!userId || form.elements.usedGb.value !== form.dataset.initialUsedGb) {
+    payload.usedGb = Number(form.elements.usedGb.value);
+    if (userId && form.dataset.usagePeriodKey) payload.usagePeriodKey = form.dataset.usagePeriodKey;
+  }
   if (form.elements.password?.value) payload.password = form.elements.password.value;
   const result = await api(userId ? `/api/users/${encodeURIComponent(userId)}` : "/api/users", {
     method: userId ? "PATCH" : "POST",
@@ -2887,6 +2931,8 @@ async function saveUserForm(form) {
   });
   // The write is committed. A failed refresh must not turn a retry into another POST.
   form.dataset.userId = result.id;
+  form.dataset.initialUsedGb = form.elements.usedGb.value;
+  if (result.usagePeriod?.key) form.dataset.usagePeriodKey = result.usagePeriod.key;
   try {
     await loadBootstrap();
   } catch {

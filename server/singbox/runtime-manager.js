@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { buildSingBoxConfig } from "./config.js";
 
@@ -138,30 +139,31 @@ export class RuntimeManager {
       publisherAdminId
     });
     this.store.markHostProtocolsApplied("local", compiled.protocols);
-    for (const { host, remote, sealedTlsBundle, tlsAssets } of remoteDeployments) {
-      const revokesCredentials = options.forceCritical === true
-        || (options.detectRevocation === true && removesRuntimeCredentials(
-          this.store.latestAppliedNodeConfig(host.id),
-          remote.config
-        ));
-      this.store.queueNodeTask(host.id, "publish-config", {
-        version: deployment.version,
-        checksum: remote.checksum,
-        configText: remote.configText,
-        protocols: remote.protocols,
-        ...(options.activation?.hostId === host.id
-          ? { activation: options.activation }
-          : {}),
-        ...(sealedTlsBundle ? { sealedTlsBundle, tlsAssets } : {}),
-        reason: options.reason || "deployment"
-      }, {
-        priority: revokesCredentials ? "critical" : "normal",
-        maxAttempts: revokesCredentials ? 0 : 5
-      });
-    }
+    for (const remote of remoteDeployments) this.#queueRemotePublication(remote, deployment.version, options);
     const current = this.store.listDeployments()
       .find((candidate) => candidate.id === deployment.id) || deployment;
     return { ...current, runtime: deployment.runtime, remoteQueued: remoteDeployments.length };
+  }
+
+  #queueRemotePublication({ host, remote, sealedTlsBundle, tlsAssets }, version, options) {
+    const revokesCredentials = options.forceCritical === true
+      || (options.detectRevocation === true && removesRuntimeCredentials(
+        this.store.latestAppliedNodeConfig(host.id), remote.config
+      ));
+    return this.store.queueNodeTask(host.id, "publish-config", {
+      version, checksum: remote.checksum, configText: remote.configText, protocols: remote.protocols,
+      ...(options.activation?.hostId === host.id ? { activation: options.activation } : {}),
+      ...(sealedTlsBundle ? { sealedTlsBundle, tlsAssets } : {}),
+      reason: options.reason || "deployment"
+    }, {
+      priority: revokesCredentials ? "critical" : "normal",
+      maxAttempts: revokesCredentials || options.retryUntilApplied === true ? 0 : 5
+    });
+  }
+
+  #pendingRemoteDeployments(candidate) {
+    return candidate.remoteDeployments.filter(({ host, remote }) =>
+      !isDeepStrictEqual(this.store.latestAppliedNodeConfig(host.id), remote.config));
   }
 
   async reconcile(publisherAdminId = null, options = {}) {
@@ -179,19 +181,26 @@ export class RuntimeManager {
       deploymentCandidateMatchesSnapshot(candidate, activeSnapshot)
       && options.forceCritical !== true
     ) {
-      return { changed: false, reason: "configuration-current" };
-    }
-    return {
-      changed: true,
-      deployment: await this.#publishCandidate(
-        candidate,
-        publisherAdminId,
-        {
-          reason: options.reason || "entitlement-reconciliation",
-          detectRevocation: true,
-          forceCritical: options.forceCritical === true
+      const pending = this.#pendingRemoteDeployments(candidate);
+      let remoteQueued = 0;
+      if (options.retryUntilApplied === true) {
+        for (const remote of pending) {
+          if (this.store.ensurePendingNodeConfigRetry(remote.host.id, remote.remote.configText)) continue;
+          this.#queueRemotePublication(remote, activeDeployment.version, { ...options, detectRevocation: true });
+          remoteQueued += 1;
         }
-      )
+      }
+      return { changed: false, reason: "configuration-current", remotePending: pending.length, remoteQueued };
+    }
+    const deployment = await this.#publishCandidate(candidate, publisherAdminId, {
+      reason: options.reason || "entitlement-reconciliation",
+      retryUntilApplied: options.retryUntilApplied === true,
+      detectRevocation: true,
+      forceCritical: options.forceCritical === true
+    });
+    return {
+      changed: true, deployment, remoteQueued: deployment.remoteQueued,
+      remotePending: this.#pendingRemoteDeployments(candidate).length
     };
   }
 

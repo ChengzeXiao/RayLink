@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink 用户中心">
   <title>用户中心 · RayLink</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=0.2.33">
+  <link rel="stylesheet" href="/styles.css?v=0.2.34">
 </head>
 <body class="portal-page">
   <main class="portal-shell">
@@ -37,9 +37,12 @@
       <h1 id="portal-account-title">—</h1>
       <p id="portal-entitlement-description">流量和节点范围由管理员设置；通用订阅统一支持 Clash/Mihomo、Loon、Egern 与 sing-box。</p>
       <div class="entitlement-preview">
-        <span><small>剩余流量</small><strong id="portal-remaining-quota">—</strong></span>
+        <span><small id="portal-used-label">已用流量</small><strong id="portal-used-quota">—</strong></span>
+        <span><small id="portal-quota-label">流量额度</small><strong id="portal-monthly-quota">—</strong></span>
+        <span><small id="portal-remaining-label">剩余流量</small><strong id="portal-remaining-quota">—</strong></span>
         <span><small>节点范围</small><strong id="portal-node-scope">—</strong></span>
       </div>
+      <p class="usage-period-note" id="portal-usage-period">正在读取流量周期…</p>
       <section class="portal-subscription" aria-labelledby="portal-subscription-title">
         <div>
           <p class="drawer-section-label">客户端订阅</p>
@@ -100,8 +103,8 @@
     </section>
   </main>
   <script src="/qrcode.min.js?v=1.0.0"></script>
-  <script src="/subscription-qr.js?v=0.2.33"></script>
-  <script src="/subscription-client-url.js?v=0.2.33"></script>
-  <script src="/portal.js?v=0.2.33"></script>
+  <script src="/subscription-qr.js?v=0.2.34"></script>
+  <script src="/subscription-client-url.js?v=0.2.34"></script>
+  <script src="/portal.js?v=0.2.34"></script>
 </body>
 </html>

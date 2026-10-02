@@ -928,9 +928,11 @@ th:nth-last-child(2), td:nth-last-child(2) { text-align: right; }
   transition: transform 120ms var(--ease-out), border-color 160ms ease, background-color 160ms ease;
 }
 .subscription-quick-button svg { width: 14px; height: 14px; color: var(--accent); }
-.usage-cell { min-width: 160px; }
+.usage-cell { min-width: 160px; padding-block: 10px; }
 .usage-copy { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .usage-copy span:last-child { color: var(--faint); }
+.usage-reset { display: block; max-width: 220px; margin-top: 6px; color: var(--faint); font-size: 9px; line-height: 1.5; white-space: normal; }
+.usage-period-note { margin: 10px 0 16px; color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
 .progress { height: 3px; overflow: hidden; border-radius: var(--r-pill); background: var(--surface-3); }
 .progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .progress.warning i { background: var(--warning); }
@@ -2010,12 +2012,12 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
   td:last-child { position: absolute; top: 14px; right: 12px; }
   td::before { display: block; margin-bottom: 5px; color: var(--faint); font-size: 8px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
   #user-table-body td:nth-child(2)::before { content: "状态"; }
-  #user-table-body td:nth-child(3)::before { content: "已用 / 配额"; }
+  #user-table-body td:nth-child(3)::before { content: attr(data-usage-label); }
   #user-table-body td:nth-child(4)::before { content: "节点 / 订阅"; }
   #user-table-body td:nth-child(5)::before { content: "到期时间"; }
   #user-table-body td:nth-child(6)::before { content: "订阅"; }
   #user-table-body td:nth-child(7)::before { display: none; }
-  .usage-cell { min-width: 0; }
+  .usage-cell { min-width: 0; padding-block: 0; }
   .table-footer { background: var(--surface-1); }
   .pagination { display: none; }
   .form-section { display: block; padding: 18px 14px; }
