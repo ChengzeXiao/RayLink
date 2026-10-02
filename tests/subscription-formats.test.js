@@ -294,7 +294,7 @@ test("Mihomo subscription contains compatible nodes, smart groups, routing and D
   assert.match(artifact.body, /expected-status: 204/);
   assert.match(
     artifact.body,
-    /name: "RayLink 智能"[\s\S]*?timeout: 8000[\s\S]*?name: "TCP 稳定"[\s\S]*?timeout: 5000[\s\S]*?name: "UDP 高速"[\s\S]*?timeout: 12000[\s\S]*?name: "故障回退"[\s\S]*?timeout: 8000/
+    /name: "RayLink 智能"[\s\S]*?timeout: 12000[\s\S]*?name: "TCP 稳定"[\s\S]*?timeout: 12000[\s\S]*?name: "UDP 高速"[\s\S]*?timeout: 12000[\s\S]*?name: "故障回退"[\s\S]*?timeout: 12000/
   );
   assert.match(
     artifact.body,
@@ -326,6 +326,50 @@ test("Mihomo subscription contains compatible nodes, smart groups, routing and D
     artifact.body,
     /nameserver:[\s\S]*?- "https:\/\/1\.1\.1\.1\/dns-query#RayLink 代理"/
   );
+});
+
+test("modern Mihomo shares health checks while legacy exports retain standalone nodes", () => {
+  const legacy = buildSubscriptionArtifact({ format: "mihomo", singBoxConfig });
+  const modern = buildSubscriptionArtifact({ format: "mihomo-modern", singBoxConfig });
+  assert.equal(legacy.filename, "raylink-mihomo.yaml");
+  assert.match(legacy.body, /^proxies:\n/m);
+  assert.doesNotMatch(legacy.body, /^proxy-providers:/m);
+  assert.equal(modern.filename, "raylink-mihomo-modern.yaml");
+  assert.match(modern.body, /^# .*Mihomo >= 1\.19\.1.*format=mihomo/);
+  assert.match(modern.body, /^proxy-providers:\n  raylink-health:\n    type: "inline"/m);
+  assert.doesNotMatch(modern.body, /^proxies:/m);
+  assert.equal((modern.body.match(/health-check:/g) || []).length, 1);
+  assert.match(modern.body, /health-check:\n      enable: true[\s\S]*?timeout: 12000/);
+  const group = (body, name) => body.split(`name: "${name}"`)[1].split(/\n  - |\nrule-providers:/)[0];
+  for (const name of ["RayLink 代理", "AI 网站代理", "RayLink 智能", "TCP 稳定", "UDP 高速", "故障回退", "AI 稳定出口", "手动选择"]) {
+    assert.match(modern.body, new RegExp(`name: "${name}"`));
+    assert.equal(group(modern.body, name).match(/type: "([^"\n]+)"/)[1], group(legacy.body, name).match(/type: "([^"\n]+)"/)[1]);
+  }
+  for (const body of [legacy.body, modern.body]) {
+    for (const name of ["RayLink 智能", "TCP 稳定", "UDP 高速", "故障回退", "AI 稳定出口"]) assert.match(group(body, name), /timeout: 12000/);
+  }
+  const ai = group(modern.body, "AI 网站代理");
+  assert.match(ai, /proxies:\n\s+- "AI 稳定出口"/);
+  const filter = (name) => JSON.parse(group(modern.body, name).match(/filter: (.+)/)[1]).split("`").map((pattern) => new RegExp(pattern));
+  assert.ok(filter("TCP 稳定").some((pattern) => pattern.test("raylink-tokyo-vless")));
+  assert.ok(!filter("TCP 稳定").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
+  assert.ok(filter("UDP 高速").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
+  assert.ok(!filter("AI 稳定出口").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
+  assert.deepEqual(filter("故障回退").map((pattern) => ["raylink-tokyo-vless", "raylink-tokyo-hysteria2"].find((name) => pattern.test(name))), ["raylink-tokyo-vless", "raylink-tokyo-hysteria2"]);
+  assert.equal(modern.body.split("\nrules:\n")[1], legacy.body.split("\nrules:\n")[1]);
+});
+
+test("modern Mihomo filters treat node names as exact literals, including its filter delimiter", () => {
+  const name = "node.[one](a)|alt`second";
+  const config = { outbounds: [{ type: "shadowsocks", tag: name, server: "node.example.com", server_port: 8388, method: "aes-128-gcm", password: "fixture" }] };
+  const body = buildSubscriptionArtifact({ format: "mihomo-modern", singBoxConfig: config }).body;
+  const group = body.split('name: "手动选择"')[1].split(/\nrule-providers:/)[0];
+  const filter = JSON.parse(group.match(/filter: (.+)/)[1]);
+  assert.equal(filter.split("`").length, 1, "A literal backtick must not create a second filter");
+  const pattern = new RegExp(filter);
+  assert.ok(pattern.test(name));
+  assert.ok(!pattern.test("alt"));
+  assert.ok(!pattern.test(name + "-other"));
 });
 
 test("Mihomo DNS policies use valid suffix patterns for local and custom domains", () => {

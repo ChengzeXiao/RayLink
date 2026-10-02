@@ -9,7 +9,7 @@ function timestamp(value) {
 // host addresses/names, user identities or backup filesystem paths into exports.
 export function buildReadinessReport({
   hosts = [], deployments = [], backups = [], runtime = {}, routingPolicy = {},
-  ruleSets = null, alerts = [], backupVerification = null, now = new Date()
+  ruleSets = null, alerts = [], backupVerification = null, tlsRenewal = null, now = new Date()
 } = {}) {
   const checks = [];
   const fresh = (value, limit) => {
@@ -80,6 +80,14 @@ export function buildReadinessReport({
         "在主机入口协议中重新检测", "hosts", health?.checkedAt);
     }
   });
+
+  if (tlsRenewal && tlsRenewal.status !== "disabled") {
+    const status = tlsRenewal.status === "error" ? "fail"
+      : tlsRenewal.status === "healthy" && fresh(tlsRenewal.checkedAt, 60 * 60_000) ? "pass" : "warning";
+    add("tls-renewal", status, "本机受管证书同步",
+      status === "pass" ? "已核对受管证书及运行时副本" : "证书同步异常、临近到期或检查记录过旧",
+      "查看证书有效期与同步状态", "certificates", tlsRenewal.checkedAt);
+  }
 
   add("routing", routingPolicy.mode === "smart" ? "pass" : "warning", "智能分流模式",
     routingPolicy.mode === "smart" ? "已启用规则、DNS 与出口协同分流" : "当前未启用智能分流模式",

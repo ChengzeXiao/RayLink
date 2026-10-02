@@ -39,6 +39,7 @@ export function evaluateOperationalAlerts({
   hosts = [],
   deployments = [],
   backups = [],
+  tlsRenewal = null,
   now = new Date()
 }) {
   const alerts = [];
@@ -167,6 +168,26 @@ export function evaluateOperationalAlerts({
         createdAt: now.toISOString()
       }));
     }
+  }
+
+  if (tlsRenewal?.status === "error") {
+    const rollbackFailed = tlsRenewal.errorCode === "TLS_RENEWAL_ROLLBACK_FAILED";
+    alerts.push(createAlert({ code: "TLS_RENEWAL_FAILED", severity: rollbackFailed ? "critical" : "warning",
+      title: rollbackFailed ? "本机证书回滚失败" : "本机证书同步失败",
+      message: rollbackFailed
+        ? "证书更新失败且无法确认回滚成功，请立即人工检查 Runtime 服务和 TLS 入口。"
+        : "请查看证书同步状态并检查 TLS 入口，到期前必须恢复同步。",
+      resourceType: "certificate", resourceId: "local", createdAt: tlsRenewal.checkedAt || now.toISOString() }));
+  }
+  for (const certificate of tlsRenewal?.certificates || []) {
+    if (!certificate.validTo) continue;
+    const remainingMs = new Date(certificate.validTo).getTime() - now.getTime();
+    if (!Number.isFinite(remainingMs) || remainingMs > 30 * 86400_000) continue;
+    const days = Math.max(0, Math.ceil(remainingMs / 86400_000));
+    alerts.push(createAlert({ code: "CERTIFICATE_EXPIRING", severity: days <= 7 ? "critical" : "warning",
+      title: days === 0 ? "本机 TLS 证书已过期" : "本机 TLS 证书即将过期",
+      message: `${certificate.domain} 的证书${days === 0 ? "已过期" : `将在 ${days} 天内过期`}，请检查自动同步。`,
+      resourceType: "certificate", resourceId: `local:${certificate.domain}`, createdAt: now.toISOString() }));
   }
 
   const latestBackup = backups[0];

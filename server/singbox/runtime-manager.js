@@ -2,15 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import { buildSingBoxConfig } from "./config.js";
+import { normalizeRuntimeDnsSettings } from "./runtime-dns.js";
 
 function deploymentVersion(prefix = "v", now = new Date()) {
   return `${prefix}${now.toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;
 }
 
-function compile(store, listenPort, hostId = "local", protocols = null) {
+function compile(store, listenPort, runtimeDns, hostId = "local", protocols = null) {
   const snapshot = store.runtimeSnapshot(hostId);
   if (protocols) snapshot.protocols = protocols;
-  const config = buildSingBoxConfig(snapshot, { listenPort });
+  const config = buildSingBoxConfig(snapshot, { listenPort, runtimeDns });
   const configText = `${JSON.stringify(config, null, 2)}\n`;
   const checksum = createHash("sha256").update(configText).digest("hex");
   const eligibleUsers = new Set(
@@ -55,16 +56,17 @@ function deploymentCandidateMatchesSnapshot(candidate, snapshot) {
 }
 
 export class RuntimeManager {
-  constructor({ store, adapter, listenPort = 8388, tlsAssetPackager = null }) {
+  constructor({ store, adapter, listenPort = 8388, tlsAssetPackager = null, runtimeDns }) {
     this.store = store;
     this.adapter = adapter;
     this.listenPort = listenPort;
     this.tlsAssetPackager = tlsAssetPackager;
+    this.runtimeDns = normalizeRuntimeDnsSettings(runtimeDns);
     this.publishing = false;
   }
 
   preview() {
-    const compiled = compile(this.store, this.listenPort);
+    const compiled = compile(this.store, this.listenPort, this.runtimeDns);
     return {
       checksum: compiled.checksum,
       eligibleUsers: compiled.eligibleUsers,
@@ -75,15 +77,15 @@ export class RuntimeManager {
   }
 
   compileHostRuntimeConfig(hostId = "local", protocols = null) {
-    return compile(this.store, this.listenPort, hostId, protocols).config;
+    return compile(this.store, this.listenPort, this.runtimeDns, hostId, protocols).config;
   }
 
   async prepareDeploymentCandidate() {
-    const compiled = compile(this.store, this.listenPort);
+    const compiled = compile(this.store, this.listenPort, this.runtimeDns);
     const remoteHosts = this.store.listHosts().filter((host) => host.kind === "remote" && host.enrolledAt);
     const remoteDeployments = [];
     for (const host of remoteHosts) {
-      let remote = compile(this.store, this.listenPort, host.id);
+      let remote = compile(this.store, this.listenPort, this.runtimeDns, host.id);
       let sealedTlsBundle = null;
       let tlsAssets = [];
       if (this.tlsAssetPackager) {

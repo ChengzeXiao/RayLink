@@ -70,9 +70,7 @@ const loonCompatibleTypes = new Set([
   "anytls",
   "hysteria2"
 ]);
-const MIHOMO_SMART_HEALTH_TIMEOUT_MS = 8000;
-const MIHOMO_TCP_HEALTH_TIMEOUT_MS = 5000;
-const MIHOMO_UDP_HEALTH_TIMEOUT_MS = 12000;
+const MIHOMO_HEALTH_TIMEOUT_MS = 12000;
 const MIHOMO_TUIC_REQUEST_TIMEOUT_MS = 8000;
 const ENDPOINT_HOSTS_DNS_TAG = "raylink-endpoint-hosts";
 
@@ -506,7 +504,7 @@ function buildLoonNodes(singBoxConfig) {
   return `${nodes.join("\n")}\n`;
 }
 
-function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
+function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, sharedHealthChecks = false) {
   const routePolicy = normalizeRoutingPolicy(inputPolicy);
   const proxies = nodeOutbounds(singBoxConfig)
     .filter((outbound) => mihomoCompatibleTypes.has(outbound.type))
@@ -547,7 +545,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       interval: 180,
       tolerance: 80,
       lazy: false,
-      timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
+      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
       "expected-status": 204
     },
@@ -559,7 +557,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       interval: 180,
       tolerance: 50,
       lazy: false,
-      timeout: MIHOMO_TCP_HEALTH_TIMEOUT_MS,
+      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
       "expected-status": 204
     }] : []),
@@ -571,7 +569,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       interval: 180,
       tolerance: 80,
       lazy: false,
-      timeout: MIHOMO_UDP_HEALTH_TIMEOUT_MS,
+      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
       "expected-status": 204
     }] : []),
@@ -582,7 +580,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       url: probeUrl,
       interval: 60,
       lazy: false,
-      timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
+      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
       "expected-status": 204
     },
@@ -593,7 +591,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       url: probeUrl,
       interval: 60,
       lazy: false,
-      timeout: MIHOMO_SMART_HEALTH_TIMEOUT_MS,
+      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
       "max-failed-times": 3,
       "expected-status": 204
     },
@@ -603,6 +601,21 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
       proxies: manualCandidates
     }
   ];
+  const providerName = "raylink-health";
+  const sharedGroups = sharedHealthChecks ? proxyGroups.map((group) => {
+    const nodeNames = group.proxies.filter((name) => names.includes(name));
+    if (!nodeNames.length) return group;
+    const groupNames = group.proxies.filter((name) => !names.includes(name));
+    const { proxies: ignored, ...sharedGroup } = group;
+    return {
+      ...sharedGroup,
+      ...(groupNames.length ? { proxies: groupNames } : {}),
+      use: [providerName],
+      // Mihomo's ordered filters preserve fallback priority as well as exact
+      // membership. Encode its delimiter if it occurs in a node's literal name.
+      filter: nodeNames.map((name) => `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("`", "\\x60")}$`).join("`")
+    };
+  }) : proxyGroups;
   const pinnedEndpoints = normalizedEndpointOverrides(endpointOverrides);
   const pinnedHostnames = Object.keys(pinnedEndpoints);
   return {
@@ -648,8 +661,26 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}) {
         )
       } : {})
     },
-    proxies,
-    "proxy-groups": proxyGroups,
+    ...(sharedHealthChecks ? {
+      "proxy-providers": {
+        [providerName]: {
+          type: "inline",
+          payload: proxies,
+          "health-check": {
+            enable: true,
+            url: probeUrl,
+            interval: 60,
+            timeout: MIHOMO_HEALTH_TIMEOUT_MS,
+            lazy: false,
+            "expected-status": 204
+          }
+        }
+      }
+    } : { proxies }),
+    // In modern exports every automatic group consumes the same provider
+    // objects and URL. Only the provider schedules background checks; groups
+    // retain selection and failure-triggered recovery with the same budget.
+    "proxy-groups": sharedGroups,
     ...(routePolicy.mode === "smart" ? { "rule-providers": mihomoChinaProviders() } : {}),
     rules: [
       ...mihomoLocalBypassRules(),
@@ -1025,11 +1056,13 @@ export function buildSubscriptionArtifact({
       body: JSON.stringify(configWithSingBoxEndpointResolver(singBoxConfig, endpointOverrides))
     };
   }
-  if (format === "mihomo") {
+  if (format === "mihomo" || format === "mihomo-modern") {
+    const sharedHealthChecks = format === "mihomo-modern";
     return {
       contentType: "application/yaml; charset=utf-8",
-      filename: "raylink-mihomo.yaml",
-      body: bundledRulesComment + stringifyYaml(buildMihomoConfig(singBoxConfig, routePolicy, endpointOverrides))
+      filename: sharedHealthChecks ? "raylink-mihomo-modern.yaml" : "raylink-mihomo.yaml",
+      body: (sharedHealthChecks ? "# 共享健康检查需要 Mihomo >= 1.19.1；旧客户端请使用 format=mihomo。\n" : "")
+        + bundledRulesComment + stringifyYaml(buildMihomoConfig(singBoxConfig, routePolicy, endpointOverrides, sharedHealthChecks))
     };
   }
   if (format === "loon") {
@@ -1070,6 +1103,7 @@ function subscriptionError(code, message, statusCode = 409) {
 
 export const subscriptionCompatibility = Object.freeze({
   mihomo: [...mihomoCompatibleTypes],
+  "mihomo-modern": [...mihomoCompatibleTypes],
   loon: [...loonCompatibleTypes],
   egern: [...egernCompatibleTypes],
   singbox: [...generatedNodeTypes, "naive"]

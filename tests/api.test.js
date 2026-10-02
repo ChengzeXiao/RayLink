@@ -3416,3 +3416,33 @@ test("control plane serves the RayLink web application on the same origin", asyn
   assert.equal(subscriptionQrResponse.status, 200);
   assert.match(await subscriptionQrResponse.text(), /RayLinkSubscriptionQr/);
 });
+
+test("managed certificate health is visible and renewal can be retried without enabling protocols", async (t) => {
+  const state = { status: "warning", checkedAt: new Date().toISOString(), certificates: [{
+    domain: "node.example.com", status: "expiring", validTo: new Date(Date.now() + 14 * 86400_000).toISOString(), daysRemaining: 14
+  }] };
+  let renewals = 0;
+  const testApp = await startTestApp({
+    tlsRenewalIntervalMs: 0,
+    tlsRenewalManager: {
+      status: () => structuredClone(state),
+      sync: async () => { renewals++; return structuredClone(state); }
+    }
+  });
+  t.after(() => testApp.close());
+  const cookie = await login(testApp.baseUrl);
+  const bootstrap = await (await api(testApp.baseUrl, cookie, "/api/bootstrap")).json();
+  assert.equal(bootstrap.tlsRenewal.status, "warning");
+  assert.ok(bootstrap.alerts.some((item) => item.code === "CERTIFICATE_EXPIRING"));
+  const before = testApp.app.store.listDeployments().length;
+  const baseline = renewals;
+  assert.equal((await fetch(`${testApp.baseUrl}/api/runtime/certificates`)).status, 401);
+  const read = await api(testApp.baseUrl, cookie, "/api/runtime/certificates");
+  assert.equal(read.status, 200);
+  assert.equal((await read.json()).certificates[0].domain, "node.example.com");
+  assert.equal(renewals, baseline, "read-only inspection must not restart a Runtime");
+  const retry = await api(testApp.baseUrl, cookie, "/api/runtime/certificates/sync", { method: "POST", body: "{}" });
+  assert.equal(retry.status, 200);
+  assert.equal(renewals, baseline + 1);
+  assert.equal(testApp.app.store.listDeployments().length, before);
+});

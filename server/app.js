@@ -42,6 +42,7 @@ import {
 } from "./singbox/protocol-catalog.js";
 import { RuntimeManager } from "./singbox/runtime-manager.js";
 import { LocalTelemetryCollector } from "./telemetry.js";
+import { LocalTlsRenewalManager } from "./tls-renewal.js";
 import {
   LocalTlsAssetStager,
   RemoteTlsAssetPackager
@@ -636,7 +637,8 @@ export async function createRayLinkApp(options) {
     store,
     adapter: runtimeAdapter,
     listenPort,
-    tlsAssetPackager
+    tlsAssetPackager,
+    runtimeDns: options.runtimeDns
   });
   const ruleSetCache = options.ruleSetCache || new ManagedRuleSetCache({
     dataDir: options.dataDir,
@@ -680,6 +682,8 @@ export async function createRayLinkApp(options) {
   let protocolLatencyTimer = null;
   let protocolLatencyStartupTimer = null;
   let protocolLatencyPromise = null;
+  let tlsRenewalTimer = null;
+  let tlsRenewalPromise = null;
   let operationalMaintenanceTimer = null;
   let backupTimer = null;
   let backupStartupTimer = null;
@@ -717,7 +721,8 @@ export async function createRayLinkApp(options) {
   const currentAlerts = async () => evaluateOperationalAlerts({
     hosts: store.listHosts(),
     deployments: store.listDeployments(),
-    backups: await backupManager.list()
+    backups: await backupManager.list(),
+    tlsRenewal: tlsRenewalManager.status()
   });
   const routingRuleSetStatus = () => typeof ruleSetCache.status === "function"
     ? { ...ruleSetCache.status(), bundledVersion: getBundledRoutingVersion() } : null;
@@ -733,9 +738,9 @@ export async function createRayLinkApp(options) {
       const hosts = store.listHosts();
       const deployments = store.listDeployments();
       return buildReadinessReport({
-        hosts, deployments, backups, backupVerification, runtime,
+        hosts, deployments, backups, backupVerification, runtime, tlsRenewal: tlsRenewalManager.status(),
         routingPolicy: store.routingPolicy(), ruleSets: routingRuleSetStatus(),
-        alerts: evaluateOperationalAlerts({ hosts, deployments, backups })
+        alerts: evaluateOperationalAlerts({ hosts, deployments, backups, tlsRenewal: tlsRenewalManager.status() })
       });
     })().finally(() => { readinessPromise = null; });
     return readinessPromise;
@@ -885,6 +890,36 @@ export async function createRayLinkApp(options) {
     dataDir: options.dataDir || "./data", runtimeMode: options.runtimeMode || "dry-run",
     ...(options.systemReleaseFetch ? { fetchImpl: options.systemReleaseFetch } : {})
   });
+  const tlsRenewalManager = options.tlsRenewalManager || (options.runtimeMode === "systemd"
+    ? new LocalTlsRenewalManager({
+        runtimeDirectory: runtimeAdapter.runtimeDir || join(options.dataDir || "./data", "sing-box"),
+        readAppliedConfig: async () => {
+          try { return JSON.parse(await readFile(runtimeAdapter.activePath, "utf8")); }
+          catch (error) { if (error.code === "ENOENT") return null; throw error; }
+        },
+        certificateProvider: (domain) => setupAccessManager.findNodeCertificate(domain),
+        withRuntimeLock: async (callback) => {
+          // Quota enforcement may publish configuration, so finish it before taking
+          // the certificate transaction's publication lock.
+          await sampleLocalUsage();
+          return runLocalRuntimeOperation("证书同步", callback);
+        },
+        activate: async ({ domains }) => {
+          const config = JSON.parse(await readFile(runtimeAdapter.activePath, "utf8"));
+          await runtimeAdapter.activateCertificates({ config, certificates: domains });
+        }
+      })
+    : { status: () => ({ status: "disabled", checkedAt: null, certificates: [] }),
+        sync: async () => ({ status: "disabled", checkedAt: null, certificates: [] }) });
+  const tlsRenewalIntervalMs = Math.max(0, Number(options.tlsRenewalIntervalMs ?? 15 * 60_000));
+  const sampleTlsRenewal = () => {
+    if (tlsRenewalPromise) return tlsRenewalPromise;
+    tlsRenewalPromise = tlsRenewalManager.sync().catch((error) => {
+      console.warn(`[RayLink] Managed certificate synchronization failed: ${error.code || "TLS_SYNC_FAILED"}`);
+      return tlsRenewalManager.status();
+    }).finally(() => { tlsRenewalPromise = null; });
+    return tlsRenewalPromise;
+  };
   const preserveAutomaticRecoveryOrigin = (input) => {
     if (
       input.certificate.mode === "caddy-auto"
@@ -1334,7 +1369,7 @@ export async function createRayLinkApp(options) {
           )
         };
       });
-      const alerts = evaluateOperationalAlerts({ hosts, deployments, backups });
+      const alerts = evaluateOperationalAlerts({ hosts, deployments, backups, tlsRenewal: tlsRenewalManager.status() });
       const routingRuleSets = routingRuleSetStatus();
       sendJson(response, 200, {
         ...bootstrap,
@@ -1346,6 +1381,7 @@ export async function createRayLinkApp(options) {
           : [],
         access: store.setupStatus().access,
         certificate: store.certificateSettings(),
+        tlsRenewal: tlsRenewalManager.status(),
         nodeDomains: nodeDomains.settings(),
         provisioning: nodeProvisioning.availability(),
         routingPolicy: store.routingPolicy(),
@@ -1367,6 +1403,15 @@ export async function createRayLinkApp(options) {
           activationPolicy: protocolActivationPolicy(protocol.type)
         }))
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/runtime/certificates") {
+      sendJson(response, 200, tlsRenewalManager.status());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/runtime/certificates/sync") {
+      sendJson(response, 200, await sampleTlsRenewal());
       return;
     }
 
@@ -2396,6 +2441,11 @@ export async function createRayLinkApp(options) {
       await synchronizeUsagePeriod();
       scheduleUsagePeriodCheck();
       await sampleLocalUsage();
+      await sampleTlsRenewal();
+      if (tlsRenewalIntervalMs > 0) {
+        tlsRenewalTimer = setInterval(sampleTlsRenewal, tlsRenewalIntervalMs);
+        tlsRenewalTimer.unref?.();
+      }
       runOperationalMaintenance();
       operationalMaintenanceTimer = setInterval(
         runOperationalMaintenance,
@@ -2445,6 +2495,8 @@ export async function createRayLinkApp(options) {
     },
     async close() {
       usagePeriodClosing = true;
+      if (tlsRenewalTimer) clearInterval(tlsRenewalTimer);
+      if (tlsRenewalPromise) await tlsRenewalPromise;
       if (usagePeriodTimer) clearTimeout(usagePeriodTimer);
       if (usagePeriodPromise) await usagePeriodPromise;
       if (alertTimer) {

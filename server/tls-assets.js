@@ -38,17 +38,27 @@ function certificateMatchesPrivateKey(certificatePem, privateKeyPem) {
   return certificate;
 }
 
-function validateCertificatePair(certificatePem, privateKeyPem, label) {
+function validateCertificatePair(certificatePem, privateKeyPem, label, now = new Date()) {
   const certificate = certificateMatchesPrivateKey(certificatePem, privateKeyPem);
   const validFrom = new Date(certificate.validFrom);
   const validTo = new Date(certificate.validTo);
-  if (validFrom > new Date() || validTo <= new Date()) {
+  if (validFrom > now || validTo <= now) {
     const error = new Error(`${label} 的 TLS 证书不在有效期内`);
     error.code = "TLS_CERTIFICATE_INVALID_DATE";
     error.statusCode = 422;
     throw error;
   }
   return certificate;
+}
+
+export function localTlsAssetPaths(dataDir, domain) {
+  const assetName = safeAssetName(domain);
+  const directory = join(dataDir, "tls");
+  return {
+    directory,
+    certificatePath: join(directory, `${assetName}.certificate.pem`),
+    keyPath: join(directory, `${assetName}.private-key.pem`)
+  };
 }
 
 async function readOptional(path) {
@@ -78,10 +88,13 @@ export class LocalTlsAssetStager {
   }
 
   async stage({ domain, certificatePath, keyPath }) {
-    const assetName = safeAssetName(domain);
-    const targetDirectory = join(this.dataDir, "tls");
-    const targetCertificatePath = join(targetDirectory, `${assetName}.certificate.pem`);
-    const targetKeyPath = join(targetDirectory, `${assetName}.private-key.pem`);
+    const prepared = await this.prepare({ domain, certificatePath, keyPath });
+    await prepared.commit();
+    return prepared;
+  }
+
+  async prepare({ domain, certificatePath, keyPath, validateHostname = false, now = new Date() }) {
+    const { directory: targetDirectory, certificatePath: targetCertificatePath, keyPath: targetKeyPath } = localTlsAssetPaths(this.dataDir, domain);
     let certificatePem;
     let privateKeyPem;
     try {
@@ -104,9 +117,10 @@ export class LocalTlsAssetStager {
       error.statusCode = 422;
       throw error;
     }
-    const certificate = validateCertificatePair(certificatePem, privateKeyPem, domain);
-    await mkdir(targetDirectory, { recursive: true, mode: 0o700 });
-    await chmod(targetDirectory, 0o700);
+    const certificate = validateCertificatePair(certificatePem, privateKeyPem, domain, now);
+    if (validateHostname && !certificate.checkHost(domain)) {
+      throw Object.assign(new Error("TLS 证书不包含受管节点域名"), { code: "TLS_CERTIFICATE_HOST_MISMATCH", statusCode: 422 });
+    }
     const [previousCertificate, previousKey] = await Promise.all([
       readOptional(targetCertificatePath),
       readOptional(targetKeyPath)
@@ -115,8 +129,9 @@ export class LocalTlsAssetStager {
     const nextKey = Buffer.from(privateKeyPem);
     const changed = !previousCertificate?.equals(nextCertificate)
       || !previousKey?.equals(nextKey);
+    let attempted = false;
     const restore = async () => {
-      if (!changed) return;
+      if (!changed || !attempted) return;
       if (previousCertificate) {
         await atomicWrite(targetCertificatePath, previousCertificate, 0o644);
       } else {
@@ -131,27 +146,36 @@ export class LocalTlsAssetStager {
           if (error.code !== "ENOENT") throw error;
         });
       }
+      attempted = false;
     };
-    if (changed) {
-      try {
-        await atomicWrite(targetCertificatePath, nextCertificate, 0o644);
-        await atomicWrite(targetKeyPath, nextKey, 0o600);
-      } catch (error) {
-        await restore().catch(() => {});
-        throw error;
+    const commit = async () => {
+      await mkdir(targetDirectory, { recursive: true, mode: 0o700 });
+      await chmod(targetDirectory, 0o700);
+      if (changed) {
+        if (attempted) return;
+        attempted = true;
+        try {
+          await atomicWrite(targetCertificatePath, nextCertificate, 0o644);
+          await atomicWrite(targetKeyPath, nextKey, 0o600);
+        } catch (error) {
+          try { await restore(); } catch { error.rollbackFailed = true; }
+          throw error;
+        }
+      } else {
+        await Promise.all([
+          chmod(targetCertificatePath, 0o644),
+          chmod(targetKeyPath, 0o600)
+        ]);
       }
-    } else {
-      await Promise.all([
-        chmod(targetCertificatePath, 0o644),
-        chmod(targetKeyPath, 0o600)
-      ]);
-    }
+    };
     return {
       certificatePath: targetCertificatePath,
       keyPath: targetKeyPath,
       fingerprint256: certificate.fingerprint256,
+      validFrom: certificate.validFrom,
       validTo: certificate.validTo,
       changed,
+      commit,
       rollback: restore
     };
   }

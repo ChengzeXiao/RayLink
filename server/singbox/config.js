@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { buildRuntimeDnsPolicy } from "./runtime-dns.js";
 import {
   buildProtocolInbounds,
   defaultProtocolConfigs
@@ -38,6 +39,11 @@ export function buildSingBoxConfig(snapshot, options = {}) {
       final: "direct"
     }
   };
+  const runtimeDns = buildRuntimeDnsPolicy(options.runtimeDns, snapshot.host.runtimeVersion);
+  if (runtimeDns.dns) {
+    config.dns = runtimeDns.dns;
+    Object.assign(config.route, runtimeDns.route);
+  }
   const providers = new Map();
   let usesHttpChallenge = false;
   for (const inbound of config.inbounds) {

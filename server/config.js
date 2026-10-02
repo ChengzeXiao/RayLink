@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
 import { DEFAULT_ROUTE_PROBE_URL } from "./routing/policy.js";
+import { normalizeRuntimeDnsSettings } from "./singbox/runtime-dns.js";
 
 function positiveInteger(value, fallback, name) {
   const parsed = value === undefined ? fallback : Number(value);
@@ -140,6 +141,19 @@ export function loadConfig(env = process.env) {
       "RAYLINK_ALERT_INTERVAL_MS"
     ),
     runtimeMode,
+    runtimeDns: normalizeRuntimeDnsSettings({
+      mode: env.RAYLINK_RUNTIME_DNS_MODE?.trim(),
+      primary: env.RAYLINK_RUNTIME_DNS_PRIMARY?.trim(),
+      secondary: env.RAYLINK_RUNTIME_DNS_SECONDARY?.trim(),
+      primaryServerName: env.RAYLINK_RUNTIME_DNS_PRIMARY_SERVER_NAME,
+      secondaryServerName: env.RAYLINK_RUNTIME_DNS_SECONDARY_SERVER_NAME,
+      privateSuffixes: (env.RAYLINK_RUNTIME_DNS_PRIVATE_SUFFIXES || "").split(",").map(value => value.trim()).filter(Boolean)
+    }),
+    tlsRenewalIntervalMs: nonNegativeInteger(
+      env.RAYLINK_TLS_RENEWAL_INTERVAL_MS,
+      900_000,
+      "RAYLINK_TLS_RENEWAL_INTERVAL_MS"
+    ),
     preferMeteredRuntime: env.RAYLINK_USER_METERING !== "false",
     singBoxBinary: env.SING_BOX_BIN || "sing-box",
     systemdUnit: env.SING_BOX_SYSTEMD_UNIT || "sing-box.service",

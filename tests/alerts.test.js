@@ -158,3 +158,32 @@ test("healthy infrastructure produces no operational alerts", () => {
   });
   assert.deepEqual(alerts, []);
 });
+
+test("local managed certificate expiration and renewal errors remain visible after a successful deployment", () => {
+  const now = new Date("2026-10-02T00:00:00Z");
+  const tlsRenewal = { status: "error", checkedAt: now.toISOString(), errorCode: "TLS_SOURCE_UNAVAILABLE",
+    certificates: [{ domain: "node.example.com", validTo: "2026-10-26T00:00:00Z", status: "expiring" }] };
+  const alerts = evaluateOperationalAlerts({ now, tlsRenewal, backups: [{ integrity: "ok" }] });
+  assert.ok(alerts.some((item) => item.code === "TLS_RENEWAL_FAILED"));
+  assert.ok(alerts.some((item) => item.code === "CERTIFICATE_EXPIRING" && item.resourceId === "local:node.example.com"));
+  const expired = evaluateOperationalAlerts({ now: new Date("2026-10-27T00:00:00Z"), tlsRenewal });
+  assert.ok(expired.some((item) => item.code === "CERTIFICATE_EXPIRING" && item.severity === "critical"));
+});
+
+test("failed certificate rollback raises a critical alert without promising the old Runtime is usable", () => {
+  const alerts = evaluateOperationalAlerts({ tlsRenewal: {
+    status: "error", errorCode: "TLS_RENEWAL_ROLLBACK_FAILED", certificates: []
+  } });
+  const alert = alerts.find((item) => item.code === "TLS_RENEWAL_FAILED");
+  assert.equal(alert.severity, "critical");
+  assert.match(alert.message, /回滚|人工检查/);
+  assert.doesNotMatch(alert.message, /旧证书继续使用/);
+});
+
+test("an unreadable certificate has unknown validity rather than a fabricated expiry date", () => {
+  const alerts = evaluateOperationalAlerts({ tlsRenewal: {
+    status: "error", certificates: [{ domain: "node.example.com", validTo: null, status: "error" }]
+  } });
+  assert.ok(alerts.some((item) => item.code === "TLS_RENEWAL_FAILED"));
+  assert.ok(!alerts.some((item) => item.code === "CERTIFICATE_EXPIRING"));
+});

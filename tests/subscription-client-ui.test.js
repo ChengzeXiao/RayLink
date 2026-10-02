@@ -8,10 +8,12 @@ const [adminSource, portalMarkup, portalSource] = await Promise.all([
   readFile(new URL("../web/portal.js", import.meta.url), "utf8")
 ]);
 
-test("admin and user subscription views expose the same five client choices", () => {
+test("admin and user subscription views expose the same six client choices", () => {
   for (const source of [adminSource, portalMarkup]) {
     assert.match(source, /Clash \/ Mihomo/);
     assert.match(source, /Loon 节点/);
+    assert.match(source, /Mihomo 共享测速/);
+    assert.match(source, /1\.19\.1\+/);
     assert.match(source, /Egern 完整配置/);
     assert.match(source, /Egern 节点/);
     assert.match(source, /sing-box JSON/);

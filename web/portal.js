@@ -10,6 +10,7 @@ const subscriptionUrl = document.querySelector("#portal-subscription-url");
 const copySubscription = document.querySelector("#portal-copy-subscription");
 const subscriptionQr = document.querySelector("#portal-subscription-qr");
 const importMihomo = document.querySelector("#portal-import-mihomo");
+const importMihomoModern = document.querySelector("#portal-import-mihomo-modern");
 const importLoon = document.querySelector("#portal-import-loon");
 const importEgern = document.querySelector("#portal-import-egern");
 const importEgernNodes = document.querySelector("#portal-import-egern-nodes");
@@ -91,6 +92,7 @@ function revealSubscription(url, existing = false) {
   subscriptionValue.hidden = false;
   const formatUrl = (format) => subscriptionClientUrl.forFormat(url, format);
   importMihomo.href = `clash://install-config?url=${encodeURIComponent(formatUrl("mihomo"))}&name=RayLink`;
+  importMihomoModern.href = `clash://install-config?url=${encodeURIComponent(formatUrl("mihomo-modern"))}&name=RayLink`;
   importLoon.href = formatUrl("loon");
   importEgern.href = `egern:/profiles/new?name=RayLink&url=${encodeURIComponent(formatUrl("egern-profile"))}`;
   importEgernNodes.href = `egern:/subscriptions/new?url=${encodeURIComponent(formatUrl("egern"))}`;
