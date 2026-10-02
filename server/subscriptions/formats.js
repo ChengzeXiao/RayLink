@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import {
+  AI_DOMAIN_NAMES,
   AI_DOMAIN_SUFFIXES,
   createRoutePolicyCandidates,
   LOCAL_DOMAIN_SUFFIXES,
@@ -215,7 +216,7 @@ function dnsPolicyValue(dns, action) {
 
 function mihomoDnsPolicyRules(policy) {
   const rules = {
-    "domain:localhost": ["system"],
+    localhost: ["system"],
     ...Object.fromEntries(LOCAL_DOMAIN_SUFFIXES.map((suffix) => [
       `+.${suffix}`,
       ["system"]
@@ -231,12 +232,18 @@ function mihomoDnsPolicyRules(policy) {
     // DNS policy chooses the most specific key, while route rules choose the
     // first match. Omit unreachable child keys and protect local infrastructure.
     if (rule.value === "localhost" || LOCAL_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(rule.value, suffix)) || covered(rule.value)) continue;
-    const key = rule.match === "domain" ? `domain:${rule.value}` : `+.${rule.value}`;
+    // Mihomo nameserver-policy uses a bare hostname for exact matches.
+    // A "domain:" prefix is accepted as a literal key but never matches DNS queries.
+    const key = rule.match === "domain" ? rule.value : `+.${rule.value}`;
     // Routing uses the first matching rule; duplicate DNS keys must do the same.
     if (!Object.hasOwn(rules, key)) rules[key] = dnsPolicyValue(rule.dns, rule.action);
     priorDomains.push(rule);
   }
   if (policy.mode === "smart") {
+    for (const domain of AI_DOMAIN_NAMES) {
+      const key = domain;
+      if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("remote", "ai");
+    }
     for (const domain of AI_DOMAIN_SUFFIXES) {
       const key = `+.${domain}`;
       if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("remote", "ai");
@@ -535,8 +542,17 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     {
       name: ROUTE_POLICY_GROUPS.ai.name,
       type: "select",
-      proxies: [ROUTE_POLICY_GROUPS.aiStable.name, ...names, ...policyChoices]
+      proxies: [ROUTE_POLICY_GROUPS.aiStable.name,
+        ...(sharedHealthChecks ? [ROUTE_POLICY_GROUPS.aiManual.name] : names), ...policyChoices]
     },
+    // Mihomo prepends provider nodes before explicit group proxies. Keep the
+    // top-level AI selector free of `use`, or it defaults to an individual node
+    // and bypasses automatic recovery. Its manual child stays independent.
+    ...(sharedHealthChecks ? [{
+      name: ROUTE_POLICY_GROUPS.aiManual.name,
+      type: "select",
+      proxies: names
+    }] : []),
     {
       name: ROUTE_POLICY_GROUPS.smart.name,
       type: "url-test",
@@ -690,6 +706,9 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
         : routePolicy.mode === "global-proxy"
           ? [...mihomoPrivateIpRules({ resolveDomains: true }), `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`]
           : [
+              ...AI_DOMAIN_NAMES.map(
+                (domain) => `DOMAIN,${domain},${ROUTE_POLICY_GROUPS.ai.name}`
+              ),
               ...AI_DOMAIN_SUFFIXES.map(
                 (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.ai.name}`
               ),
@@ -903,6 +922,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
             }
           }];
         }),
+        ...(routePolicy.mode === "smart" ? AI_DOMAIN_NAMES.map((domain) => ({
+          domain: { match: domain, value: "ai" }
+        })) : []),
         ...(routePolicy.mode === "smart" ? AI_DOMAIN_SUFFIXES.map((domain) => ({
           domain_suffix: { match: domain, value: "ai" }
         })) : []),
@@ -1028,6 +1050,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         : routePolicy.mode === "global-proxy"
           ? [...egernPrivateIpRules({ resolveDomains: true }), { default: { policy: ROUTE_POLICY_GROUPS.proxy.name } }]
           : [
+              ...AI_DOMAIN_NAMES.map((domain) => ({
+                domain: { match: domain, policy: ROUTE_POLICY_GROUPS.ai.name }
+              })),
               ...AI_DOMAIN_SUFFIXES.map((domain) => ({
                 domain_suffix: { match: domain, policy: ROUTE_POLICY_GROUPS.ai.name }
               })),

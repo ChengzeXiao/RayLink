@@ -3,6 +3,38 @@ import test from "node:test";
 
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 
+test("full exports preserve exact AI dependency matching and custom DNS overrides", () => {
+  for (const format of ["mihomo", "mihomo-modern"]) {
+    const body = buildSubscriptionArtifact({ format, singBoxConfig, routePolicy: { rules: [
+      { match: "domain", value: "cdn.workos.com", action: "direct" },
+      { match: "domain_suffix", value: "imgix.net", action: "proxy" }
+    ] } }).body;
+    const dns = body.split("  nameserver-policy:\n")[1].split("  proxy-server-nameserver:")[0];
+    assert.match(dns, /"challenges\.cloudflare\.com":\n\s+- "https:\/\/1\.1\.1\.1\/dns-query#AI 网站代理"/);
+    assert.match(dns, /"cdn\.workos\.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
+    assert.doesNotMatch(dns, /"domain:/);
+    assert.doesNotMatch(dns, /"workos\.imgix\.net":/);
+    const routes = body.split("\nrules:\n")[1];
+    assert.ok(routes.includes('"DOMAIN,challenges.cloudflare.com,AI 网站代理"'));
+    assert.ok(routes.includes('"DOMAIN-SUFFIX,claude.com,AI 网站代理"'));
+    const custom = routes.indexOf('DOMAIN,cdn.workos.com,DIRECT');
+    assert.ok(custom >= 0 && custom < routes.indexOf('DOMAIN,cdn.workos.com,AI 网站代理'));
+    for (const domain of ["cloudflare.com", "workos.com", "workoscdn.com", "imgix.net"]) assert.ok(!routes.includes(`DOMAIN-SUFFIX,${domain},AI 网站代理`));
+  }
+  const egern = buildSubscriptionArtifact({ format: "egern-profile", singBoxConfig, routePolicy: { rules: [
+    { match: "domain", value: "cdn.workos.com", action: "direct" }
+  ] } }).body;
+  const forward = egern.split("  forward:\n")[1].split("  proxy_nameservers:")[0];
+  const routes = egern.split("\nrules:\n")[1];
+  assert.match(forward, /domain:\n\s+match: "challenges\.cloudflare\.com"\n\s+value: "ai"/);
+  assert.match(routes, /domain:\n\s+match: "challenges\.cloudflare\.com"\n\s+policy: "AI 网站代理"/);
+  assert.match(routes, /domain_suffix:\n\s+match: "claudeusercontent\.com"\n\s+policy: "AI 网站代理"/);
+  const customDns = forward.indexOf('match: "cdn.workos.com"\n        value: "domestic"');
+  const customRoute = routes.indexOf('match: "cdn.workos.com"\n      policy: "DIRECT"');
+  assert.ok(customDns >= 0 && customDns < forward.indexOf('match: "cdn.workos.com"\n        value: "ai"'));
+  assert.ok(customRoute >= 0 && customRoute < routes.indexOf('match: "cdn.workos.com"\n      policy: "AI 网站代理"'));
+});
+
 test("Egern preserves manual default selection, system DNS and domestic domain routing", () => {
   const body = buildSubscriptionArtifact({
     format: "egern-profile", singBoxConfig,
@@ -102,8 +134,8 @@ test("Mihomo DNS protects local names and respects a higher priority broader dom
     ] }
   }).body;
   const policy = body.split('  nameserver-policy:\n')[1].split('  proxy-server-nameserver:')[0];
-  assert.doesNotMatch(policy, /"domain:nas\.home\.arpa"/);
-  assert.doesNotMatch(policy, /"domain:mail\.google\.com"/);
+  assert.doesNotMatch(policy, /"nas\.home\.arpa"/);
+  assert.doesNotMatch(policy, /"mail\.google\.com"/);
   assert.doesNotMatch(policy, /"\+\.gemini\.google\.com"/);
   assert.match(policy, /"\+\.google\.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
 });
@@ -138,7 +170,7 @@ test("Mihomo duplicate domain DNS rules honor the first routing rule", () => {
       { match: "domain", value: "example.com", action: "proxy", priority: 20 }
     ] }
   }).body;
-  assert.match(body, /"domain:example.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
+  assert.match(body, /"example.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
 });
 
 test("Mihomo local IP bypass does not resolve domains before domain routing", () => {
@@ -404,8 +436,8 @@ test("Mihomo DNS policies use valid suffix patterns for local and custom domains
   for (const suffix of ["local", "lan", "home.arpa", "work.example"]) {
     assert.match(artifact.body, new RegExp(`"\\+\\.${suffix.replaceAll(".", "\\.")}":`));
   }
-  assert.match(artifact.body, /"domain:localhost":/);
-  assert.match(artifact.body, /"domain:tracker\.example":/);
+  assert.match(artifact.body, /\n    localhost:/);
+  assert.match(artifact.body, /"tracker\.example":/);
   assert.doesNotMatch(artifact.body, /"\+\.tracker\.example":/);
   assert.doesNotMatch(artifact.body, /"domain:\*\./);
 });

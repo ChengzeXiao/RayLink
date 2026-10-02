@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import {
+  AI_DOMAIN_NAMES,
   AI_DOMAIN_SUFFIXES,
   DEFAULT_ROUTE_PROBE_URL,
   LOCAL_DOMAIN_SUFFIXES,
@@ -574,8 +575,9 @@ function clientConfigForOutbounds(
   const resolveRemaining = (match = {}) => resolvesCustomIps ? [] : [{ ...match, action: "resolve" }];
   const managedRouteRules = routePolicy.mode === "smart"
     ? [
-        ...resolveRemaining({ domain_suffix: [...AI_DOMAIN_SUFFIXES] }),
+        ...resolveRemaining({ domain: [...AI_DOMAIN_NAMES], domain_suffix: [...AI_DOMAIN_SUFFIXES] }),
         {
+          domain: [...AI_DOMAIN_NAMES],
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.ai.tag
@@ -649,6 +651,7 @@ function clientConfigForOutbounds(
         },
         ...customDnsRules,
         ...(routePolicy.mode === "smart" ? [{
+          domain: [...AI_DOMAIN_NAMES],
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
           action: "route",
           server: "dns-ai"

@@ -8,6 +8,21 @@ import {
   routingDecisionForDomain
 } from "../server/routing/policy.js";
 
+test("AI authentication and streaming dependencies follow AI while adjacent shared-provider hosts do not", () => {
+  for (const domain of ["platform.claude.com", "bridge.claudeusercontent.com", "artifact.frame.claudeusercontent.com", "cdn.oaistatsig.com", "cdn.openaimerge.com", "forwarder.workos.com", "challenges.cloudflare.com"]) {
+    assert.deepEqual(routingDecisionForDomain({}, domain), { action: "ai", source: "ai", ruleId: null, dns: "remote" });
+  }
+  for (const domain of ["workos.com", "unrelated.workos.com", "child.forwarder.workos.com", "cloudflare.com", "challenges.cloudflare.com.example", "evilclaude.com"]) {
+    assert.notEqual(routingDecisionForDomain({}, domain).action, "ai", domain);
+  }
+  const override = routingDecisionForDomain({ rules: [{ match: "domain_suffix", value: "workos.com", action: "direct" }] }, "forwarder.workos.com");
+  assert.equal(override.action, "direct");
+  assert.equal(override.dns, "domestic");
+  for (const [mode, action] of [["direct", "direct"], ["global-proxy", "proxy"]]) {
+    assert.equal(routingDecisionForDomain({ mode }, "platform.claude.com").action, action);
+  }
+});
+
 test("routing policy normalizes and orders supported custom rules", () => {
   const policy = normalizeRoutingPolicy({
     mode: "smart",

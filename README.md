@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.36/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.37/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.36/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.37/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.36/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.37/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,6 +295,10 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
+### v0.2.37 / AI API 连接稳定性
+
+补齐 ChatGPT、Claude 登录与资源依赖的 AI 路由，修复 Clash 精确域名 DNS 策略未被内核识别的问题；修复共享测速格式默认绕过 AI 自动故障回退的问题，并提供独立 AI 手选。新增原生 DNS、路由及流式连接恢复回归。**更新整份订阅，确认「AI 网站代理」选择「AI 稳定出口」或固定节点**。详见 [v0.2.37 发布说明](docs/release/v0.2.37.md)。
+
 ### v0.2.36 / 网络稳定性修复
 
 出口默认使用带故障回退的加密 DNS；传统 Clash/Mihomo 各组测速统一为 12 秒，新版 Mihomo 可选共享测速；本机受管 Caddy 证书自动同步、验证与回滚，状态可在系统证书页与 MCP 查看。**升级后更新整份客户端订阅并重连**。详见 [v0.2.36 发布说明](docs/release/v0.2.36.md) 与 [网络体检](docs/network-health-2026-10-02.md)。
@@ -305,6 +309,6 @@ TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握�
 
 v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
 
-当前源码的发布目标为 v0.2.36；上面的 Release 下载命令需等对应版本发布后使用。
+当前源码的发布目标为 v0.2.37；上面的 Release 下载命令需等对应版本发布后使用。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

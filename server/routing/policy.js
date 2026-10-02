@@ -4,6 +4,7 @@ export const ROUTE_POLICY_GROUPS = Object.freeze({
   proxy: Object.freeze({ tag: "raylink-auto", name: "RayLink 代理" }),
   ai: Object.freeze({ tag: "raylink-ai", name: "AI 网站代理" }),
   aiStable: Object.freeze({ tag: "raylink-ai-stable", name: "AI 稳定出口" }),
+  aiManual: Object.freeze({ tag: "raylink-ai-manual", name: "AI 节点选择" }),
   smart: Object.freeze({ tag: "raylink-smart", name: "RayLink 智能" }),
   tcp: Object.freeze({ tag: "raylink-tcp", name: "TCP 稳定" }),
   udp: Object.freeze({ tag: "raylink-udp", name: "UDP 高速" }),
@@ -19,14 +20,31 @@ export const AI_DOMAIN_SUFFIXES = Object.freeze([
   "chatgpt.com",
   "oaistatic.com",
   "oaiusercontent.com",
+  "oaistatsig.com",
   "anthropic.com",
   "claude.ai",
+  "claude.com",
+  "claudeusercontent.com",
   "perplexity.ai",
   "poe.com",
   "x.ai",
   "grok.com",
   "gemini.google.com",
   "generativelanguage.googleapis.com"
+]);
+
+// Login, challenge and asset dependencies must follow the selected AI exit too.
+// Keep shared providers exact: unrelated WorkOS/Cloudflare tenants retain normal routing.
+// Sources: https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps
+//          https://code.claude.com/docs/en/network-config
+export const AI_DOMAIN_NAMES = Object.freeze([
+  "cdn.openaimerge.com",
+  "cdn.workos.com",
+  "forwarder.workos.com",
+  "setup.workos.com",
+  "images.workoscdn.com",
+  "workos.imgix.net",
+  "challenges.cloudflare.com"
 ]);
 
 // Explicit overseas services precede geographic inference; keep AI exceptions first.
@@ -253,7 +271,7 @@ export function routingDecisionForDomain(inputPolicy, inputDomain, { addresses }
   if (policy.mode === "global-proxy") {
     return { action: "proxy", source: "mode", ruleId: null, dns: "remote" };
   }
-  if (AI_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
+  if (AI_DOMAIN_NAMES.includes(domain) || AI_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
     return { action: "ai", source: "ai", ruleId: null, dns: "remote" };
   }
   if (PROXY_DOMAIN_SUFFIXES.some((suffix) => matchesSuffix(domain, suffix))) {
