@@ -139,16 +139,19 @@ try {
   assert.equal(primary.streams.size, 1);
   console.log("AI exit and sustained stream survive latency reversal and re-probes");
   await primary.stop();
-  await until(async () => { try { return await request("chatgpt.com") === "BACKUP"; } catch { return false; } }, "AI did not fail over after primary failure");
+  await until(async () => { try { return ["BACKUP", "QUIC-CANDIDATE"].includes(await request("chatgpt.com")); } catch { return false; } }, "AI did not fail over after primary failure");
   assert.equal(await request("ordinary.example.test"), "BACKUP");
-  console.log("failed primary: new AI and ordinary connections select reachable TCP backup");
+  console.log("failed primary: AI selects a reachable candidate; ordinary connections select TCP backup");
   await backup.stop();
-  await delay(1500);
   await assert.rejects(request("ordinary.example.test"));
+  await until(async () => { try { return await request("chatgpt.com") === "QUIC-CANDIDATE"; } catch { return false; } }, "AI did not recover through the surviving UDP candidate");
+  assert.equal(directRequests, 0, "TCP failures must not leak to DIRECT");
+  console.log("all TCP candidates fail: AI recovers through UDP; ordinary TCP selection stays isolated");
+  await quic.stop();
   await assert.rejects(request("chatgpt.com"));
+  await assert.rejects(request("ordinary.example.test"));
   assert.equal(directRequests, 0, "proxy failures must not leak to DIRECT");
-  assert.ok(quic.server.listening, "QUIC-classified alternative stays alive to test pool isolation");
-  console.log("all TCP candidates fail: requests fail closed, no DIRECT or QUIC pool fallback");
+  console.log("all protocol candidates fail: requests fail closed without DIRECT leakage");
 } finally {
   if (stream && stream.exitCode === null && stream.signalCode === null) {
     const exited = once(stream, "exit"); stream.kill("SIGTERM"); await exited;

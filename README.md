@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.38/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.39/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.38/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.39/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.38/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.39/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,9 +295,9 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
-### v0.2.38 / AI 全协议恢复与网站覆盖
+### v0.2.39 / AI 全协议恢复与网站覆盖
 
-AI 自动出口现在能在全部 TCP 候选失效后使用健康的 UDP 协议恢复。补齐 Cloudflare 验证子域以及 AI Studio、NotebookLM、Copilot、OpenRouter、Mistral、Cohere 的专用入口；新增 9 协议的严格 TLS WebSocket 长连接门禁。升级后更新**整份订阅**。网站人机验证、地区及账号限制需单独判断，详见 [发布说明](docs/release/v0.2.38.md) 和 [AI 服务覆盖](docs/ai-service-routing.md)。
+AI 自动出口现在能在全部 TCP 候选失效后使用健康的 UDP 协议恢复。补齐 Cloudflare 验证子域以及 AI Studio、NotebookLM、Copilot、OpenRouter、Mistral、Cohere 的专用入口；新增 9 协议的严格 TLS WebSocket 长连接门禁。升级后更新**整份订阅**。网站人机验证、地区及账号限制需单独判断，详见 [发布说明](docs/release/v0.2.39.md) 和 [AI 服务覆盖](docs/ai-service-routing.md)。
 
 ### v0.2.37 / AI API 连接稳定性
 
@@ -313,6 +313,6 @@ TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握�
 
 v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
 
-当前源码的发布目标为 v0.2.38；上面的 Release 下载命令需等对应版本发布后使用。
+当前源码的发布目标为 v0.2.39；上面的 Release 下载命令需等对应版本发布后使用。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。
