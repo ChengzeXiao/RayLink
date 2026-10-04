@@ -188,3 +188,25 @@ test("disabled publication and reconciliation do not need a previous deployment'
   assert.equal((await app.runtimeManager.reconcile()).reason, "configuration-current");
   await assert.rejects(app.runtimeManager.rollback(old.id), { code: "AI_UPSTREAM_SECRET_UNAVAILABLE" });
 });
+
+
+test("explicitly disabling an enabled upstream remains possible when its stored password is unavailable", async (t) => {
+  const { app, request } = await fixture(t);
+  await request("/api/settings/ai-upstream", "PATCH", { enabled: true, server: "proxy.example.com", username: "owner", password: "old-password" });
+  const row = JSON.parse(app.store.db.prepare("SELECT value FROM settings WHERE key='ai_upstream'").get().value);
+  row.passwordEncrypted = "unavailable-fixture-secret";
+  app.store.db.prepare("UPDATE settings SET value=? WHERE key='ai_upstream'").run(JSON.stringify(row));
+  const disabled = await request("/api/settings/ai-upstream", "PATCH", { enabled: false, type: row.type, server: row.server,
+    port: row.port, username: row.username, tlsServerName: row.tlsServerName, password: "", clearPassword: false });
+  assert.equal(disabled.status, 200);
+  const result = await disabled.json();
+  assert.equal(result.config.enabled, false);
+  assert.equal(result.config.passwordConfigured, true);
+  assert.equal(result.config.revision, row.revision + 1);
+  assert.equal(result.runtimeSync.status, "simulated");
+  const retained = JSON.parse(app.store.db.prepare("SELECT value FROM settings WHERE key='ai_upstream'").get().value);
+  assert.equal(retained.passwordEncrypted, row.passwordEncrypted);
+  assert.equal((await request("/api/settings/ai-upstream", "PATCH", { enabled: true })).status, 503);
+  assert.equal((await request("/api/settings/ai-upstream", "PATCH", { enabled: false, revision: 500 })).status, 503);
+  assert.equal((await request("/api/bootstrap")).status, 200);
+});

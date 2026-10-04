@@ -1228,6 +1228,23 @@ export class RayLinkStore {
       let previous, replacingUnavailableSecret = false;
       try { previous = this.#aiUpstreamSettingsWithSecret(); }
       catch (error) {
+        if (error.code === "AI_UPSTREAM_SECRET_UNAVAILABLE" && input?.enabled === false) {
+          const stored = this.#aiUpstreamStoredSettings();
+          const metadataFields = ["hostId", "type", "server", "port", "username", "tlsServerName"];
+          const disableOnly = Object.keys(input).every(key => key === "enabled"
+            || (key === "password" && input.password === "")
+            || (key === "clearPassword" && input.clearPassword === false)
+            || (metadataFields.includes(key) && input[key] === stored[key]));
+          if (disableOnly) {
+            // An explicit stop is also a recovery path: retain the opaque
+            // ciphertext, and require valid credentials before enabling again.
+            const next = { ...stored, enabled: false, revision: stored.revision + Number(stored.enabled) };
+            if (stored.enabled) this.db.prepare("UPDATE settings SET value=?,updated_at=? WHERE key='ai_upstream'")
+              .run(JSON.stringify(next), nowIso());
+            this.db.exec("RELEASE update_ai_upstream");
+            return publicAiUpstreamSettings(next);
+          }
+        }
         const suppliedReplacement = typeof input?.password === "string" && input.password.length > 0;
         if (error.code !== "AI_UPSTREAM_SECRET_UNAVAILABLE" || (!suppliedReplacement && input?.clearPassword !== true)) throw error;
         const { passwordEncrypted, ...metadata } = this.#aiUpstreamStoredSettings();
