@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { buildRuntimeDnsPolicy } from "./runtime-dns.js";
-import { AI_UPSTREAM_DOMAIN_NAMES, AI_UPSTREAM_DOMAIN_SUFFIXES } from "../routing/ai-upstream-domains.js";
+import { compileAiUpstreamRules } from "../routing/ai-upstream-domains.js";
 import {
   buildProtocolInbounds,
   defaultProtocolConfigs
@@ -45,10 +45,7 @@ function applyAiUpstream(config, snapshot) {
     outbound.domain_resolver = config.route.default_domain_resolver;
   }
   config.outbounds.push(outbound);
-  const aiRules = () => [
-    { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "udp", action: "reject" },
-    { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "tcp", action: "route", outbound: "ai-residential" }
-  ];
+  const aiRules = () => compileAiUpstreamRules(snapshot.routingPolicy);
   config.route.rules = [
     // Prefer the original proxy destination over sniffed outer TLS names (ECH
     // can hide the real SNI). Sniffing is only a fallback for IP destinations.

@@ -16,10 +16,21 @@ import { buildSingBoxConfig } from "../server/singbox/config.js";
 import { buildProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
 const run = (binary, args, options = {}) => promisify(execFile)(binary, args, { timeout: 10000, ...options });
 const binary = process.env.SING_BOX_BIN || "sing-box";
+const customDomains = process.argv.includes("--custom-domains");
+const routingPolicy = { mode: "smart", rules: customDomains ? [
+  { id: "exception", match: "domain", value: "ordinary.assistant.invalid", action: "proxy", priority: 1 },
+  { id: "builtin-exception", match: "domain", value: "ordinary.claude.ai", action: "proxy", priority: 2 },
+  { id: "assistant", match: "domain_suffix", value: "assistant.invalid", action: "ai", priority: 10 },
+  { id: "disabled", match: "domain", value: "disabled.invalid", action: "ai", enabled: false },
+  { id: "broad-google", match: "domain_suffix", value: "google.com", action: "ai" },
+  { id: "broad-workos", match: "domain_suffix", value: "workos.com", action: "ai" },
+  { id: "ip-only", match: "ip_cidr", value: "127.0.0.0/8", action: "ai", priority: 200 }
+] : [] };
+const aiDomains = ["claude.ai", "api.openai.com", "gemini.google.com", ...(customDomains ? ["api.assistant.invalid"] : [])];
 const directory = await mkdtemp(join(tmpdir(), "raylink-ai-upstream-"));
 const allSockets = new Set(), servers = new Set(), children = new Set(), udpSockets = new Set();
 const credential = { email: "egress-fixture@example.invalid", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "native-fixture-password" };
-const ordinaryDomains = ["www.google.com", "google.com", "accounts.google.com", "mail.google.com", "gmail.com", "youtube.com", "www.youtube.com", "ordinary.fixture.invalid", "challenges.cloudflare.com", "hagen.challenges.cloudflare.com", "cdn.workos.com", "forwarder.workos.com", "setup.workos.com", "images.workoscdn.com", "workos.imgix.net"];
+const ordinaryDomains = ["www.google.com", "google.com", "accounts.google.com", "mail.google.com", "gmail.com", "youtube.com", "www.youtube.com", "ordinary.fixture.invalid", "challenges.cloudflare.com", "hagen.challenges.cloudflare.com", "cdn.workos.com", "forwarder.workos.com", "setup.workos.com", "images.workoscdn.com", "workos.imgix.net", ...(customDomains ? ["ordinary.assistant.invalid", "ordinary.claude.ai", "disabled.invalid", "www.instagram.com", "x.com"] : [])];
 async function listen(server) {
   servers.add(server);
   server.on("connection", socket => { allSockets.add(socket); socket.on("error", () => {}); socket.on("close", () => allSockets.delete(socket)); });
@@ -123,11 +134,11 @@ try {
       tls: protocol === "vless" ? { mode: "none" } : { mode: "certificate", serverName: "node.fixture.invalid", certificatePath, keyPath } });
     const config = buildSingBoxConfig({ host: { id: "local", kind: "local", runtimeVersion: version, region: "test" },
       users: [{ ...credential, state: "active", portalStatus: "active", usedGb: 0, quotaGb: 10, expiresAt: "2099-01-01", nodeScope: ["all"] }],
-      protocols: profiles, masterPassword: "AAAAAAAAAAAAAAAAAAAAAA==",
+      routingPolicy, protocols: profiles, masterPassword: "AAAAAAAAAAAAAAAAAAAAAA==",
       aiUpstream: { enabled: true, hostId: "local", type, server: "upstream.fixture.invalid", port: proxyPort, username: "fixture", password: "fixture-secret", tlsServerName: "upstream.fixture.invalid", revision: 1 } });
     const productionPath = join(directory, type + "-production.json"); await writeFile(productionPath, JSON.stringify(config), { mode: 0o600 });
     await run(binary, ["check", "-c", productionPath]);
-    const domains = ["claude.ai", "api.openai.com", "gemini.google.com", "upstream.fixture.invalid", ...ordinaryDomains];
+    const domains = [...aiDomains, "upstream.fixture.invalid", ...ordinaryDomains];
     // Only environment fixtures change: DNS answers and bind addresses. Native
     // server routing/outbounds and each public protocol's user identity stay intact.
     config.dns.servers = config.dns.servers.map(({ tag }) => ({ type: "hosts", tag, predefined: Object.fromEntries(domains.map(domain => [domain, ["127.0.0.1"]])) }));
@@ -143,7 +154,7 @@ try {
       config.outbounds.find(item => item.tag === "ai-residential").tls.certificate_path = certificatePath;
       runtime = await launch(config, type + "-trusted");
     }
-    for (const domain of ["claude.ai", "api.openai.com", "gemini.google.com"]) assert.equal(await request(domain), "RESIDENTIAL", `${type}: ${domain} must reach residential upstream`);
+    for (const domain of aiDomains) assert.equal(await request(domain), "RESIDENTIAL", `${type}: ${domain} must reach residential upstream`);
     assert.ok(state.destinations.some(value => value.host === "claude.ai" && value.port === targetPort), "upstream must receive original domain");
     for (const domain of ordinaryDomains) assert.equal(await request(domain), "DIRECT", `${domain} must retain ordinary egress`);
     assert.equal(await request("127.0.0.1"), "DIRECT", "IP-only ordinary traffic must not be swept into residential egress");
@@ -157,7 +168,10 @@ try {
     assert.equal(await socksUdp(socksPort, "ordinary.fixture.invalid", udp.address().port), true, "ordinary UDP remains direct");
     udp.close(); udpSockets.delete(udp);
     for (const profile of profiles) {
-      const compiled = buildProtocolClientConfig({ profiles: [profile], credential, server: "127.0.0.1" });
+      const compiled = buildProtocolClientConfig({ profiles: [profile], credential, server: "127.0.0.1",
+        // Client IP-priority behavior intentionally resolves first. This path
+        // verifies domain rules; the Runtime still receives the IP-only rule above.
+        routePolicy: { ...routingPolicy, rules: routingPolicy.rules.filter(rule => !["ip", "ip_cidr"].includes(rule.match)) } });
       const outbound = compiled.outbounds.find(item => item.type === profile.type);
       if (outbound.tls) { outbound.tls.certificate_path = certificatePath; delete outbound.tls.insecure; }
       const clientPort = await unusedPort();
@@ -173,6 +187,11 @@ try {
       const beforeClient = state.destinations.length;
       assert.equal(await request("claude.ai", clientPort), "RESIDENTIAL", `${profile.type} must carry TCP requests through residential upstream`);
       assert.ok(state.destinations.slice(beforeClient).some(value => value.host === "claude.ai" && value.port === targetPort), "full client routing must retain original AI destination domain");
+      if (customDomains) {
+        assert.equal(await request("api.assistant.invalid", clientPort), "RESIDENTIAL", "custom AI domain must survive the generated client and real protocol");
+        assert.ok(state.destinations.slice(beforeClient).some(value => value.host === "api.assistant.invalid"), "custom AI name must reach the residential proxy unchanged");
+        assert.equal(await request("ordinary.assistant.invalid", clientPort), "DIRECT", "custom exception must retain ordinary egress through the real protocol");
+      }
       assert.equal(await request("www.google.com", clientPort), "DIRECT");
       await stop(client);
     }
@@ -182,7 +201,7 @@ try {
     state.healthy = true; state.authAllowed = false; const directBeforeAuth = state.direct;
     await assert.rejects(() => request("claude.ai")); assert.equal(state.direct, directBeforeAuth, "upstream authentication failure must not fall back direct");
     await stop(runtime);
-    console.log(JSON.stringify({ core: version, upstream: type, aiResidential: true, originalDomainPreserved: true, googleAndOrdinaryDirect: true,
+    console.log(JSON.stringify({ core: version, customDomains, upstream: type, aiResidential: true, originalDomainPreserved: true, googleAndOrdinaryDirect: true,
       sharedIdentityAndChallengeDirect: true, visibleAiSniRecognized: true, aiUdpRejected: true, ordinaryUdpDirect: true,
       tcpViaRealInboundProtocols: profiles.map(item => item.type), upstreamFailureClosed: true, authenticationFailureClosed: true,
       generatedClientDomainPreservation: true,

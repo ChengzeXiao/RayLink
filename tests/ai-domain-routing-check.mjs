@@ -80,7 +80,10 @@ try {
   const { body } = buildSubscriptionArtifact({ format, routePolicy: { mode: "smart", rules: [
     { match: "domain", value: "cdn.workos.com", action: "direct" },
     { match: "domain_suffix", value: "imgix.net", action: "proxy" },
-    { match: "domain", value: "override.claude.com", action: "proxy" }
+    { match: "domain", value: "override.claude.com", action: "proxy" },
+    { match: "domain", value: "ordinary.assistant.invalid", action: "proxy", priority: 1 },
+    { match: "domain_suffix", value: "assistant.invalid", action: "ai", priority: 10 },
+    { match: "domain", value: "disabled.invalid", action: "ai", enabled: false }
   ] }, singBoxConfig: { outbounds: [
     outbound("tcp-primary"), outbound("tcp-ai"),
     { type: "urltest", tag: "raylink-tcp", outbounds: ["tcp-primary", "tcp-ai"] }
@@ -117,6 +120,10 @@ try {
     assert.equal(selected.status, 204);
   }
   for (const [domain, expectedDns, expectedRoute] of [
+    ["api.assistant.invalid", "ai", "AI"],
+    ["ordinary.assistant.invalid", "remote", "PROXY"],
+    ["disabled.invalid", "remote", "PROXY"],
+    ["assistant.invalid.example", "remote", "PROXY"],
     ["chatgpt.com", "ai", "AI"],
     ["ws.chatgpt.com", "ai", "AI"],
     ["api.openai.com", "ai", "AI"],

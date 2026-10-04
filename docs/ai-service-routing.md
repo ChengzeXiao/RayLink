@@ -59,3 +59,14 @@ MIHOMO_BIN=mihomo node tests/ai-domain-routing-check.mjs --modern
 These loopback fixtures prove generated DNS and routing behaviour. They do not prove a public website login, authenticated model generation, or mobile-network quality. Proxy transport should also be checked per protocol with strict TLS, sustained SSE, and WebSocket handshakes and idle connections. OpenAI specifically documents WSS for `ws.chatgpt.com` and `chatgpt.com`; both are covered by the existing ChatGPT suffix.
 
 Report transport failures separately from HTTP authentication, rate limiting, region restrictions, and browser challenges. A `401` without an API key is not a completed model request, and a Cloudflare `403` challenge is not a successful website visit. Site acceptance requires the real supported browser or authenticated client flow.
+
+
+## 可维护的 AI 域名识别（v0.2.43）
+
+内置覆盖与客户端订阅共用 `server/routing/policy.js` 的域名源。管理员继续在「自定义规则」中添加完整域名或域名后缀，动作选择「AI 出口」；启用住宅时，同一组有序域名规则会编译到本机 Runtime。域名后缀包含主域名及子域名；需要单个 API 时使用完整域名。优先级较高的普通代理、直连或拦截例外仍优先，停用规则不参与。
+
+住宅范围在客户端 AI 分组之上增加共享域名保护。Google、YouTube、X、Instagram、通用 Microsoft/GitHub 身份及 CDN 域名不能因宽泛 AI 规则进入住宅；现有 Gemini、Copilot 等内置专用域名保留例外。管理员新增的其他域名是显式分类，不是系统从网页内容推断其性质。未知域名、IP/CIDR 规则不会自动扩大住宅名单。
+
+保存路由策略时，住宅启用则校验并尝试发布 Runtime，返回 `runtimeSync`；失败会保留待发布设置并显示 pending，可从 AI 出口重试发布。未启用住宅时返回 not-required，不重启 Runtime。保存后应在成功发布后刷新客户端**完整订阅并重新连接**；仅节点订阅不携带分流规则。
+
+「AI 出口与检测」显示规则版本、内置域名、共享保护和自定义覆盖；「域名路由解释」显示命中来源、规则、住宅资格、预计出口和发布状态。诊断只是保存策略推断，并非手机测量；自定义 IP 优先规则可让客户端先解析目标，隐藏域名/ECH/IP-only 也可能让服务器无法识别。为识别而按共享 IP 扩大住宅范围不在本功能中。
