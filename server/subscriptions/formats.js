@@ -603,7 +603,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     {
       name: ROUTE_POLICY_GROUPS.aiStable.name,
       type: "fallback",
-      proxies: tcp.length ? tcp : fallbackGroups,
+      proxies: fallbackGroups,
       url: probeUrl,
       interval: 60,
       lazy: false,
@@ -1006,7 +1006,7 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
       {
         fallback: {
           name: ROUTE_POLICY_GROUPS.aiStable.name,
-          policies: tcp.length ? tcp : fallbackGroups,
+          policies: fallbackGroups,
           interval: 60,
           timeout: 5,
           latency_test_url: probeUrl

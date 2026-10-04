@@ -489,8 +489,10 @@ function clientConfigForOutbounds(
   // Native URLTest has no ordered fallback. A tolerance equal to its 15s
   // probe deadline keeps a healthy AI exit stable; failed probes remove it.
   // Leave headroom for uint16 delay + tolerance arithmetic in sing-box.
+  // Include every enabled transport: server-side UDP health cannot establish
+  // the client's path, and a healthy UDP node must recover an all-TCP outage.
   const aiStableGroup = {
-    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, tcpTags.length ? tcpTags : usableSmartTags, probeUrl, 15_000),
+    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, [...tcpTags, ...udpTags], probeUrl, 15_000),
     interval: "1m"
   };
   for (const outbound of automaticGroups) {
