@@ -7,23 +7,106 @@ import { createRayLinkApp } from "../server/app.js";
 
 async function fixture(t, overrides = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "raylink-ai-egress-api-"));
-  const app = await createRayLinkApp({ dataDir, publicOrigin: "http://127.0.0.1", adminUsername: "admin",
+  const options = { dataDir, publicOrigin: "http://127.0.0.1", adminUsername: "admin",
     adminPassword: "test-administrator-password", runtimeMode: "dry-run", seedDemoData: false,
     singBoxBinary: join(dataDir, "missing-runtime"), backupIntervalMs: 0, alertIntervalMs: 0, runtimeUpdateCheckIntervalMs: 0,
     installer: { status: async () => ({ installed: false, version: null, tags: [] }) },
-    ruleSetCache: { prepare: async () => {}, available: () => false, get: async () => null }, ...overrides });
-  await app.listen({ host: "127.0.0.1", port: 0 });
+    ruleSetCache: { prepare: async () => {}, available: () => false, get: async () => null }, ...overrides };
+  let app, origin, cookie;
+  async function start() {
+    app = await createRayLinkApp(options);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    origin = `http://127.0.0.1:${app.server.address().port}`;
+    const login = await fetch(origin + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "test-administrator-password" }) });
+    assert.equal(login.status, 200);
+    cookie = login.headers.getSetCookie()[0].split(";")[0];
+  }
+  await start();
   t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
-  const origin = `http://127.0.0.1:${app.server.address().port}`;
-  const login = await fetch(origin + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username: "admin", password: "test-administrator-password" }) });
-  assert.equal(login.status, 200);
-  const cookie = login.headers.getSetCookie()[0].split(";")[0];
   const request = (path, method = "GET", body) => fetch(origin + path, {
     method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
-  return { app, request, origin };
+  return { get app() { return app; }, request, get origin() { return origin; },
+    async restart(nextOptions) { await app.close(); Object.assign(options, nextOptions); await start(); } };
 }
+
+test("lost upstream encryption key keeps saved rules and all configuration reads pending until credentials recover", async t => {
+  const oldPassword = "private-old-upstream-password", nextPassword = "private-new-upstream-password";
+  const oldKey = "private-old-encryption-key", nextKey = "private-new-encryption-key";
+  let failPublication = false;
+  const state = await fixture(t, { subscriptionEncryptionKey: oldKey, runtimeAdapter: {
+    status: async () => ({ mode: "systemd", state: "running" }),
+    publish: async () => { if (failPublication) throw new Error(nextPassword); return { mode: "systemd", state: "running" }; }
+  } });
+  const { request } = state;
+  const initial = await request("/api/settings/ai-egress", "PATCH", { mode: "residential", upstream: {
+    type: "http", server: "proxy.example", port: 8080, username: "fixture-user", password: oldPassword
+  } });
+  assert.equal(initial.status, 200);
+  assert.equal((await initial.json()).runtimeSync.status, "current");
+  await state.restart({ subscriptionEncryptionKey: nextKey });
+  const rules = [{ id: "new-ai", match: "domain", value: "assistant.example", action: "ai" }];
+  const savedResponse = await request("/api/settings/routing", "PATCH", { mode: "smart", rules });
+  assert.equal(savedResponse.status, 200);
+  const saved = await savedResponse.json();
+  assert.equal(saved.rules[0].id, "new-ai");
+  const payloads = [saved];
+  for (const [path, method, body] of [
+    ["/api/settings/ai-egress"], ["/api/settings/ai-upstream"], ["/api/bootstrap"],
+    ["/api/routing/diagnose", "POST", { domain: "assistant.example" }],
+    ["/api/settings/ai-egress/publish", "POST", {}]
+  ]) {
+    const response = await request(path, method, body);
+    assert.equal(response.status, 200, path);
+    const payload = await response.json(); payloads.push(payload);
+    const sync = payload.runtimeSync || payload.aiDomain?.runtimeSync || payload.aiEgress?.runtimeSync;
+    assert.equal(sync.status, "pending", path);
+    assert.equal(sync.errorCode, "AI_UPSTREAM_SECRET_UNAVAILABLE", path);
+    assert.match(sync.message, /凭据|加密密钥/, path);
+    assert.equal(sync.runtimeMode, "systemd");
+    assert.equal(sync.publishedMode, "residential");
+    if (path === "/api/bootstrap") {
+      assert.equal(payload.runtimePreview, null);
+      assert.equal(payload.routingPolicy.rules[0].id, "new-ai");
+    }
+  }
+  failPublication = true;
+  const recovery = await request("/api/settings/ai-egress", "PATCH", { mode: "residential", upstream: { password: nextPassword } });
+  assert.equal(recovery.status, 200);
+  const recovered = await recovery.json(); payloads.push(recovered);
+  assert.equal(recovered.runtimeSync.status, "pending");
+  failPublication = false;
+  const retry = await (await request("/api/settings/ai-egress/publish", "POST", {})).json();
+  assert.equal(retry.runtimeSync.status, "current");
+  const bootstrap = await (await request("/api/bootstrap")).json();
+  assert.equal(bootstrap.aiEgress.runtimeSync.status, "current");
+  assert.equal(bootstrap.routingPolicy.rules[0].id, "new-ai");
+  assert.ok(bootstrap.runtimePreview.checksum);
+  payloads.push(retry, bootstrap);
+  for (const value of [oldPassword, nextPassword, oldKey, nextKey]) assert.ok(!JSON.stringify(payloads).includes(value));
+});
+
+test("configuration reads preserve Runtime status failures instead of reporting publication pending", async t => {
+  let failStatus = false;
+  const secret = "private-runtime-status-error";
+  const { request } = await fixture(t, { runtimeAdapter: {
+    status: async () => {
+      if (failStatus) throw new Error(secret);
+      return { mode: "systemd", state: "running" };
+    },
+    publish: async () => ({ mode: "systemd", state: "running" })
+  } });
+  failStatus = true;
+  for (const path of ["/api/settings/ai-egress", "/api/settings/ai-upstream", "/api/bootstrap"]) {
+    const response = await request(path);
+    assert.equal(response.status, 500, path);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "INTERNAL_ERROR", path);
+    assert.equal(payload.runtimeSync, undefined, path);
+    assert.ok(!JSON.stringify(payload).includes(secret), path);
+  }
+});
 
 test("routing updates publish residential domain changes and explain the selected rule", async t => {
   const { request } = await fixture(t);

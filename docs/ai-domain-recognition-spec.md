@@ -12,3 +12,8 @@ User request: optimize AI traffic identification while ordinary browsing keeps i
 - Verify through the existing public seams: HTTP/MCP operations, generated subscription and Runtime configs, form submissions/rendered UI, and native local routing simulations. These extend the project's previously authorized test seams.
 
 No new AI site claims, unauthenticated third-party rule downloads, scheduled learning, TLS decryption, or automatic changes of user egress are introduced.
+
+
+## Added domestic-app regression scope
+
+User reports Qianshou slow on Wi-Fi while Clash is in rule mode, then requests a broad domestic-app/network check. Native reproduction shows qianshouapp.cn selects remote DNS because the bundled China domain set omits it; policy.js already classifies .cn as domestic but full subscriptions did not compile this fallback. Fix this divergence by incorporating the existing CHINA_FALLBACK_DOMAIN_SUFFIXES into smart full subscription DNS and route behavior for sing-box, Mihomo and Egern, while preserving explicit custom/AI/overseas priority and complete reviewed China data. Do not rewrite verified upstream rule files or blindly direct shared CDN parents. Unknown non-CN domains retain the existing remote DNS/GeoIP behavior. Check representative domestic App domains and a synthetic unknown .cn, lookalikes, custom overrides, direct/global modes and IP-priority behavior. Client Wi-Fi latency and actual Qianshou account flows remain separate acceptance boundaries.

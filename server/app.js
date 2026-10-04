@@ -650,20 +650,32 @@ export async function createRayLinkApp(options) {
     tlsAssetPackager,
     runtimeDns: options.runtimeDns
   });
+  const runtimePreviewView = () => {
+    try { return { preview: runtimeManager.preview(), error: null }; }
+    catch (error) {
+      // A read must still expose saved settings when credentials or compilation
+      // are unavailable. Never copy native errors/configuration into the view.
+      return { preview: null, error: error?.code === "AI_UPSTREAM_SECRET_UNAVAILABLE"
+        ? { code: "AI_UPSTREAM_SECRET_UNAVAILABLE", message: "AI 上游凭据不可用；设置已保存但无法确认运行配置。请恢复加密密钥或重新填写住宅代理密码后重试发布。" }
+        : { code: "RUNTIME_PREVIEW_UNAVAILABLE", message: "运行配置无法编译；设置已保存但尚未确认 Runtime 应用。请检查配置后重试发布。" } };
+    }
+  };
   const aiEgressView = async (knownRuntime) => {
     const runtime = knownRuntime || await runtimeManager.status();
     // Capture desired and published configurations in one synchronous turn.
     // Otherwise a concurrent save could pair an old revision with new status.
     const config = store.aiUpstreamSettings();
     const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
-    const matches = active?.checksum === runtimeManager.preview().checksum;
+    const { preview, error } = runtimePreviewView();
+    const matches = preview !== null && active?.checksum === preview.checksum;
     const status = matches && runtime.mode === "dry-run" ? "simulated"
       : matches && runtime.state === "running" ? "current" : "pending";
     const publishedMode = active ? store.deploymentSnapshotMetadata(active.id).aiEgressMode : null;
     return { mode: config.enabled ? "residential" : "server", aiExit: store.routingPolicy().aiExit, upstream: config,
       runtimeSync: { status, runtimeState: runtime.state, runtimeMode: runtime.mode, publishedMode,
       ...(status === "pending" ? { message: "设置已保存，尚未确认 Runtime 已应用；请发布配置并检查运行状态。" }
-        : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}) } };
+        : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}),
+      ...(error ? { errorCode: error.code, message: error.message } : {}) } };
   };
   const aiUpstreamView = async (knownRuntime) => {
     const { upstream: config, runtimeSync } = await aiEgressView(knownRuntime);
@@ -683,7 +695,8 @@ export async function createRayLinkApp(options) {
     }
   };
   const pendingAiPublication = runtimeSync => ({ ...runtimeSync, status: "pending",
-    message: "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" });
+    message: runtimeSync.errorCode ? runtimeSync.message
+      : "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" });
   const currentAiDiagnostics = () => {
     const config = store.aiUpstreamRuntimeSettings();
     const key = `${config.enabled ? "upstream" : "direct"}:${config.revision}`;
@@ -1449,7 +1462,7 @@ export async function createRayLinkApp(options) {
         telemetry: store.telemetryOverview(),
         runtime,
         bbr, runtimeSetup, systemUpdate: await systemUpdateManager.status(),
-        runtimePreview: runtimeManager.preview(),
+        runtimePreview: runtimePreviewView().preview,
         deployments,
         backups,
         alerts,

@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import {
   AI_DOMAIN_NAMES,
   AI_DOMAIN_SUFFIXES,
+  CHINA_FALLBACK_DOMAIN_SUFFIXES,
   DEFAULT_ROUTE_PROBE_URL,
   LOCAL_DOMAIN_SUFFIXES,
   normalizeRoutingPolicy,
@@ -10,6 +11,8 @@ import {
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
 import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
+
+const chinaFallbackSuffixes = CHINA_FALLBACK_DOMAIN_SUFFIXES.map(suffix => suffix.replace(/^\./, ""));
 
 const sourceRoot = "https://github.com/SagerNet/sing-box/tree/v1.14.2";
 const docsRoot = "https://sing-box.sagernet.org/configuration/inbound";
@@ -600,6 +603,12 @@ function clientConfigForOutbounds(
           action: "route",
           outbound: ROUTE_POLICY_GROUPS.proxy.tag
         },
+        ...resolveRemaining({ domain_suffix: [...chinaFallbackSuffixes] }),
+        {
+          domain_suffix: [...chinaFallbackSuffixes],
+          action: "route",
+          outbound: ROUTE_POLICY_GROUPS.direct.tag
+        },
         ...resolveRemaining({ rule_set: "geosite-geolocation-cn" }),
         {
           rule_set: "geosite-geolocation-cn",
@@ -670,6 +679,10 @@ function clientConfigForOutbounds(
           domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
           action: "route",
           server: "dns-remote"
+        }, {
+          domain_suffix: [...chinaFallbackSuffixes],
+          action: "route",
+          server: "dns-domestic"
         }, {
           rule_set: "geosite-geolocation-cn",
           action: "route",

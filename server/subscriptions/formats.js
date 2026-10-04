@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import {
   AI_DOMAIN_NAMES,
   AI_DOMAIN_SUFFIXES,
+  CHINA_FALLBACK_DOMAIN_SUFFIXES,
   createRoutePolicyCandidates,
   LOCAL_DOMAIN_SUFFIXES,
   normalizeRoutingPolicy,
@@ -11,6 +12,8 @@ import {
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
 import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
+
+const chinaFallbackSuffixes = CHINA_FALLBACK_DOMAIN_SUFFIXES.map(suffix => suffix.replace(/^\./, ""));
 
 const bundledRulesVersion = JSON.parse(readFileSync(new URL("../routing/rule-sets/manifest.json", import.meta.url))).version;
 const bundledRulesComment = `# 智能分流内置规则版本: ${bundledRulesVersion}\n# 随 RayLink 应用发布更新；单独更新主控 SRS 清单不会刷新此内置基线。\n`;
@@ -251,6 +254,10 @@ function mihomoDnsPolicyRules(policy) {
     for (const domain of PROXY_DOMAIN_SUFFIXES) {
       const key = `+.${domain}`;
       if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("remote", "proxy");
+    }
+    for (const domain of chinaFallbackSuffixes) {
+      const key = `+.${domain}`;
+      if (!Object.hasOwn(rules, key) && !covered(domain)) rules[key] = dnsPolicyValue("domestic", "direct");
     }
   }
   return rules;
@@ -725,6 +732,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
               ...PROXY_DOMAIN_SUFFIXES.map(
                 (domain) => `DOMAIN-SUFFIX,${domain},${ROUTE_POLICY_GROUPS.proxy.name}`
               ),
+              ...chinaFallbackSuffixes.map((domain) => `DOMAIN-SUFFIX,${domain},DIRECT`),
               "RULE-SET,raylink-cn-domain,DIRECT",
               ...mihomoPrivateIpRules({ resolveDomains: true }),
               "RULE-SET,raylink-cn-ip,DIRECT",
@@ -946,6 +954,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         ...(routePolicy.mode === "smart" ? PROXY_DOMAIN_SUFFIXES.map((domain) => ({
           domain_suffix: { match: domain, value: "overseas" }
         })) : []),
+        ...(routePolicy.mode === "smart" ? chinaFallbackSuffixes.map((domain) => ({
+          domain_suffix: { match: domain, value: "domestic" }
+        })) : []),
         ...(routePolicy.mode === "smart" ? egernChinaDomains("value", "domestic") : []),
         {
           domain_wildcard: {
@@ -1073,6 +1084,9 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
               })),
               ...PROXY_DOMAIN_SUFFIXES.map((domain) => ({
                 domain_suffix: { match: domain, policy: ROUTE_POLICY_GROUPS.proxy.name }
+              })),
+              ...chinaFallbackSuffixes.map((domain) => ({
+                domain_suffix: { match: domain, policy: "DIRECT" }
               })),
               ...egernChinaDomains("policy", "DIRECT"),
               ...egernPrivateIpRules({ resolveDomains: true }),

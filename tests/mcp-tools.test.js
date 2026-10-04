@@ -147,3 +147,11 @@ test("every published tool has a closed SDK-compatible schema and explicit mutat
   assert.doesNotMatch(JSON.stringify(selected), /SENSITIVE/);
   assert.deepEqual(payload.deployments[0].targets[0].tls, { private_key: "SENSITIVE" });
 });
+
+test("AI egress tool views retain safe compilation error codes for recovery", () => {
+  const runtimeSync = { status: "pending", errorCode: "AI_UPSTREAM_SECRET_UNAVAILABLE", message: "重新填写住宅密码后重试" };
+  for (const name of ["routing_ai_egress_get", "routing_ai_upstream_get"]) {
+    const value = tool(name).select({ mode: "residential", aiExit: { mode: "pinned", hostId: "local" }, config: {}, upstream: {}, runtimeSync });
+    assert.equal(value.runtimeSync.errorCode, "AI_UPSTREAM_SECRET_UNAVAILABLE");
+  }
+});

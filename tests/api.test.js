@@ -361,7 +361,9 @@ test("admin can persist the unified routing policy and bootstrap returns it", as
     cookie,
     "/api/bootstrap"
   )).json();
-  assert.deepEqual(bootstrap.routingPolicy, policy);
+  const { runtimeSync, ...savedPolicy } = policy;
+  assert.equal(runtimeSync.status, "not-required");
+  assert.deepEqual(bootstrap.routingPolicy, savedPolicy);
 
   const diagnostic = await api(
     testApp.baseUrl,

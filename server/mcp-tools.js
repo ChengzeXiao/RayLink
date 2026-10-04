@@ -125,14 +125,14 @@ const routingFields = {
 };
 const aiUpstreamView = (value) => ({
   upstream: pick(value.config, ["enabled", "hostId", "type", "server", "port", "username", "tlsServerName", "passwordConfigured", "revision"]),
-  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "message"])
+  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "message", "errorCode"])
 });
 
 const aiEgressView = (value) => ({
   mode: value.mode,
   aiExit: pick(value.aiExit, ["mode", "hostId"]),
   upstream: aiUpstreamView({ config: value.upstream }).upstream,
-  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "runtimeMode", "publishedMode", "message"])
+  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "runtimeMode", "publishedMode", "message", "errorCode"])
 });
 
 export const mcpTools = [
