@@ -6,11 +6,10 @@ let bootstrapRefreshTimer = null;
 let bootstrapRefreshInFlight = false;
 let bootstrapRefreshPromise = null;
 let bootstrapReadPromise = null;
-let aiExitDirty = false;
 let aiDiagnosticsLoading = false;
-let aiUpstreamDirty = false;
-let aiUpstreamSaving = false;
-let aiUpstreamError = "";
+let aiEgressDirty = false;
+let aiEgressSaving = false;
+let aiEgressError = "";
 const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
 const requiredNodeAgentVersion = "0.9.0";
 
@@ -64,6 +63,7 @@ const controlPlane = {
   routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
   routingRuleSets: null,
   aiUpstream: null,
+  aiEgress: null,
   portalProfile: null
 };
 
@@ -272,6 +272,7 @@ function applyBootstrap(data) {
   controlPlane.certificate = data.certificate || { mode: null, email: "" };
   controlPlane.nodeDomains = data.nodeDomains || null;
   controlPlane.aiUpstream = data.aiUpstream || null;
+  controlPlane.aiEgress = data.aiEgress || null;
   controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
@@ -395,8 +396,7 @@ const routingMatchLabels = {
 
 function renderRoutingPolicy() {
   const policy = controlPlane.routingPolicy;
-  if (document.querySelector("#ai-exit-form")?.elements) renderAiExit();
-  if (document.querySelector("#ai-upstream-form")?.elements) renderAiUpstream();
+  if (document.querySelector("#ai-egress-form")?.elements) renderAiEgress();
   const mode = routingModeCopy[policy.mode] || routingModeCopy.smart;
   document.querySelectorAll('#routing-mode-form input[name="mode"]').forEach((input) => {
     input.checked = input.value === policy.mode;
@@ -526,61 +526,27 @@ async function diagnoseRouting(event) {
   }
 }
 
-function renderAiExit() {
-  const form = document.querySelector("#ai-exit-form");
-  if (!form) return;
-  const upstreamEnabled = Boolean(controlPlane.aiUpstream?.config?.enabled);
-  if (aiExitDirty && !upstreamEnabled) return;
-  if (upstreamEnabled) aiExitDirty = false;
-  const selection = controlPlane.routingPolicy.aiExit || { mode: "auto", hostId: null };
-  const hosts = controlPlane.hosts || [];
-  form.elements.mode.value = selection.mode;
-  form.elements.hostId.innerHTML = hosts.map((host) =>
-    `<option value="${escapeHtml(host.id)}">${escapeHtml(host.name)} (${escapeHtml(host.id)})</option>`
-  ).join("");
-  if (selection.hostId && !hosts.some((host) => host.id === selection.hostId)) {
-    form.elements.hostId.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(selection.hostId)}">已移除主机 (${escapeHtml(selection.hostId)})</option>`);
-  }
-  if (selection.hostId) form.elements.hostId.value = selection.hostId;
-  form.elements.mode.disabled = upstreamEnabled;
-  form.elements.hostId.disabled = upstreamEnabled || selection.mode !== "pinned";
-  form.querySelector('button[type="submit"]').disabled = upstreamEnabled;
-  setText("#ai-exit-summary", upstreamEnabled
-    ? "固定 AI 上游已启用：智能分流与当前主控（local）入口已锁定。若要更换入口主机或路由模式，请先停用上游。"
-    : selection.mode === "pinned"
-    ? `已固定主机：${hosts.find((host) => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；主机不在订阅内时 AI 连接被阻止。`
-    : "当前允许 AI 自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
-}
-
-async function saveAiExit(event) {
-  event.preventDefault();
-  if (controlPlane.aiUpstream?.config?.enabled) return;
-  const form = event.currentTarget;
-  const button = form.querySelector('button[type="submit"]');
-  button.disabled = true;
-  try {
-    const mode = form.elements.mode.value;
-    await persistRoutingPolicy({ ...controlPlane.routingPolicy,
-      aiExit: { mode, hostId: mode === "pinned" ? form.elements.hostId.value : null }
-    }, "请更新完整订阅并重新连接，以应用 AI 出口策略。");
-    aiExitDirty = false;
-    renderAiExit();
-  } catch (error) {
-    showToast("AI 出口未保存", error.message);
-  } finally { button.disabled = false; }
-}
-
-function canManageAiUpstream() {
+function canManageAiEgress() {
   return ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
 }
 
-function renderAiUpstream() {
-  const form = document.querySelector("#ai-upstream-form");
+function renderAiEgress() {
+  const form = document.querySelector("#ai-egress-form");
   if (!form) return;
-  const config = controlPlane.aiUpstream?.config || {};
-  const sync = controlPlane.aiUpstream?.runtimeSync || {};
-  if (!aiUpstreamDirty && !aiUpstreamSaving) {
-    form.elements.enabled.checked = Boolean(config.enabled);
+  const state = controlPlane.aiEgress || {};
+  const config = state.upstream || controlPlane.aiUpstream?.config || {};
+  const sync = state.runtimeSync || {};
+  const selection = state.aiExit || controlPlane.routingPolicy.aiExit || { mode: "auto", hostId: null };
+  const hosts = controlPlane.hosts || [];
+  if (!aiEgressDirty && !aiEgressSaving) {
+    form.elements.mode.value = state.mode || "server";
+    form.elements.hostMode.value = selection.mode;
+    form.elements.hostId.innerHTML = hosts.map(host =>
+      `<option value="${escapeHtml(host.id)}">${escapeHtml(host.name)} (${escapeHtml(host.id)})</option>`).join("");
+    if (selection.hostId && !hosts.some(host => host.id === selection.hostId)) {
+      form.elements.hostId.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(selection.hostId)}">已移除主机 (${escapeHtml(selection.hostId)})</option>`);
+    }
+    if (selection.hostId) form.elements.hostId.value = selection.hostId;
     form.elements.type.value = config.type || "socks5";
     form.elements.server.value = config.server || "";
     form.elements.port.value = config.port || 1080;
@@ -590,105 +556,124 @@ function renderAiUpstream() {
     form.elements.clearPassword.checked = false;
   }
   form.elements.password.placeholder = config.passwordConfigured ? "已配置；留空保留现有密码" : "代理密码（可选）";
-  setText("#ai-upstream-password-status", config.passwordConfigured ? "密码已配置，不会回显。" : "尚未配置密码。支持无用户名、无密码的白名单认证。");
-  const state = sync.status === "current" ? (config.enabled ? "已发布" : "已停用")
-    : sync.status === "pending" ? "已保存，待发布"
-      : sync.status === "simulated" ? "仅模拟，未部署到真实 Runtime" : "尚未发布";
-  setText("#ai-upstream-status", `${state}${config.revision != null ? ` · 配置版本 ${config.revision}` : ""}${sync.runtimeState ? ` · Runtime：${sync.runtimeState}` : ""}${sync.message ? `。${sync.message}` : ""}`);
-  setText("#ai-upstream-edit-status", aiUpstreamError || (aiUpstreamDirty ? "有未保存的修改。" : ""));
-  const retry = document.querySelector("#ai-upstream-publish");
+  setText("#ai-egress-password-status", config.passwordConfigured ? "密码已配置，不会回显。" : "尚未配置密码。支持无用户名、无密码的白名单认证。");
+  const label = mode => mode === "residential" ? "住宅出口" : "服务器出口";
+  const status = sync.status === "current" ? "配置已发布"
+    : sync.status === "pending" ? "已保存，待发布；尚未确认切换生效"
+      : sync.status === "simulated" ? "仅模拟，未确认真实出口切换" : "尚未发布";
+  const simulated = sync.runtimeMode === "dry-run" || sync.status === "simulated" || sync.runtimeState === "staged";
+  const published = simulated ? `${sync.publishedMode ? `最近模拟记录：${label(sync.publishedMode)} · ` : ""}真实发布：未验证（仅模拟）`
+    : sync.publishedMode ? `最近成功发布：${label(sync.publishedMode)}` : "最近成功发布：暂无记录";
+  setText("#ai-egress-status", `${status} · 已保存选择：${label(state.mode)}。${published}${sync.runtimeState ? ` · Runtime：${sync.runtimeState}` : ""}${sync.message ? `。${sync.message}` : ""}`);
+  setText("#ai-egress-edit-status", aiEgressError || (aiEgressDirty ? "有未保存的修改；切换选项不会立即改变出口。" : ""));
+  setText("#ai-egress-host-summary", selection.mode === "pinned"
+    ? `已保存的服务器策略：固定 ${hosts.find(host => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；不可用时停止 AI 连接。`
+    : "已保存的服务器策略：自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
+  const retry = document.querySelector("#ai-egress-publish");
   retry.hidden = sync.status !== "pending";
-  retry.disabled = !canManageAiUpstream() || aiUpstreamSaving || aiUpstreamDirty;
-  syncAiUpstreamForm();
+  retry.disabled = !canManageAiEgress() || aiEgressSaving || aiEgressDirty;
+  syncAiEgressForm();
   const diagnoseButton = document.querySelector('#ai-diagnose-form button[type="submit"]');
-  if (diagnoseButton) diagnoseButton.disabled = !canManageAiUpstream() || aiDiagnosticsLoading;
-  const upstreamEnabled = Boolean(config.enabled);
+  if (diagnoseButton) diagnoseButton.disabled = !canManageAiEgress() || aiDiagnosticsLoading;
+  const upstreamEnabled = Boolean(controlPlane.aiUpstream?.config?.enabled);
   setText("#ai-diagnose-source", upstreamEnabled ? "主控经已配置 AI 上游" : "主控服务器直接出站");
   setText("#ai-diagnose-description", upstreamEnabled
     ? "匿名检测主控经已保存上游的 DNS、TLS 和 HTTP；不是已发布 Runtime 或手机路径验收，也不证明登录或模型对话可用。"
     : "匿名检测主控直连的 DNS、TLS 和 HTTP；不是客户端、代理协议或登录后对话验收。");
 }
 
-function syncAiUpstreamForm() {
-  const form = document.querySelector("#ai-upstream-form");
+function syncAiEgressForm() {
+  const form = document.querySelector("#ai-egress-form");
   if (!form) return;
-  form.querySelectorAll("input, select, button").forEach((input) => { input.disabled = !canManageAiUpstream() || aiUpstreamSaving; });
-  if (!aiUpstreamSaving) form.querySelector('button[type="submit"]').textContent = "保存并发布";
-  const enabled = form.elements.enabled.checked;
-  form.elements.server.required = enabled;
-  form.elements.port.required = enabled;
-  const https = form.elements.type.value === "https";
-  form.querySelector("[data-ai-upstream-tls]").hidden = !https;
-  form.elements.tlsServerName.disabled = !https || !canManageAiUpstream() || aiUpstreamSaving;
-  setText("#ai-upstream-access", canManageAiUpstream() ? "保存会校验并更新当前主控 Runtime 配置，可能重新加载或重启服务。" : "仅 Owner 和运维管理员可修改或发布。");
+  const locked = !canManageAiEgress() || aiEgressSaving;
+  const residential = form.elements.mode.value === "residential";
+  form.querySelectorAll("input, select, button").forEach(input => { input.disabled = locked; });
+  for (const [selector, visible] of [["[data-ai-egress-server]", !residential], ["[data-ai-egress-residential]", residential]]) {
+    const panel = form.querySelector(selector);
+    panel.hidden = !visible;
+    panel.disabled = locked || !visible;
+  }
+  // Disabled hidden controls never participate in browser validation or submission.
+  for (const key of ["type", "server", "port", "username", "password", "clearPassword"]) form.elements[key].disabled = locked || !residential;
+  form.elements.hostMode.disabled = locked || residential;
+  form.elements.hostId.disabled = locked || residential || form.elements.hostMode.value !== "pinned";
+  form.elements.hostId.required = !residential && form.elements.hostMode.value === "pinned";
+  form.elements.server.required = residential;
+  form.elements.port.required = residential;
+  const https = residential && form.elements.type.value === "https";
+  form.querySelector("[data-ai-egress-tls]").hidden = !https;
+  form.elements.tlsServerName.disabled = locked || !https;
+  if (!aiEgressSaving) form.querySelector('button[type="submit"]').textContent = "保存并发布";
+  setText("#ai-egress-access", canManageAiEgress() ? "保存会校验并发布出口配置，可能重新加载或重启 Runtime。" : "仅 Owner 和运维管理员可修改或发布。");
 }
 
-async function saveAiUpstream(event) {
+function applyAiEgress(data) {
+  controlPlane.aiEgress = data;
+  controlPlane.aiUpstream = { config: data.upstream, runtimeSync: data.runtimeSync };
+  controlPlane.routingPolicy = { ...controlPlane.routingPolicy, aiExit: data.aiExit,
+    ...(data.mode === "residential" ? { mode: "smart" } : {}) };
+}
+
+async function saveAiEgress(event) {
   event.preventDefault();
-  if (!canManageAiUpstream() || aiUpstreamSaving) return;
+  if (!canManageAiEgress() || aiEgressSaving) return;
   const adminId = controlPlane.currentAdmin?.id;
   const generation = controlPlaneConnection.generation;
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
+  const residential = form.elements.mode.value === "residential";
   const password = form.elements.password.value;
   const clearPassword = form.elements.clearPassword.checked;
-  if (password && clearPassword) { aiUpstreamError = "请在填写新密码与清除现有密码之间选择一项。"; setText("#ai-upstream-edit-status", aiUpstreamError); return; }
-  aiUpstreamError = "";
-  aiUpstreamSaving = true;
-  button.disabled = true;
-  form.inert = true;
-  button.textContent = "正在保存并发布…";
+  if (residential && password && clearPassword) {
+    aiEgressError = "请在填写新密码与清除现有密码之间选择一项。";
+    setText("#ai-egress-edit-status", aiEgressError); return;
+  }
+  const body = residential ? { mode: "residential", upstream: {
+    type: form.elements.type.value, server: form.elements.server.value.trim(), port: Number(form.elements.port.value) || null,
+    username: form.elements.username.value, tlsServerName: form.elements.type.value === "https" ? form.elements.tlsServerName.value.trim() : "",
+    ...(password ? { password } : {}), ...(clearPassword ? { clearPassword: true } : {})
+  } } : { mode: "server", aiExit: { mode: form.elements.hostMode.value,
+    hostId: form.elements.hostMode.value === "pinned" ? form.elements.hostId.value : null } };
+  aiEgressError = ""; aiEgressSaving = true;
+  button.disabled = true; form.inert = true; button.textContent = "正在保存并发布…";
   try {
-    const data = await api("/api/settings/ai-upstream", { method: "PATCH", body: JSON.stringify({
-      enabled: form.elements.enabled.checked, type: form.elements.type.value,
-      server: form.elements.server.value.trim(), port: Number(form.elements.port.value) || null,
-      username: form.elements.username.value, tlsServerName: form.elements.type.value === "https" ? form.elements.tlsServerName.value.trim() : "",
-      ...(password ? { password } : {}), ...(clearPassword ? { clearPassword: true } : {})
-    }) });
+    const data = await api("/api/settings/ai-egress", { method: "PATCH", body: JSON.stringify(body) });
     if (adminId !== controlPlane.currentAdmin?.id || generation !== controlPlaneConnection.generation) return;
     form.elements.password.value = "";
     form.elements.clearPassword.checked = false;
-    controlPlane.aiUpstream = data;
-    if (data.config?.enabled) {
-      controlPlane.routingPolicy = { ...controlPlane.routingPolicy, mode: "smart", aiExit: { mode: "pinned", hostId: "local" } };
-      aiExitDirty = false;
-    }
-    aiUpstreamDirty = false;
+    applyAiEgress(data);
+    aiEgressDirty = false;
     renderAiDiagnosticReport(null);
     const state = data.runtimeSync?.status;
-    showToast(state === "current" ? "AI 上游已保存并发布" : state === "simulated" ? "AI 上游已保存，仅模拟" : "AI 上游已保存，待发布",
-      state === "current" ? "请刷新完整订阅并重新连接，使用当前主控的 AI 入口。" : state === "simulated" ? "当前为模拟运行，未部署到真实 Runtime。" : "配置已保留，请检查发布状态并重试。检测上游不等于 Runtime 已生效。");
+    showToast(state === "current" ? "AI 出口已保存并发布" : state === "simulated" ? "AI 出口已保存，仅模拟" : "AI 出口已保存，待发布",
+      state === "current" ? "请刷新完整订阅并重新连接，以应用出口策略。" : state === "simulated" ? "当前为模拟运行，未确认真实出口切换。" : "选择已保留；尚未确认切换生效，请检查状态并重试发布。");
     await loadBootstrap().catch(() => {});
   } catch (error) {
-    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiUpstreamError = `保存失败：${error.message}`;
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiEgressError = `保存失败：${error.message}`;
   } finally {
     if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) {
-      aiUpstreamSaving = false;
-      form.inert = false;
-      button.disabled = !canManageAiUpstream();
-      button.textContent = "保存并发布";
-      renderAiUpstream();
-      renderAiExit();
+      aiEgressSaving = false; form.inert = false;
+      button.disabled = !canManageAiEgress(); button.textContent = "保存并发布";
+      renderRoutingPolicy();
     }
   }
 }
 
-async function publishAiUpstream() {
-  if (!canManageAiUpstream() || aiUpstreamSaving || aiUpstreamDirty) return;
+async function publishAiEgress() {
+  if (!canManageAiEgress() || aiEgressSaving || aiEgressDirty) return;
   const adminId = controlPlane.currentAdmin?.id;
   const generation = controlPlaneConnection.generation;
-  aiUpstreamError = "";
-  aiUpstreamSaving = true;
-  renderAiUpstream();
+  aiEgressError = ""; aiEgressSaving = true;
+  renderAiEgress();
   try {
-    const data = await api("/api/settings/ai-upstream/publish", { method: "POST", body: "{}" });
+    const data = await api("/api/settings/ai-egress/publish", { method: "POST", body: "{}" });
     if (adminId !== controlPlane.currentAdmin?.id || generation !== controlPlaneConnection.generation) return;
-    controlPlane.aiUpstream = data;
+    applyAiEgress(data);
     await loadBootstrap().catch(() => {});
   } catch (error) {
-    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiUpstreamError = `发布失败：${error.message}`;
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiEgressError = `发布失败：${error.message}`;
   } finally {
-    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) { aiUpstreamSaving = false; renderAiUpstream(); }
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) { aiEgressSaving = false; renderRoutingPolicy(); }
   }
 }
 
@@ -736,12 +721,12 @@ async function loadAiDiagnostics() {
     renderAiDiagnosticReport(data.report);
   } catch (error) {
     setText("#ai-diagnose-result", error.message);
-  } finally { aiDiagnosticsLoading = false; if (button) button.disabled = !canManageAiUpstream(); }
+  } finally { aiDiagnosticsLoading = false; if (button) button.disabled = !canManageAiEgress(); }
 }
 
 async function diagnoseAiServices(event) {
   event.preventDefault();
-  if (aiDiagnosticsLoading || !canManageAiUpstream()) return;
+  if (aiDiagnosticsLoading || !canManageAiEgress()) return;
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
@@ -752,7 +737,7 @@ async function diagnoseAiServices(event) {
       method: "POST", body: JSON.stringify({ service: form.elements.service.value })
     }));
   } catch (error) { setText("#ai-diagnose-result", error.message); }
-  finally { button.disabled = !canManageAiUpstream(); aiDiagnosticsLoading = false; }
+  finally { button.disabled = !canManageAiEgress(); aiDiagnosticsLoading = false; }
 }
 
 function renderDashboard() {
@@ -2099,11 +2084,11 @@ function showAdminLogin() {
   controlPlane.usagePeriod = null;
   controlPlane.nodeDomains = null;
   controlPlane.aiUpstream = null;
-  aiUpstreamDirty = false;
-  aiUpstreamSaving = false;
-  aiUpstreamError = "";
-  aiExitDirty = false;
-  const upstreamForm = document.querySelector("#ai-upstream-form");
+  controlPlane.aiEgress = null;
+  aiEgressDirty = false;
+  aiEgressSaving = false;
+  aiEgressError = "";
+  const upstreamForm = document.querySelector("#ai-egress-form");
   upstreamForm?.reset();
   if (upstreamForm) upstreamForm.inert = false;
   document.querySelector("#node-domain-settings-form")?.reset();
@@ -4280,19 +4265,14 @@ document.querySelector("#mcp-scope-list").addEventListener("change", () => {
 document.querySelector("#routing-mode-form")?.addEventListener("submit", saveRoutingMode);
 document.querySelector("#routing-rule-form")?.addEventListener("submit", addRoutingRule);
 document.querySelector("#routing-diagnose-form")?.addEventListener("submit", diagnoseRouting);
-document.querySelector("#ai-exit-form")?.addEventListener("submit", saveAiExit);
-document.querySelector("#ai-exit-form")?.addEventListener("change", (event) => {
-  aiExitDirty = true;
-  event.currentTarget.elements.hostId.disabled = Boolean(controlPlane.aiUpstream?.config?.enabled) || event.currentTarget.elements.mode.value !== "pinned";
-});
 document.querySelector("#ai-diagnose-form")?.addEventListener("submit", diagnoseAiServices);
-document.querySelector("#ai-upstream-form")?.addEventListener("submit", saveAiUpstream);
-for (const eventName of ["input", "change"]) document.querySelector("#ai-upstream-form")?.addEventListener(eventName, () => {
-  aiUpstreamDirty = true;
-  aiUpstreamError = "";
-  renderAiUpstream();
+document.querySelector("#ai-egress-form")?.addEventListener("submit", saveAiEgress);
+for (const eventName of ["input", "change"]) document.querySelector("#ai-egress-form")?.addEventListener(eventName, () => {
+  aiEgressDirty = true;
+  aiEgressError = "";
+  renderAiEgress();
 });
-document.querySelector("#ai-upstream-publish")?.addEventListener("click", publishAiUpstream);
+document.querySelector("#ai-egress-publish")?.addEventListener("click", publishAiEgress);
 
 document.querySelector("#publish-config").addEventListener("click", publishConfig);
 document.querySelector("#rollback-config").addEventListener("click", rollbackConfig);

@@ -128,6 +128,13 @@ const aiUpstreamView = (value) => ({
   runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "message"])
 });
 
+const aiEgressView = (value) => ({
+  mode: value.mode,
+  aiExit: pick(value.aiExit, ["mode", "hostId"]),
+  upstream: aiUpstreamView({ config: value.upstream }).upstream,
+  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "runtimeMode", "publishedMode", "message"])
+});
+
 export const mcpTools = [
   defineTool({ name: "runtime_certificates", description: "Read local managed certificate expiration and last renewal synchronization status. Never returns keys or certificate paths and never restarts the Runtime.", path: "/api/runtime/certificates" }),
   defineTool({ name: "runtime_certificates_sync", description: "Retry synchronization of renewed Caddy certificates into the local Runtime. Changed certificates trigger one verified Runtime restart; failures roll back. Inspect returned status and certificate validity.", permission: "runtime.manage", mutating: true, method: "POST", path: "/api/runtime/certificates/sync" }),
@@ -192,6 +199,17 @@ export const mcpTools = [
   defineTool({ name: "routing_update", description: "Replace the routing policy. Supply the full rules array; omitted rules are not preserved. Regenerate or refresh client subscriptions to consume the new policy.",
     permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules", "aiExit"]) }),
   defineTool({ name: "routing_ai_status", description: "Read the latest anonymous control-plane AI site checks. Results are server-egress evidence, not a phone/client, proxy protocol, account or model-generation test.", path: "/api/routing/ai-check" }),
+  defineTool({ name: "routing_ai_egress_get", description: "Read the exclusive AI egress choice: server (default) or residential. Reports saved choice separately from the last successful publication; never returns proxy passwords. Client subscription refresh is still required.",
+    path: "/api/settings/ai-egress", select: aiEgressView }),
+  defineTool({ name: "routing_ai_egress_update", description: "Atomically select AI server or residential egress, then attempt Runtime publication. Server accepts only aiExit, disables the upstream and preserves its credentials. Residential accepts only upstream, enforces smart/local and never silently falls back to server egress. Google and ordinary browsing keep existing routing. Omitted/blank password preserves it; clearPassword removes it. Inspect pending/simulated status; refresh full client subscriptions afterward.",
+    permission: "runtime.manage", mutating: true, method: "PATCH", path: "/api/settings/ai-egress", body: true, select: aiEgressView,
+    fields: { mode: z.enum(["server", "residential"]),
+      aiExit: z.strictObject({ mode: z.enum(["auto", "pinned"]), hostId: id.nullable().optional() }).optional(),
+      upstream: z.strictObject({ type: z.enum(["socks5", "http", "https"]).optional(), server: z.string().max(253).optional(), port: port.optional(),
+        username: z.string().max(255).optional(), password: z.string().max(255).optional(), tlsServerName: z.string().max(253).optional(), clearPassword: z.boolean().optional() }).optional()
+    } }),
+  defineTool({ name: "routing_ai_egress_publish", description: "Retry publishing the saved AI egress choice without editing it. May restart the Runtime; inspect saved mode, publishedMode and pending/simulated status. Never returns credentials.",
+    permission: "runtime.manage", mutating: true, method: "POST", path: "/api/settings/ai-egress/publish", select: aiEgressView }),
   defineTool({ name: "routing_ai_upstream_get", description: "Read the local Host AI-only SOCKS5/HTTP/HTTPS upstream settings and actual publication state. Never returns the proxy password.",
     path: "/api/settings/ai-upstream", select: aiUpstreamView }),
   defineTool({ name: "routing_ai_upstream_update", description: "Save the local Host AI-only upstream and attempt Runtime publication. Enabling pins smart AI routing to local; Google and ordinary browsing keep their existing egress. Blank or omitted password preserves it; clearPassword explicitly removes it. Publication can remain pending; dry-run is simulated. Proxy credentials never enter client subscriptions.",

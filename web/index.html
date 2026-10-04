@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.41&amp;rev=tuic-alpn-1">
+  <link rel="stylesheet" href="./styles.css?v=0.2.42&amp;rev=tuic-alpn-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -325,16 +325,39 @@
             <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 默认代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
           </section>
           <section class="policy-layout" data-policy-panel="ai" hidden>
-            <div class="panel policy-list">
-              <div class="panel-heading"><div><p class="eyebrow">连接一致性</p><h2>AI 入口主机</h2></div></div>
-              <p class="field-hint">固定主机后，AI 自动选择和手选均限定在该主机的协议内。协议故障可回退，主机不可用时停止 AI 连接，避免悄悄改变出口。</p>
-              <form id="ai-exit-form" class="field-grid">
-                <label class="field"><span>出口策略</span><select name="mode"><option value="auto">自动选择主机</option><option value="pinned">固定主机</option></select></label>
-                <label class="field"><span>AI 入口主机</span><select name="hostId" disabled></select></label>
-                <button class="button primary full" type="submit">保存 AI 出口</button>
+            <div class="panel policy-list ai-egress-panel">
+              <div class="panel-heading"><div><p class="eyebrow">连接一致性</p><h2>AI 出口</h2></div></div>
+              <p class="field-hint">选择一种 AI 出口。默认使用服务器，不需要住宅代理；切换选项后，保存并发布才会应用。</p>
+              <form id="ai-egress-form" class="field-grid" autocomplete="off">
+                <fieldset class="ai-egress-choices full"><legend>出口方式</legend>
+                  <label><input type="radio" name="mode" value="server" checked><span><strong>服务器出口</strong><small>沿用服务器线路，无需住宅代理</small></span></label>
+                  <label><input type="radio" name="mode" value="residential"><span><strong>住宅出口</strong><small>仅 AI 专用流量经指定住宅代理</small></span></label>
+                </fieldset>
+                <fieldset class="ai-egress-fields field-grid full" data-ai-egress-server>
+                  <legend>服务器选择</legend>
+                  <label class="field"><span>主机策略</span><select name="hostMode"><option value="auto">自动选择主机</option><option value="pinned">固定主机</option></select></label>
+                  <label class="field"><span>AI 出口主机</span><select name="hostId" disabled></select></label>
+                  <p class="field-hint full">固定后保留该主机全部授权协议；协议故障可回退，主机不可用时停止 AI 连接，避免意外改变出口。服务器策略适用于智能模式及自定义 AI 规则。</p>
+                  <p id="ai-egress-host-summary" class="field-hint full" role="status"></p>
+                </fieldset>
+                <fieldset class="ai-egress-fields field-grid full" data-ai-egress-residential hidden disabled>
+                  <legend>住宅代理配置 · 当前主控 local</legend>
+                  <label class="field"><span>代理协议</span><select name="type"><option value="socks5">SOCKS5</option><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+                  <label class="field"><span>端口</span><input name="port" type="number" min="1" max="65535" step="1" inputmode="numeric" placeholder="例如 1080"></label>
+                  <label class="field full"><span>代理地址</span><input name="server" maxlength="253" placeholder="代理主机名或 IP，不含协议和路径" spellcheck="false" autocapitalize="none"></label>
+                  <label class="field"><span>用户名（可选）</span><input name="username" maxlength="255" autocomplete="off" spellcheck="false" autocapitalize="none"></label>
+                  <label class="field"><span>密码（可选）</span><input name="password" type="password" maxlength="255" autocomplete="new-password" placeholder="代理密码（可选）"></label>
+                  <p id="ai-egress-password-status" class="field-hint full">尚未配置密码。支持无用户名、无密码的白名单认证。</p>
+                  <label class="ai-egress-option full"><input type="checkbox" name="clearPassword"><span>清除已保存密码（需同时清空用户名）</span></label>
+                  <label class="field full" data-ai-egress-tls hidden><span>TLS 服务器名（可选）</span><input name="tlsServerName" maxlength="253" placeholder="默认使用代理主机名；严格校验证书" spellcheck="false" autocapitalize="none"></label>
+                  <p class="field-hint full">住宅出口固定智能分流与当前主控 local 入口。仅 AI 专用网站、登录与 API 经上游；Google 搜索、Gmail、YouTube 和共享登录保持原出口。代理地址本身不能证明住宅属性或固定公网 IP。</p>
+                </fieldset>
+                <button class="button primary full" type="submit">保存并发布</button>
               </form>
-              <p id="ai-exit-summary" class="field-hint" role="status"></p>
-              <p class="field-hint">适用于智能模式及自定义 AI 规则；其他自定义规则与全局模式仍按原优先级执行。保存后请刷新完整订阅并重新连接。仅节点订阅不包含此策略。</p>
+              <p id="ai-egress-access" class="field-hint">保存会校验并发布出口配置，可能重新加载或重启 Runtime。</p>
+              <p id="ai-egress-edit-status" class="field-hint" role="status" aria-live="polite"></p>
+              <div class="ai-egress-publication"><p id="ai-egress-status" class="field-hint" role="status">正在读取出口状态。</p><button id="ai-egress-publish" class="button secondary" type="button" hidden>重试发布</button></div>
+              <p class="field-hint">发布成功后请刷新完整订阅并重新连接；仅节点订阅不包含此策略。切回服务器出口不删除已保存的住宅参数。</p>
             </div>
             <aside class="panel policy-inspector">
               <p class="eyebrow" id="ai-diagnose-source">主控服务器直接出站</p><h2>AI 服务检测</h2>
@@ -345,26 +368,6 @@
               </form>
               <p class="field-hint">重复检测会复用最近一分钟的结果。检测不修改分流，不会因验证页或限流切换节点。</p>
             </aside>
-            <div class="panel policy-list ai-upstream-panel">
-              <div class="panel-heading"><div><p class="eyebrow">当前主控 · local</p><h2>固定 AI 上游</h2></div><span class="status-badge neutral">独立代理出口</span></div>
-              <p class="field-hint">未配置或关闭时沿用原有出口，不依赖此代理。启用后仅预设 AI 网站、专用登录与 API 域名经此上游；Google 搜索、Gmail、YouTube 和共享 Google 登录保持原出口。代理类型和地址本身不能证明住宅属性或 IP 永不变化。</p>
-              <form id="ai-upstream-form" class="field-grid" autocomplete="off">
-                <label class="ai-upstream-option full"><input type="checkbox" name="enabled"><span>启用固定 AI 上游</span></label>
-                <label class="field"><span>代理协议</span><select name="type"><option value="socks5">SOCKS5</option><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
-                <label class="field"><span>端口</span><input name="port" type="number" min="1" max="65535" step="1" inputmode="numeric" placeholder="例如 1080"></label>
-                <label class="field full"><span>代理地址</span><input name="server" maxlength="253" placeholder="代理主机名或 IP，不含协议和路径" spellcheck="false" autocapitalize="none"></label>
-                <label class="field"><span>用户名（可选）</span><input name="username" maxlength="255" autocomplete="off" spellcheck="false" autocapitalize="none"></label>
-                <label class="field"><span>密码（可选）</span><input name="password" type="password" maxlength="255" autocomplete="new-password" placeholder="代理密码（可选）"></label>
-                <p id="ai-upstream-password-status" class="field-hint full">尚未配置密码。支持无用户名、无密码的白名单认证。</p>
-                <label class="ai-upstream-option full"><input type="checkbox" name="clearPassword"><span>清除已保存密码（需同时清空用户名）</span></label>
-                <label class="field full" data-ai-upstream-tls hidden><span>TLS 服务器名（可选）</span><input name="tlsServerName" maxlength="253" placeholder="默认使用代理主机名；严格校验证书" spellcheck="false" autocapitalize="none"></label>
-                <p class="field-hint full">启用后固定智能分流与 local 入口；停用后保留入口固定设置。仅当前主控支持此上游。保存后请刷新完整订阅并重新连接。</p>
-                <button class="button primary full" type="submit">保存并发布</button>
-              </form>
-              <p id="ai-upstream-access" class="field-hint">保存会校验并更新当前主控 Runtime 配置，可能重新加载或重启服务。</p>
-              <p id="ai-upstream-edit-status" class="field-hint" role="status" aria-live="polite"></p>
-              <div class="ai-upstream-publication"><p id="ai-upstream-status" class="field-hint" role="status">正在读取上游状态。</p><button id="ai-upstream-publish" class="button secondary" type="button" hidden>重试发布</button></div>
-            </div>
             <div id="ai-diagnose-result" class="panel ai-diagnostic-results" role="status" aria-live="polite"><p>尚未检测。</p></div>
           </section>
         </section>
@@ -585,11 +588,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.41"></script>
-  <script src="./subscription-session.js?v=0.2.41"></script>
-  <script src="./subscription-client-url.js?v=0.2.41"></script>
-  <script src="./subscription-quick.js?v=0.2.41"></script>
-  <script src="./protocol-health.js?v=0.2.41"></script>
-  <script src="./app.js?v=0.2.41&amp;rev=tuic-alpn-1"></script>
+  <script src="./subscription-qr.js?v=0.2.42"></script>
+  <script src="./subscription-session.js?v=0.2.42"></script>
+  <script src="./subscription-client-url.js?v=0.2.42"></script>
+  <script src="./subscription-quick.js?v=0.2.42"></script>
+  <script src="./protocol-health.js?v=0.2.42"></script>
+  <script src="./app.js?v=0.2.42&amp;rev=tuic-alpn-1"></script>
 </body>
 </html>

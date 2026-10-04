@@ -1,5 +1,12 @@
 # RayLink Changelog
 
+## 0.2.42 - 2026-10-04
+
+- 将“AI 入口主机”和“固定 AI 上游”合并为 AI 出口二选一：服务器出口（默认）或住宅代理出口，按选择展示并提交配置。
+- 统一事务切换主机策略与代理开关，保留住宅凭据和原有分流规则；发布失败展示已保存与最近发布模式，支持重试。
+- 新增统一 AI 出口 REST 与 MCP 读、写、发布接口，保留旧接口兼容、权限与幂等保护。
+- 保持 AI 专用流量范围及失败关闭行为；Google 与普通浏览继续原出口。
+
 ## 0.2.41 - 2026-10-04
 
 - Add disabled-by-default AI-only SOCKS5, HTTP and HTTPS upstream configuration through the UI, REST and MCP, with credential encryption and explicit publication state.

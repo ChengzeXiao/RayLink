@@ -113,6 +113,8 @@ function adminPermissionForRequest(method, pathname) {
     || pathname === "/api/settings/routing"
     || pathname === "/api/settings/ai-upstream"
     || pathname === "/api/settings/ai-upstream/publish"
+    || pathname === "/api/settings/ai-egress"
+    || pathname === "/api/settings/ai-egress/publish"
     || pathname === "/api/routing/diagnose"
     || pathname === "/api/routing/ai-check"
   ) {
@@ -647,7 +649,7 @@ export async function createRayLinkApp(options) {
     tlsAssetPackager,
     runtimeDns: options.runtimeDns
   });
-  const aiUpstreamView = async (knownRuntime) => {
+  const aiEgressView = async (knownRuntime) => {
     const runtime = knownRuntime || await runtimeManager.status();
     // Capture desired and published configurations in one synchronous turn.
     // Otherwise a concurrent save could pair an old revision with new status.
@@ -656,9 +658,15 @@ export async function createRayLinkApp(options) {
     const matches = active?.checksum === runtimeManager.preview().checksum;
     const status = matches && runtime.mode === "dry-run" ? "simulated"
       : matches && runtime.state === "running" ? "current" : "pending";
-    return { config, runtimeSync: { status, runtimeState: runtime.state,
+    const publishedMode = active ? store.deploymentSnapshotMetadata(active.id).aiEgressMode : null;
+    return { mode: config.enabled ? "residential" : "server", aiExit: store.routingPolicy().aiExit, upstream: config,
+      runtimeSync: { status, runtimeState: runtime.state, runtimeMode: runtime.mode, publishedMode,
       ...(status === "pending" ? { message: "设置已保存，尚未确认 Runtime 已应用；请发布配置并检查运行状态。" }
         : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}) } };
+  };
+  const aiUpstreamView = async (knownRuntime) => {
+    const { upstream: config, runtimeSync } = await aiEgressView(knownRuntime);
+    return { config, runtimeSync };
   };
   const currentAiDiagnostics = () => {
     const config = store.aiUpstreamRuntimeSettings();
@@ -1419,6 +1427,7 @@ export async function createRayLinkApp(options) {
         provisioning: nodeProvisioning.availability(),
         routingPolicy: store.routingPolicy(),
         aiUpstream: await aiUpstreamView(runtime),
+        aiEgress: await aiEgressView(runtime),
         routingRuleSets,
         telemetry: store.telemetryOverview(),
         runtime,
@@ -1461,19 +1470,29 @@ export async function createRayLinkApp(options) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/settings/ai-egress") {
+      sendJson(response, 200, await aiEgressView());
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/settings/ai-upstream") {
       sendJson(response, 200, await aiUpstreamView());
       return;
     }
     if ((request.method === "PATCH" && url.pathname === "/api/settings/ai-upstream")
-      || (request.method === "POST" && url.pathname === "/api/settings/ai-upstream/publish")) {
+      || (request.method === "POST" && url.pathname === "/api/settings/ai-upstream/publish")
+      || (request.method === "PATCH" && url.pathname === "/api/settings/ai-egress")
+      || (request.method === "POST" && url.pathname === "/api/settings/ai-egress/publish")) {
+      const unified = url.pathname.startsWith("/api/settings/ai-egress");
       const body = await readJson(request);
       if (request.method === "POST" && (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length)) {
-        throw httpError("INVALID_AI_UPSTREAM", "重试发布不接受额外参数", 422);
+        throw httpError(unified ? "INVALID_AI_EGRESS" : "INVALID_AI_UPSTREAM", "重试发布不接受额外参数", 422);
       }
       let publicationFailed = false;
-      await runLocalRuntimeOperation("AI 上游配置发布", async () => {
-        if (request.method === "PATCH") store.updateAiUpstreamSettings(body);
+      await runLocalRuntimeOperation("AI 出口配置发布", async () => {
+        if (request.method === "PATCH") {
+          if (unified) store.updateAiEgressSettings(body);
+          else store.updateAiUpstreamSettings(body);
+        }
         try {
           await refreshLocalRuntimeCapabilities();
           const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
@@ -1486,8 +1505,8 @@ export async function createRayLinkApp(options) {
           publicationFailed = true;
         }
       });
-      const result = await aiUpstreamView();
-      if (publicationFailed) result.runtimeSync = { status: "pending", runtimeState: result.runtimeSync.runtimeState,
+      const result = await (unified ? aiEgressView() : aiUpstreamView());
+      if (publicationFailed) result.runtimeSync = { ...result.runtimeSync, status: "pending",
         message: "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" };
       sendJson(response, 200, result);
       return;
