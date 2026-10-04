@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { buildRuntimeDnsPolicy } from "./runtime-dns.js";
+import { AI_UPSTREAM_DOMAIN_NAMES, AI_UPSTREAM_DOMAIN_SUFFIXES } from "../routing/ai-upstream-domains.js";
 import {
   buildProtocolInbounds,
   defaultProtocolConfigs
@@ -12,6 +14,49 @@ function isEligibleUser(user, hostRegion, now) {
   const expiresAt = new Date(`${user.expiresAt}T23:59:59.999Z`);
   if (!Number.isFinite(expiresAt.getTime()) || expiresAt < now) return false;
   return user.nodeScope.includes("all") || user.nodeScope.includes(hostRegion);
+}
+
+function applyAiUpstream(config, snapshot) {
+  const upstream = snapshot.aiUpstream;
+  if (!upstream?.enabled) return;
+  if (snapshot.host.kind === "remote" || (snapshot.host.id && snapshot.host.id !== "local")
+    || upstream.hostId !== "local" || !["socks5", "http", "https"].includes(upstream.type)
+    || typeof upstream.server !== "string" || !upstream.server
+    || !Number.isInteger(upstream.port) || upstream.port < 1 || upstream.port > 65535) {
+    throw Object.assign(new Error("AI 住宅出口配置无效或不属于本机"), { code: "INVALID_AI_UPSTREAM_RUNTIME", statusCode: 422 });
+  }
+  const outbound = {
+    type: upstream.type === "socks5" ? "socks" : "http",
+    tag: "ai-residential", server: upstream.server, server_port: upstream.port,
+    ...(upstream.username ? { username: upstream.username } : {}),
+    ...(upstream.password ? { password: upstream.password } : {}),
+    connect_timeout: "10s",
+    ...(upstream.type === "socks5" ? { version: "5", network: "tcp" } : {}),
+    ...(upstream.type === "https" ? { tls: { enabled: true, server_name: upstream.tlsServerName || upstream.server } } : {})
+  };
+  // Bootstrap only the upstream endpoint locally. Target AI domains remain
+  // intact for SOCKS5/CONNECT remote DNS. Never resolve through the upstream
+  // itself before its own endpoint has been connected.
+  if (!isIP(upstream.server)) {
+    if (!config.dns) {
+      config.dns = { servers: [{ type: "local", tag: "runtime-ai-bootstrap" }], final: "runtime-ai-bootstrap" };
+      config.route.default_domain_resolver = "runtime-ai-bootstrap";
+    }
+    outbound.domain_resolver = config.route.default_domain_resolver;
+  }
+  config.outbounds.push(outbound);
+  const aiRules = () => [
+    { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "udp", action: "reject" },
+    { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "tcp", action: "route", outbound: "ai-residential" }
+  ];
+  config.route.rules = [
+    // Prefer the original proxy destination over sniffed outer TLS names (ECH
+    // can hide the real SNI). Sniffing is only a fallback for IP destinations.
+    ...aiRules(),
+    { action: "sniff", sniffer: ["http", "tls", "quic"], timeout: "300ms" },
+    ...aiRules(),
+    ...(config.route.rules || [])
+  ];
 }
 
 export function buildSingBoxConfig(snapshot, options = {}) {
@@ -44,6 +89,7 @@ export function buildSingBoxConfig(snapshot, options = {}) {
     config.dns = runtimeDns.dns;
     Object.assign(config.route, runtimeDns.route);
   }
+  applyAiUpstream(config, snapshot);
   const providers = new Map();
   let usesHttpChallenge = false;
   for (const inbound of config.inbounds) {

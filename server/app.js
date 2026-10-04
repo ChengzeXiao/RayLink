@@ -21,7 +21,8 @@ import { createMcpService } from "./mcp.js";
 import { NodeProvisioning } from "./node-provisioning.js";
 import { NodeDomains } from "./node-domains.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
-import { AiServiceDiagnostics, AI_DIAGNOSTIC_SERVICES } from "./routing/ai-diagnostics.js";
+import { AiServiceDiagnostics, AI_DIAGNOSTIC_SERVICES, defaultAiDiagnosticProbe } from "./routing/ai-diagnostics.js";
+import { createAiUpstreamProbe } from "./routing/ai-upstream-probe.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
 import {
@@ -110,6 +111,8 @@ function adminPermissionForRequest(method, pathname) {
     || pathname === "/api/deployments"
     || pathname.startsWith("/api/deployments/")
     || pathname === "/api/settings/routing"
+    || pathname === "/api/settings/ai-upstream"
+    || pathname === "/api/settings/ai-upstream/publish"
     || pathname === "/api/routing/diagnose"
     || pathname === "/api/routing/ai-check"
   ) {
@@ -512,7 +515,8 @@ function clearedSessionCookie(name, secure) {
 }
 
 export async function createRayLinkApp(options) {
-  const aiDiagnostics = new AiServiceDiagnostics({ probe: options.aiDiagnosticProbe });
+  let aiDiagnostics = new AiServiceDiagnostics({ probe: options.aiDiagnosticProbe });
+  let aiDiagnosticsKey = "";
   const dbPath = options.dbPath || join(options.dataDir, "raylink.db");
   const publicOrigin = new URL(options.publicOrigin);
   const configuredSubscriptionOrigin = new URL(options.subscriptionOrigin || publicOrigin);
@@ -643,6 +647,32 @@ export async function createRayLinkApp(options) {
     tlsAssetPackager,
     runtimeDns: options.runtimeDns
   });
+  const aiUpstreamView = async (knownRuntime) => {
+    const runtime = knownRuntime || await runtimeManager.status();
+    // Capture desired and published configurations in one synchronous turn.
+    // Otherwise a concurrent save could pair an old revision with new status.
+    const config = store.aiUpstreamSettings();
+    const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
+    const matches = active?.checksum === runtimeManager.preview().checksum;
+    const status = matches && runtime.mode === "dry-run" ? "simulated"
+      : matches && runtime.state === "running" ? "current" : "pending";
+    return { config, runtimeSync: { status, runtimeState: runtime.state,
+      ...(status === "pending" ? { message: "设置已保存，尚未确认 Runtime 已应用；请发布配置并检查运行状态。" }
+        : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}) } };
+  };
+  const currentAiDiagnostics = () => {
+    const config = store.aiUpstreamRuntimeSettings();
+    const key = `${config.enabled ? "upstream" : "direct"}:${config.revision}`;
+    if (key !== aiDiagnosticsKey) {
+      aiDiagnostics = new AiServiceDiagnostics({
+        probe: config.enabled ? options.aiUpstreamDiagnosticProbe || createAiUpstreamProbe(config, { resolve: defaultAiDiagnosticProbe.resolve }) : options.aiDiagnosticProbe,
+        source: config.enabled ? "control-plane-via-upstream" : "control-plane-egress",
+        configRevision: config.revision
+      });
+      aiDiagnosticsKey = key;
+    }
+    return aiDiagnostics;
+  };
   const ruleSetCache = options.ruleSetCache || new ManagedRuleSetCache({
     dataDir: options.dataDir,
     fetchImpl: options.ruleSetFetch,
@@ -1388,6 +1418,7 @@ export async function createRayLinkApp(options) {
         nodeDomains: nodeDomains.settings(),
         provisioning: nodeProvisioning.availability(),
         routingPolicy: store.routingPolicy(),
+        aiUpstream: await aiUpstreamView(runtime),
         routingRuleSets,
         telemetry: store.telemetryOverview(),
         runtime,
@@ -1430,8 +1461,40 @@ export async function createRayLinkApp(options) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/settings/ai-upstream") {
+      sendJson(response, 200, await aiUpstreamView());
+      return;
+    }
+    if ((request.method === "PATCH" && url.pathname === "/api/settings/ai-upstream")
+      || (request.method === "POST" && url.pathname === "/api/settings/ai-upstream/publish")) {
+      const body = await readJson(request);
+      if (request.method === "POST" && (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length)) {
+        throw httpError("INVALID_AI_UPSTREAM", "重试发布不接受额外参数", 422);
+      }
+      let publicationFailed = false;
+      await runLocalRuntimeOperation("AI 上游配置发布", async () => {
+        if (request.method === "PATCH") store.updateAiUpstreamSettings(body);
+        try {
+          await refreshLocalRuntimeCapabilities();
+          const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
+          const runtime = await runtimeManager.status();
+          const ready = runtime.state === "running" || (runtime.mode === "dry-run" && runtime.state === "staged");
+          if (active?.checksum !== runtimeManager.preview().checksum || !ready) await runtimeManager.publish(admin.id);
+        } catch {
+          // Native validation may include configuration text. Never return or log
+          // raw errors from a publication carrying an upstream credential.
+          publicationFailed = true;
+        }
+      });
+      const result = await aiUpstreamView();
+      if (publicationFailed) result.runtimeSync = { status: "pending", runtimeState: result.runtimeSync.runtimeState,
+        message: "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" };
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/routing/ai-check") {
-      sendJson(response, 200, { services: AI_DIAGNOSTIC_SERVICES, report: aiDiagnostics.snapshot() });
+      sendJson(response, 200, { services: AI_DIAGNOSTIC_SERVICES, report: currentAiDiagnostics().snapshot() });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/routing/ai-check") {
@@ -1440,7 +1503,7 @@ export async function createRayLinkApp(options) {
         || Object.keys(body).some((key) => key !== "service")) {
         throw httpError("INVALID_AI_DIAGNOSTIC_INPUT", "仅支持选择预设 AI 服务", 422);
       }
-      sendJson(response, 200, await aiDiagnostics.run({ service: body.service }));
+      sendJson(response, 200, await currentAiDiagnostics().run({ service: body.service }));
       return;
     }
     if (

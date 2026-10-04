@@ -1,5 +1,12 @@
 # RayLink Changelog
 
+## 0.2.41 - 2026-10-04
+
+- Add disabled-by-default AI-only SOCKS5, HTTP and HTTPS upstream configuration through the UI, REST and MCP, with credential encryption and explicit publication state.
+- Route recognized dedicated AI domains through the upstream while preserving ordinary Google, shared login/challenge services and other browsing on the existing egress. Preserve inbound protocols and reject unsupported AI target UDP without a direct fallback.
+- Diagnose through the configured proxy with strict TLS, bounded requests, revision-isolated caching, and separate proxy-authentication outcomes; preserve credentials during updates and encrypt residential passwords in deployment history.
+- Gate releases on isolated native proxy tests covering transport compatibility, ordinary-traffic isolation, authentication failures and TLS verification. No residential account or authenticated AI model test is implied.
+
 ## 0.2.40 - 2026-10-04
 
 - Pin AI selections to a stable Host ID across complete sing-box, Mihomo and Egern exports while retaining all authorized compatible protocols. Fail closed for AI when the pinned Host is unavailable, and preserve the pin when older clients omit it.

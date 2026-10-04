@@ -132,6 +132,7 @@ const defaultProbe = {
     });
   }
 };
+export { defaultProbe as defaultAiDiagnosticProbe };
 
 function httpOutcome(response) {
   const status = Number(response.httpStatus);
@@ -152,6 +153,7 @@ function httpOutcome(response) {
 }
 function errorOutcome(error, stage) {
   const code = String(error?.code || "");
+  if (code === "AI_UPSTREAM_AUTH") return { status: "upstream_authentication_required", message: "上游代理认证失败，请检查代理用户名、密码或白名单；这不是 AI 账户认证错误。" };
   if (code === "HPE_HEADER_OVERFLOW") {
     return { status: "response_too_large", message: "响应头超过探测器的 64 KiB 上限；这是探测限制，不能据此判断线路故障。" };
   }
@@ -174,12 +176,16 @@ export class AiServiceDiagnostics {
   #active = 0;
   #queue = [];
   #snapshot = null;
+  #source;
+  #configRevision;
 
-  constructor({ probe = defaultProbe } = {}) {
+  constructor({ probe = defaultProbe, source = "control-plane-egress", configRevision = null } = {}) {
     if (!probe || typeof probe.resolve !== "function" || typeof probe.request !== "function") {
       throw new TypeError("AI diagnostic probe requires resolve and request functions");
     }
     this.#probe = probe;
+    this.#source = source;
+    this.#configRevision = configRevision;
   }
 
   snapshot() { return this.#snapshot ? structuredClone(this.#snapshot) : null; }
@@ -260,8 +266,11 @@ export class AiServiceDiagnostics {
       const pending = Promise.all(targets.map((target) => this.#target(target))).then((results) => {
         const report = {
           service, checkedAt: results.map(({ checkedAt }) => checkedAt).sort().at(-1),
-          source: "control-plane-egress", clientMeasured: false, authenticated: false,
-          cooldownSeconds: COOLDOWN_MS / 1_000, results, limitations: [...LIMITATIONS]
+          source: this.#source, clientMeasured: false, authenticated: false,
+          ...(this.#configRevision === null ? {} : { configRevision: this.#configRevision }),
+          cooldownSeconds: COOLDOWN_MS / 1_000, results, limitations: this.#source === "control-plane-via-upstream"
+            ? ["主控通过已配置上游代理连接固定 AI 目标；不是已发布 Runtime、客户端或移动网络的实测。目标公网 DNS 由主控预检，随后固定目标 IP 并严格校验目标 TLS。", ...LIMITATIONS.slice(1)]
+            : [...LIMITATIONS]
         };
         this.#snapshot = report;
         return report;

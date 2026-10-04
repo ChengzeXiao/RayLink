@@ -571,7 +571,7 @@ function clientConfigForOutbounds(
       return [...resolveRules, { [field]: [value], action: "reject" }];
     }
     return [...resolveRules,
-      ...(field !== "ip_cidr" && !resolvesCustomIps
+      ...(field !== "ip_cidr" && rule.action !== "ai" && !resolvesCustomIps
         ? [{ [field]: [value], action: "resolve" }] : []), {
       [field]: [value],
       action: "route",
@@ -587,7 +587,8 @@ function clientConfigForOutbounds(
   const resolveRemaining = (match = {}) => resolvesCustomIps ? [] : [{ ...match, action: "resolve" }];
   const managedRouteRules = routePolicy.mode === "smart"
     ? [
-        ...(aiUnavailable ? [] : resolveRemaining({ domain: [...AI_DOMAIN_NAMES], domain_suffix: [...AI_DOMAIN_SUFFIXES] })),
+        // Keep AI domain destinations in the proxy request. The server can
+        // then consistently classify them and resolve via its chosen egress.
         {
           domain: [...AI_DOMAIN_NAMES],
           domain_suffix: [...AI_DOMAIN_SUFFIXES],

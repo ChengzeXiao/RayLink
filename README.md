@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.40/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.41/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.40/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.41/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.40/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.41/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,6 +295,10 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
+### v0.2.41 / AI 专用上游代理
+
+在「智能路由 → AI 出口与检测 → 固定 AI 上游」配置 SOCKS5、HTTP 或 HTTPS 代理，默认关闭。住宅出口仅处理 AI 专用网站、登录和 API 域名，Google 搜索及普通浏览保留原出口；提供凭据加密、保存发布状态和同配置代理诊断，MCP 支持查询、编辑和重试发布。当前适用于本地主控 `local`，详见 [发布说明](docs/release/v0.2.41.md)。
+
 ### v0.2.40 / 固定 AI 出口与分层诊断
 
 智能路由新增 AI 出口主机固定，保留该主机全部授权协议；固定主机不可用时拒绝 AI 流量，避免意外切到其他主机。界面及 MCP 可区分 DNS、TLS、超时、验证页、认证和限流；诊断仅代表主控服务器匿名出站。保存后请刷新**整份订阅并重连**，详见 [发布说明](docs/release/v0.2.40.md)。
@@ -317,6 +321,6 @@ TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握�
 
 v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
 
-当前正式版本为 v0.2.40，可使用上面的 Release 下载命令安装或升级。
+当前正式版本为 v0.2.41，可使用上面的 Release 下载命令安装或升级。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

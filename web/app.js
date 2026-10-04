@@ -8,6 +8,9 @@ let bootstrapRefreshPromise = null;
 let bootstrapReadPromise = null;
 let aiExitDirty = false;
 let aiDiagnosticsLoading = false;
+let aiUpstreamDirty = false;
+let aiUpstreamSaving = false;
+let aiUpstreamError = "";
 const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
 const requiredNodeAgentVersion = "0.9.0";
 
@@ -60,6 +63,7 @@ const controlPlane = {
   certificate: { mode: null, email: "" },
   routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
   routingRuleSets: null,
+  aiUpstream: null,
   portalProfile: null
 };
 
@@ -267,6 +271,7 @@ function applyBootstrap(data) {
   controlPlane.access = data.access || null;
   controlPlane.certificate = data.certificate || { mode: null, email: "" };
   controlPlane.nodeDomains = data.nodeDomains || null;
+  controlPlane.aiUpstream = data.aiUpstream || null;
   controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
@@ -391,9 +396,11 @@ const routingMatchLabels = {
 function renderRoutingPolicy() {
   const policy = controlPlane.routingPolicy;
   if (document.querySelector("#ai-exit-form")?.elements) renderAiExit();
+  if (document.querySelector("#ai-upstream-form")?.elements) renderAiUpstream();
   const mode = routingModeCopy[policy.mode] || routingModeCopy.smart;
   document.querySelectorAll('#routing-mode-form input[name="mode"]').forEach((input) => {
     input.checked = input.value === policy.mode;
+    input.disabled = Boolean(controlPlane.aiUpstream?.config?.enabled) && input.value !== "smart";
   });
   setText("#routing-mode-title", mode.title);
   setText("#routing-mode-description", mode.description);
@@ -521,7 +528,10 @@ async function diagnoseRouting(event) {
 
 function renderAiExit() {
   const form = document.querySelector("#ai-exit-form");
-  if (!form || aiExitDirty) return;
+  if (!form) return;
+  const upstreamEnabled = Boolean(controlPlane.aiUpstream?.config?.enabled);
+  if (aiExitDirty && !upstreamEnabled) return;
+  if (upstreamEnabled) aiExitDirty = false;
   const selection = controlPlane.routingPolicy.aiExit || { mode: "auto", hostId: null };
   const hosts = controlPlane.hosts || [];
   form.elements.mode.value = selection.mode;
@@ -532,14 +542,19 @@ function renderAiExit() {
     form.elements.hostId.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(selection.hostId)}">已移除主机 (${escapeHtml(selection.hostId)})</option>`);
   }
   if (selection.hostId) form.elements.hostId.value = selection.hostId;
-  form.elements.hostId.disabled = selection.mode !== "pinned";
-  setText("#ai-exit-summary", selection.mode === "pinned"
+  form.elements.mode.disabled = upstreamEnabled;
+  form.elements.hostId.disabled = upstreamEnabled || selection.mode !== "pinned";
+  form.querySelector('button[type="submit"]').disabled = upstreamEnabled;
+  setText("#ai-exit-summary", upstreamEnabled
+    ? "固定 AI 上游已启用：智能分流与当前主控（local）入口已锁定。若要更换入口主机或路由模式，请先停用上游。"
+    : selection.mode === "pinned"
     ? `已固定主机：${hosts.find((host) => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；主机不在订阅内时 AI 连接被阻止。`
     : "当前允许 AI 自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
 }
 
 async function saveAiExit(event) {
   event.preventDefault();
+  if (controlPlane.aiUpstream?.config?.enabled) return;
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
@@ -555,6 +570,128 @@ async function saveAiExit(event) {
   } finally { button.disabled = false; }
 }
 
+function canManageAiUpstream() {
+  return ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+}
+
+function renderAiUpstream() {
+  const form = document.querySelector("#ai-upstream-form");
+  if (!form) return;
+  const config = controlPlane.aiUpstream?.config || {};
+  const sync = controlPlane.aiUpstream?.runtimeSync || {};
+  if (!aiUpstreamDirty && !aiUpstreamSaving) {
+    form.elements.enabled.checked = Boolean(config.enabled);
+    form.elements.type.value = config.type || "socks5";
+    form.elements.server.value = config.server || "";
+    form.elements.port.value = config.port || 1080;
+    form.elements.username.value = config.username || "";
+    form.elements.tlsServerName.value = config.tlsServerName || "";
+    form.elements.password.value = "";
+    form.elements.clearPassword.checked = false;
+  }
+  form.elements.password.placeholder = config.passwordConfigured ? "已配置；留空保留现有密码" : "代理密码（可选）";
+  setText("#ai-upstream-password-status", config.passwordConfigured ? "密码已配置，不会回显。" : "尚未配置密码。支持无用户名、无密码的白名单认证。");
+  const state = sync.status === "current" ? (config.enabled ? "已发布" : "已停用")
+    : sync.status === "pending" ? "已保存，待发布"
+      : sync.status === "simulated" ? "仅模拟，未部署到真实 Runtime" : "尚未发布";
+  setText("#ai-upstream-status", `${state}${config.revision != null ? ` · 配置版本 ${config.revision}` : ""}${sync.runtimeState ? ` · Runtime：${sync.runtimeState}` : ""}${sync.message ? `。${sync.message}` : ""}`);
+  setText("#ai-upstream-edit-status", aiUpstreamError || (aiUpstreamDirty ? "有未保存的修改。" : ""));
+  const retry = document.querySelector("#ai-upstream-publish");
+  retry.hidden = sync.status !== "pending";
+  retry.disabled = !canManageAiUpstream() || aiUpstreamSaving || aiUpstreamDirty;
+  syncAiUpstreamForm();
+  const diagnoseButton = document.querySelector('#ai-diagnose-form button[type="submit"]');
+  if (diagnoseButton) diagnoseButton.disabled = !canManageAiUpstream() || aiDiagnosticsLoading;
+  const upstreamEnabled = Boolean(config.enabled);
+  setText("#ai-diagnose-source", upstreamEnabled ? "主控经已配置 AI 上游" : "主控服务器直接出站");
+  setText("#ai-diagnose-description", upstreamEnabled
+    ? "匿名检测主控经已保存上游的 DNS、TLS 和 HTTP；不是已发布 Runtime 或手机路径验收，也不证明登录或模型对话可用。"
+    : "匿名检测主控直连的 DNS、TLS 和 HTTP；不是客户端、代理协议或登录后对话验收。");
+}
+
+function syncAiUpstreamForm() {
+  const form = document.querySelector("#ai-upstream-form");
+  if (!form) return;
+  form.querySelectorAll("input, select, button").forEach((input) => { input.disabled = !canManageAiUpstream() || aiUpstreamSaving; });
+  if (!aiUpstreamSaving) form.querySelector('button[type="submit"]').textContent = "保存并发布";
+  const enabled = form.elements.enabled.checked;
+  form.elements.server.required = enabled;
+  form.elements.port.required = enabled;
+  const https = form.elements.type.value === "https";
+  form.querySelector("[data-ai-upstream-tls]").hidden = !https;
+  form.elements.tlsServerName.disabled = !https || !canManageAiUpstream() || aiUpstreamSaving;
+  setText("#ai-upstream-access", canManageAiUpstream() ? "保存会校验并更新当前主控 Runtime 配置，可能重新加载或重启服务。" : "仅 Owner 和运维管理员可修改或发布。");
+}
+
+async function saveAiUpstream(event) {
+  event.preventDefault();
+  if (!canManageAiUpstream() || aiUpstreamSaving) return;
+  const adminId = controlPlane.currentAdmin?.id;
+  const generation = controlPlaneConnection.generation;
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const password = form.elements.password.value;
+  const clearPassword = form.elements.clearPassword.checked;
+  if (password && clearPassword) { aiUpstreamError = "请在填写新密码与清除现有密码之间选择一项。"; setText("#ai-upstream-edit-status", aiUpstreamError); return; }
+  aiUpstreamError = "";
+  aiUpstreamSaving = true;
+  button.disabled = true;
+  form.inert = true;
+  button.textContent = "正在保存并发布…";
+  try {
+    const data = await api("/api/settings/ai-upstream", { method: "PATCH", body: JSON.stringify({
+      enabled: form.elements.enabled.checked, type: form.elements.type.value,
+      server: form.elements.server.value.trim(), port: Number(form.elements.port.value) || null,
+      username: form.elements.username.value, tlsServerName: form.elements.type.value === "https" ? form.elements.tlsServerName.value.trim() : "",
+      ...(password ? { password } : {}), ...(clearPassword ? { clearPassword: true } : {})
+    }) });
+    if (adminId !== controlPlane.currentAdmin?.id || generation !== controlPlaneConnection.generation) return;
+    form.elements.password.value = "";
+    form.elements.clearPassword.checked = false;
+    controlPlane.aiUpstream = data;
+    if (data.config?.enabled) {
+      controlPlane.routingPolicy = { ...controlPlane.routingPolicy, mode: "smart", aiExit: { mode: "pinned", hostId: "local" } };
+      aiExitDirty = false;
+    }
+    aiUpstreamDirty = false;
+    renderAiDiagnosticReport(null);
+    const state = data.runtimeSync?.status;
+    showToast(state === "current" ? "AI 上游已保存并发布" : state === "simulated" ? "AI 上游已保存，仅模拟" : "AI 上游已保存，待发布",
+      state === "current" ? "请刷新完整订阅并重新连接，使用当前主控的 AI 入口。" : state === "simulated" ? "当前为模拟运行，未部署到真实 Runtime。" : "配置已保留，请检查发布状态并重试。检测上游不等于 Runtime 已生效。");
+    await loadBootstrap().catch(() => {});
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiUpstreamError = `保存失败：${error.message}`;
+  } finally {
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) {
+      aiUpstreamSaving = false;
+      form.inert = false;
+      button.disabled = !canManageAiUpstream();
+      button.textContent = "保存并发布";
+      renderAiUpstream();
+      renderAiExit();
+    }
+  }
+}
+
+async function publishAiUpstream() {
+  if (!canManageAiUpstream() || aiUpstreamSaving || aiUpstreamDirty) return;
+  const adminId = controlPlane.currentAdmin?.id;
+  const generation = controlPlaneConnection.generation;
+  aiUpstreamError = "";
+  aiUpstreamSaving = true;
+  renderAiUpstream();
+  try {
+    const data = await api("/api/settings/ai-upstream/publish", { method: "POST", body: "{}" });
+    if (adminId !== controlPlane.currentAdmin?.id || generation !== controlPlaneConnection.generation) return;
+    controlPlane.aiUpstream = data;
+    await loadBootstrap().catch(() => {});
+  } catch (error) {
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) aiUpstreamError = `发布失败：${error.message}`;
+  } finally {
+    if (adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation) { aiUpstreamSaving = false; renderAiUpstream(); }
+  }
+}
+
 function renderAiDiagnosticReport(report) {
   const container = document.querySelector("#ai-diagnose-result");
   if (!container) return;
@@ -562,26 +699,33 @@ function renderAiDiagnosticReport(report) {
   const labels = {
     reachable: "HTTP 有响应", redirect: "收到重定向", challenge: "需要人机验证",
     authentication_required: "需要 API 认证", permission_denied: "访问被拒绝",
+    upstream_authentication_required: "住宅代理认证失败",
     rate_limited: "请求受限", upstream_error: "上游服务异常", dns_error: "DNS 解析失败",
     tls_error: "TLS 验证失败", timeout: "连接超时", network_error: "网络错误",
     response_too_large: "响应头超过检测上限"
   };
   const time = (value) => value && Number.isFinite(Date.parse(value))
     ? new Date(value).toLocaleString("zh-CN") : "时间未知";
-  container.innerHTML = `<p>主控服务器匿名检测 · ${escapeHtml(time(report.checkedAt))}。不代表客户端、账户或模型对话可用。</p>
+  const upstream = report.source === "control-plane-via-upstream";
+  const currentRevision = typeof controlPlane !== "undefined" ? controlPlane.aiUpstream?.config?.revision : undefined;
+  const oldConfig = upstream && currentRevision != null && report.configRevision !== currentRevision;
+  container.innerHTML = `<p>${upstream ? "主控经已配置 AI 上游匿名检测" : "主控服务器直接出站匿名检测"}${upstream && report.configRevision != null ? ` · 配置版本 ${escapeHtml(report.configRevision)}` : ""} · ${escapeHtml(time(report.checkedAt))}。不代表客户端、账户或模型对话可用；未验证已发布 Runtime 路径。</p>
+    ${oldConfig ? '<p class="warning-text">此结果来自旧配置，请重新检测当前上游。</p>' : ""}
     <div class="ai-diagnostic-grid">${(report.results || []).map((result) => {
       const latency = typeof result.latencyMs === "number" && Number.isFinite(result.latencyMs)
         ? `${Math.round(result.latencyMs)} ms` : "耗时未知";
       return `<article><strong>${escapeHtml(result.label || result.host)}</strong>
         <span class="status-badge ${result.status === "reachable" ? "neutral" : "warning"}">${escapeHtml(labels[result.status] || "待确认")}</span>
         <small>${escapeHtml(result.host)} · ${escapeHtml(result.stage || "未知阶段")} · ${result.httpStatus ? `HTTP ${escapeHtml(result.httpStatus)}` : "无 HTTP 响应"} · ${latency}</small>
-        <p>${escapeHtml(result.message || "")}</p><small>检测于 ${escapeHtml(time(result.checkedAt))}</small></article>`;
+        <p>${escapeHtml(result.message || "")}</p>${result.status === "upstream_authentication_required" ? "<p>请检查上游代理用户名、密码和认证方式；此结果不表示 AI 账户需要 API Key。</p>" : ""}<small>检测于 ${escapeHtml(time(result.checkedAt))}</small></article>`;
     }).join("")}</div>`;
 }
 
 async function loadAiDiagnostics() {
   if (aiDiagnosticsLoading) return;
   aiDiagnosticsLoading = true;
+  const button = document.querySelector('#ai-diagnose-form button[type="submit"]');
+  if (button) button.disabled = true;
   try {
     const data = await api("/api/routing/ai-check");
     const select = document.querySelector("#ai-diagnose-form select");
@@ -592,23 +736,23 @@ async function loadAiDiagnostics() {
     renderAiDiagnosticReport(data.report);
   } catch (error) {
     setText("#ai-diagnose-result", error.message);
-  } finally { aiDiagnosticsLoading = false; }
+  } finally { aiDiagnosticsLoading = false; if (button) button.disabled = !canManageAiUpstream(); }
 }
 
 async function diagnoseAiServices(event) {
   event.preventDefault();
-  if (aiDiagnosticsLoading) return;
+  if (aiDiagnosticsLoading || !canManageAiUpstream()) return;
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   aiDiagnosticsLoading = true;
-  setText("#ai-diagnose-result", "正在从主控服务器检测预设 AI 服务…");
+  setText("#ai-diagnose-result", controlPlane.aiUpstream?.config?.enabled ? "正在从主控经已配置上游检测预设 AI 服务…" : "正在从主控服务器直接检测预设 AI 服务…");
   try {
     renderAiDiagnosticReport(await api("/api/routing/ai-check", {
       method: "POST", body: JSON.stringify({ service: form.elements.service.value })
     }));
   } catch (error) { setText("#ai-diagnose-result", error.message); }
-  finally { button.disabled = false; aiDiagnosticsLoading = false; }
+  finally { button.disabled = !canManageAiUpstream(); aiDiagnosticsLoading = false; }
 }
 
 function renderDashboard() {
@@ -1954,6 +2098,14 @@ function showAdminLogin() {
   controlPlane.currentAdmin = null;
   controlPlane.usagePeriod = null;
   controlPlane.nodeDomains = null;
+  controlPlane.aiUpstream = null;
+  aiUpstreamDirty = false;
+  aiUpstreamSaving = false;
+  aiUpstreamError = "";
+  aiExitDirty = false;
+  const upstreamForm = document.querySelector("#ai-upstream-form");
+  upstreamForm?.reset();
+  if (upstreamForm) upstreamForm.inert = false;
   document.querySelector("#node-domain-settings-form")?.reset();
   elements.authError.textContent = "";
   elements.authForm.elements.password.value = "";
@@ -4131,9 +4283,16 @@ document.querySelector("#routing-diagnose-form")?.addEventListener("submit", dia
 document.querySelector("#ai-exit-form")?.addEventListener("submit", saveAiExit);
 document.querySelector("#ai-exit-form")?.addEventListener("change", (event) => {
   aiExitDirty = true;
-  event.currentTarget.elements.hostId.disabled = event.currentTarget.elements.mode.value !== "pinned";
+  event.currentTarget.elements.hostId.disabled = Boolean(controlPlane.aiUpstream?.config?.enabled) || event.currentTarget.elements.mode.value !== "pinned";
 });
 document.querySelector("#ai-diagnose-form")?.addEventListener("submit", diagnoseAiServices);
+document.querySelector("#ai-upstream-form")?.addEventListener("submit", saveAiUpstream);
+for (const eventName of ["input", "change"]) document.querySelector("#ai-upstream-form")?.addEventListener(eventName, () => {
+  aiUpstreamDirty = true;
+  aiUpstreamError = "";
+  renderAiUpstream();
+});
+document.querySelector("#ai-upstream-publish")?.addEventListener("click", publishAiUpstream);
 
 document.querySelector("#publish-config").addEventListener("click", publishConfig);
 document.querySelector("#rollback-config").addEventListener("click", rollbackConfig);
