@@ -46,6 +46,8 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 | SSH 自动接入 | `hosts_provision_start`, `hosts_provision_list`, `hosts_provision_get`, `hosts_provision_retry` |
 | 入口协议 | `hosts_protocol_get`, `hosts_protocol_update`, `hosts_protocol_activate`, `hosts_protocol_measure` |
 | 智能分流 | `routing_get`, `routing_update`, `routing_diagnose`, `routing_ai_status`, `routing_ai_check` |
+| AI 出口二选一 | `routing_ai_egress_get`, `routing_ai_egress_update`, `routing_ai_egress_publish` |
+| AI 上游兼容接口 | `routing_ai_upstream_get`, `routing_ai_upstream_update`, `routing_ai_upstream_publish` |
 | 证书设置 | `certificate_get`, `certificate_update` |
 | 节点域名自动化 | `node_domains_get`, `node_domains_update` |
 | 本地 Runtime | `runtime_status`, `runtime_installation`, `runtime_update_check`, `runtime_install`, `runtime_upgrade`, `runtime_reality_keypair` |
@@ -132,3 +134,20 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 初始 MCP 审查以 `c0e2373` 为基线，独立 Standards 与 Spec 复核完成；本次 SSH 扩展以 `e5ef11d` 为基线。SSH 扩展新增了真实 SDK 的启动/查询/重放和单独 scope 验证，以及 Node 注册、发布、计量和订阅的模拟闭环。真实公网 VPS 安装、生产服务切换和移动网络质量仍需环境实测；工具的 schema/映射覆盖不等于每个外部运维动作都完成了生产验收。
 
 2026-10-01 MCP Server / 账号 / 域名自动化验收（基线 `8b49e2d`）：`npm run check` 共 451 项，450 通过、0 失败、1 项原生环境检查默认跳过；该项已另以真实 sing-box 1.14.2 运行并通过。覆盖密码/登录并发、会话与 MCP Token 撤销、DNS 设置作用域和幂等、Cloudflare A/AAAA 与错误 Zone 恢复、DNS 传播失败续接、协议继承及五种订阅格式；QUIC 的 UDP 激活、监听、防火墙和测量经过专项回归。Standards / Spec 复核发现的问题已修复，无剩余已确认 P1/P2。桌面 UI 完成只读验收，表单提交由公开 handler 和 HTTP 测试覆盖；本轮未进行公网 DNS/CA/VPS 写入、生产部署或移动网络实测。
+
+
+### AI 出口二选一
+
+`routing_ai_egress_get` 读取保存的 `mode`（`server`/`residential`）、`aiExit`、脱敏 `upstream` 和 `runtimeSync`。`publishedMode` 表示最近成功发布快照中的出口方式；`status=pending` 不表示新设置生效，`runtimeMode=dry-run` 只表示模拟记录，也不证明客户端已刷新订阅。
+
+`routing_ai_egress_update` 需要 `runtime.manage` 和唯一 `requestId`。服务器模式只接受可选 `aiExit`，住宅模式只接受可选 `upstream`；同一个请求不能混传两者。示例：
+
+```json
+{"requestId":"choose-server-1","mode":"server","aiExit":{"mode":"pinned","hostId":"local"}}
+```
+
+```json
+{"requestId":"choose-residential-1","mode":"residential","upstream":{"type":"socks5","server":"proxy.example.com","port":1080}}
+```
+
+可配置 `http`/`https`、`username`、写入专用 `password` 和 HTTPS 的 `tlsServerName`；密码省略/留空保留，`clearPassword:true` 显式清除。服务器模式停止使用住宅上游并保留凭据；住宅模式固定 smart/local，仅 AI 专用域名使用上游，普通 Google/浏览保留原出口。发布失败后用 `routing_ai_egress_publish` 加新 `requestId` 重试；同一次请求的传输重试复用原 `requestId`。旧 `routing_ai_upstream_*` 和 `routing_update` 保持兼容。

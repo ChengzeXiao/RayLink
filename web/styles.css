@@ -1774,13 +1774,25 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
 .ai-diagnostic-grid article > strong, .ai-diagnostic-grid article > small { display: block; margin-bottom: 8px; }
 .ai-diagnostic-grid article > .status-badge { margin-bottom: 10px; }
 .ai-diagnostic-grid small, .ai-diagnostic-results > p { color: var(--text-soft); }
-.ai-upstream-panel { grid-column: 1 / -1; min-width: 0; }
-#ai-upstream-form > .full { grid-column: 1 / -1; }
-.ai-upstream-panel > .field-hint { margin: 10px 0 18px; line-height: 1.7; overflow-wrap: anywhere; }
-.ai-upstream-option { display: flex; align-items: center; gap: 10px; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
-.ai-upstream-option input { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
-.ai-upstream-publication { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
-.ai-upstream-publication p { flex: 1 1 220px; overflow-wrap: anywhere; }
+.ai-egress-panel { min-width: 0; }
+#ai-egress-form > .full, .ai-egress-fields > .full { grid-column: 1 / -1; }
+.ai-egress-panel > .field-hint { margin: 10px 0 18px; line-height: 1.7; overflow-wrap: anywhere; }
+.ai-egress-fields, .ai-egress-choices { min-width: 0; margin: 0; padding: 0; border: 0; }
+.ai-egress-fields legend { padding: 0; margin-bottom: 14px; color: var(--text-soft); font-size: 12px; }
+.ai-egress-fields > .field-hint { margin: 0; line-height: 1.7; overflow-wrap: anywhere; }
+.ai-egress-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }
+.ai-egress-choices legend { margin-bottom: 10px; font-size: 12px; color: var(--text-soft); }
+.ai-egress-choices label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 14px 12px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; }
+.ai-egress-choices label:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.ai-egress-choices input { flex-shrink: 0; width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--accent); }
+.ai-egress-choices strong, .ai-egress-choices small { display: block; }
+.ai-egress-choices strong { font-size: 13px; font-weight: 600; }
+.ai-egress-choices small { margin-top: 5px; font-size: 11px; line-height: 1.6; color: var(--text-soft); }
+.ai-egress-option { display: flex; align-items: center; gap: 10px; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.ai-egress-option input { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+.ai-egress-publication { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.ai-egress-publication p { flex: 1 1 220px; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .ai-egress-choices { grid-template-columns: 1fr; } }
 .diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
 .diagnostic-grid article {
   display: grid;

@@ -1271,6 +1271,36 @@ export class RayLinkStore {
     }
   }
 
+  updateAiEgressSettings(input) {
+    const invalid = () => domainError("INVALID_AI_EGRESS", "请选择一种 AI 出口方式并填写对应配置", 422);
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || !["server", "residential"].includes(input.mode)) throw invalid();
+    const fields = input.mode === "server" ? ["mode", "aiExit"] : ["mode", "upstream"];
+    if (Object.keys(input).some(key => !fields.includes(key))) throw invalid();
+    if (input.aiExit !== undefined && (!input.aiExit || typeof input.aiExit !== "object" || Array.isArray(input.aiExit)
+      || Object.keys(input.aiExit).some(key => !["mode", "hostId"].includes(key))
+      || (input.aiExit.hostId !== undefined && input.aiExit.hostId !== null && typeof input.aiExit.hostId !== "string"))) throw invalid();
+    if (input.upstream !== undefined && (!input.upstream || typeof input.upstream !== "object" || Array.isArray(input.upstream)
+      || Object.keys(input.upstream).some(key => !["type", "server", "port", "username", "tlsServerName", "password", "clearPassword"].includes(key)))) throw invalid();
+    this.db.exec("SAVEPOINT update_ai_egress");
+    try {
+      if (input.mode === "server") {
+        this.updateAiUpstreamSettings({ enabled: false });
+        const policy = this.routingPolicy();
+        this.updateRoutingPolicy({ ...policy, aiExit: input.aiExit === undefined ? policy.aiExit : input.aiExit });
+      } else {
+        this.updateAiUpstreamSettings({ ...input.upstream, enabled: true });
+      }
+      const upstream = this.aiUpstreamSettings();
+      const result = { mode: upstream.enabled ? "residential" : "server", aiExit: this.routingPolicy().aiExit, upstream };
+      this.db.exec("RELEASE update_ai_egress");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO update_ai_egress; RELEASE update_ai_egress");
+      throw error;
+    }
+  }
+
   updateRoutingPolicy(input = {}) {
     const policy = normalizeRoutingPolicy({
       ...input,
@@ -3154,6 +3184,9 @@ export class RayLinkStore {
     const metadata = parseJson(row.config_json, {});
     if (!metadata.config) throw domainError("DEPLOYMENT_SNAPSHOT_MISSING", "部署快照不可用", 409);
     return { checksum: metadata.checksum,
+      aiEgressMode: Array.isArray(metadata.config.outbounds)
+        ? metadata.config.outbounds.some(outbound => outbound?.tag === "ai-residential") ? "residential" : "server"
+        : null,
       hostSnapshots: (Array.isArray(metadata.hostSnapshots) ? metadata.hostSnapshots : [])
         .map(({ hostId, checksum }) => ({ hostId, checksum })) };
   }

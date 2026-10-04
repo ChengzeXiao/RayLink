@@ -134,6 +134,39 @@ test("MCP AI upstream writes are scoped and replay without re-publishing or expo
   assert.equal(output(await reader.callTool({ name: "routing_ai_upstream_get", arguments: {} })).upstream.enabled, true);
 });
 
+test("MCP AI egress provides one exclusive scoped switch and safe idempotent responses", async (t) => {
+  const f = await fixture(t);
+  const { client: reader } = await connect(t, f, ["read"]);
+  const names = (await reader.listTools()).tools.map((item) => item.name);
+  assert.ok(names.includes("routing_ai_egress_get"));
+  assert.ok(!names.includes("routing_ai_egress_update"));
+  assert.ok(!names.includes("routing_ai_egress_publish"));
+  const { client } = await connect(t, f, ["read", "runtime.manage"]);
+  const args = { requestId: "unified-residential", mode: "residential", upstream: {
+    type: "socks5", server: "proxy.example.com", port: 1080, username: "proxy-user", password: "private-unified-password"
+  } };
+  const first = await client.callTool({ name: "routing_ai_egress_update", arguments: args });
+  assert.ok(!first.isError, JSON.stringify(first));
+  assert.equal(output(first).mode, "residential");
+  assert.equal(output(first).upstream.passwordConfigured, true);
+  assert.equal(output(first).runtimeSync.publishedMode, "residential");
+  assert.equal(output(first).runtimeSync.status, "simulated");
+  const deployments = output(await client.callTool({ name: "deployments_list", arguments: {} })).deployments.length;
+  assert.deepEqual(output(await client.callTool({ name: "routing_ai_egress_update", arguments: args })), output(first));
+  assert.equal(output(await client.callTool({ name: "deployments_list", arguments: {} })).deployments.length, deployments);
+  await assert.rejects(reader.callTool({ name: "routing_ai_egress_update", arguments: { requestId: "denied", mode: "server" } }), error => error.code === -32602);
+  const server = await client.callTool({ name: "routing_ai_egress_update", arguments: { requestId: "unified-server", mode: "server", aiExit: { mode: "auto" } } });
+  assert.ok(!server.isError, JSON.stringify(server));
+  assert.equal(output(server).mode, "server");
+  assert.equal(output(server).upstream.enabled, false);
+  assert.equal(output(server).upstream.passwordConfigured, true);
+  const observed = output(await reader.callTool({ name: "routing_ai_egress_get", arguments: {} }));
+  assert.equal(observed.runtimeSync.publishedMode, "server");
+  assert.doesNotMatch(JSON.stringify([first, server, observed]), /private-unified-password/);
+  const retry = await client.callTool({ name: "routing_ai_egress_publish", arguments: { requestId: "unified-retry" } });
+  assert.ok(!retry.isError, JSON.stringify(retry));
+});
+
 test("official MCP client discovers scoped tools and creates a User through the same entitlement workflow", async (t) => {
   const f = await fixture(t);
   const { client } = await connect(t, f, ["read", "users.manage"]);
@@ -263,7 +296,7 @@ test("Agent manages routing, certificates, protocol publication and rollback, ba
     installer: { async status() { return { installed: true, version: "1.14.2", platform: "linux", architecture: "amd64", tags: ["with_quic", "with_utls", "with_acme"] }; } }
   });
   const { client } = await connect(t, f, ["read", "users.manage", "runtime.manage", "hosts.provision", "system.manage", "admins.manage", "audit.read", "secrets.read"]);
-  assert.equal((await client.listTools()).tools.length, 60);
+  assert.equal((await client.listTools()).tools.length, 63);
   let sequence = 0;
   const call = async (name, args = {}, write = false) => {
     const response = await client.callTool({ name, arguments: { ...args, ...(write ? { requestId: `workflow-${++sequence}` } : {}) } });
