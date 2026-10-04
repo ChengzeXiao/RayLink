@@ -9,10 +9,10 @@ import {
 } from "../server/routing/policy.js";
 
 test("AI authentication and streaming dependencies follow AI while adjacent shared-provider hosts do not", () => {
-  for (const domain of ["platform.claude.com", "bridge.claudeusercontent.com", "artifact.frame.claudeusercontent.com", "cdn.oaistatsig.com", "cdn.openaimerge.com", "forwarder.workos.com", "challenges.cloudflare.com"]) {
-    assert.deepEqual(routingDecisionForDomain({}, domain), { action: "ai", source: "ai", ruleId: null, dns: "remote" });
+  for (const domain of ["platform.claude.com", "bridge.claudeusercontent.com", "artifact.frame.claudeusercontent.com", "cdn.oaistatsig.com", "cdn.openaimerge.com", "forwarder.workos.com", "challenges.cloudflare.com", "brunhild.challenges.cloudflare.com", "hagen.challenges.cloudflare.com"]) {
+    assert.deepEqual(routingDecisionForDomain({}, domain), { action: "ai", source: "ai", ruleId: null, dns: "remote" }, domain);
   }
-  for (const domain of ["workos.com", "unrelated.workos.com", "child.forwarder.workos.com", "cloudflare.com", "challenges.cloudflare.com.example", "evilclaude.com"]) {
+  for (const domain of ["workos.com", "unrelated.workos.com", "child.forwarder.workos.com", "cloudflare.com", "www.cloudflare.com", "notchallenges.cloudflare.com", "challenges.cloudflare.com.example", "brunhild.challenges.cloudflare.com.example", "evilclaude.com"]) {
     assert.notEqual(routingDecisionForDomain({}, domain).action, "ai", domain);
   }
   const override = routingDecisionForDomain({ rules: [{ match: "domain_suffix", value: "workos.com", action: "direct" }] }, "forwarder.workos.com");
@@ -21,6 +21,33 @@ test("AI authentication and streaming dependencies follow AI while adjacent shar
   for (const [mode, action] of [["direct", "direct"], ["global-proxy", "proxy"]]) {
     assert.equal(routingDecisionForDomain({ mode }, "platform.claude.com").action, action);
   }
+});
+
+test("AI workspaces and developer services share the AI exit without capturing adjacent shared hosts", () => {
+  for (const domain of [
+    "aistudio.google.com", "notebooklm.google.com", "copilot.microsoft.com",
+    "copilot.cloud.microsoft", "api.githubcopilot.com", "api.individual.githubcopilot.com",
+    "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com",
+    "openrouter.ai", "api.mistral.ai", "chat.mistral.ai", "api.cohere.com"
+  ]) {
+    assert.deepEqual(routingDecisionForDomain({}, domain), {
+      action: "ai", source: "ai", ruleId: null, dns: "remote"
+    }, domain);
+  }
+  for (const domain of [
+    "mail.google.com", "accounts.google.com", "maps.googleapis.com", "www.microsoft.com",
+    "outlook.cloud.microsoft", "login.live.com", "github.com", "other.githubusercontent.com",
+    "child.copilot-proxy.githubusercontent.com", "child.aistudio.google.com",
+    "aistudio.google.com.example", "api.githubcopilot.com.example", "notopenrouter.ai"
+  ]) {
+    assert.notEqual(routingDecisionForDomain({}, domain).action, "ai", domain);
+  }
+  assert.equal(routingDecisionForDomain({ rules: [
+    { match: "domain_suffix", value: "google.com", action: "direct" }
+  ] }, "aistudio.google.com").action, "direct");
+  assert.equal(routingDecisionForDomain({ rules: [
+    { match: "domain", value: "copilot.microsoft.com", action: "block" }
+  ] }, "copilot.microsoft.com").action, "block");
 });
 
 test("routing policy normalizes and orders supported custom rules", () => {

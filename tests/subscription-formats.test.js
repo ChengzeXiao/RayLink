@@ -10,13 +10,17 @@ test("full exports preserve exact AI dependency matching and custom DNS override
       { match: "domain_suffix", value: "imgix.net", action: "proxy" }
     ] } }).body;
     const dns = body.split("  nameserver-policy:\n")[1].split("  proxy-server-nameserver:")[0];
-    assert.match(dns, /"challenges\.cloudflare\.com":\n\s+- "https:\/\/1\.1\.1\.1\/dns-query#AI 网站代理"/);
+    assert.match(dns, /"\+\.challenges\.cloudflare\.com":\n\s+- "https:\/\/1\.1\.1\.1\/dns-query#AI 网站代理"/);
     assert.match(dns, /"cdn\.workos\.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
     assert.doesNotMatch(dns, /"domain:/);
     assert.doesNotMatch(dns, /"workos\.imgix\.net":/);
     const routes = body.split("\nrules:\n")[1];
-    assert.ok(routes.includes('"DOMAIN,challenges.cloudflare.com,AI 网站代理"'));
+    assert.ok(routes.includes('"DOMAIN-SUFFIX,challenges.cloudflare.com,AI 网站代理"'));
     assert.ok(routes.includes('"DOMAIN-SUFFIX,claude.com,AI 网站代理"'));
+    for (const host of ["aistudio.google.com", "notebooklm.google.com", "copilot.microsoft.com", "copilot.cloud.microsoft", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com"]) {
+      assert.ok(routes.includes(`"DOMAIN,${host},AI 网站代理"`));
+      assert.ok(dns.includes(`"${host}":\n      - "https://1.1.1.1/dns-query#AI 网站代理"`));
+    }
     const custom = routes.indexOf('DOMAIN,cdn.workos.com,DIRECT');
     assert.ok(custom >= 0 && custom < routes.indexOf('DOMAIN,cdn.workos.com,AI 网站代理'));
     for (const domain of ["cloudflare.com", "workos.com", "workoscdn.com", "imgix.net"]) assert.ok(!routes.includes(`DOMAIN-SUFFIX,${domain},AI 网站代理`));
@@ -26,9 +30,13 @@ test("full exports preserve exact AI dependency matching and custom DNS override
   ] } }).body;
   const forward = egern.split("  forward:\n")[1].split("  proxy_nameservers:")[0];
   const routes = egern.split("\nrules:\n")[1];
-  assert.match(forward, /domain:\n\s+match: "challenges\.cloudflare\.com"\n\s+value: "ai"/);
-  assert.match(routes, /domain:\n\s+match: "challenges\.cloudflare\.com"\n\s+policy: "AI 网站代理"/);
+  assert.match(forward, /domain_suffix:\n\s+match: "challenges\.cloudflare\.com"\n\s+value: "ai"/);
+  assert.match(routes, /domain_suffix:\n\s+match: "challenges\.cloudflare\.com"\n\s+policy: "AI 网站代理"/);
   assert.match(routes, /domain_suffix:\n\s+match: "claudeusercontent\.com"\n\s+policy: "AI 网站代理"/);
+  for (const host of ["aistudio.google.com", "copilot.microsoft.com", "copilot.cloud.microsoft"]) {
+    assert.ok(forward.includes(`domain:\n        match: "${host}"\n        value: "ai"`));
+    assert.ok(routes.includes(`domain:\n      match: "${host}"\n      policy: "AI 网站代理"`));
+  }
   const customDns = forward.indexOf('match: "cdn.workos.com"\n        value: "domestic"');
   const customRoute = routes.indexOf('match: "cdn.workos.com"\n      policy: "DIRECT"');
   assert.ok(customDns >= 0 && customDns < forward.indexOf('match: "cdn.workos.com"\n        value: "ai"'));
@@ -56,7 +64,8 @@ test("AI subscriptions choose an independent stable exit and expose concrete nod
     assert.match(body, /name: "AI 稳定出口"/);
     const stableSection = body.split('name: "AI 稳定出口"')[1].split(/\n  - /)[0];
     assert.match(stableSection, /raylink-tokyo-vless/);
-    assert.doesNotMatch(stableSection, /raylink-tokyo-hysteria2/);
+    assert.match(stableSection, /raylink-tokyo-hysteria2/);
+    assert.ok(stableSection.indexOf("raylink-tokyo-vless") < stableSection.indexOf("raylink-tokyo-hysteria2"), "AI fallback prefers TCP before UDP");
   }
   const mihomo = buildSubscriptionArtifact({ format: "mihomo", singBoxConfig }).body;
   assert.match(mihomo, /store-selected: true/);
@@ -386,7 +395,7 @@ test("modern Mihomo shares health checks while legacy exports retain standalone 
   assert.ok(filter("TCP 稳定").some((pattern) => pattern.test("raylink-tokyo-vless")));
   assert.ok(!filter("TCP 稳定").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
   assert.ok(filter("UDP 高速").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
-  assert.ok(!filter("AI 稳定出口").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
+  assert.ok(filter("AI 稳定出口").some((pattern) => pattern.test("raylink-tokyo-hysteria2")));
   assert.deepEqual(filter("故障回退").map((pattern) => ["raylink-tokyo-vless", "raylink-tokyo-hysteria2"].find((name) => pattern.test(name))), ["raylink-tokyo-vless", "raylink-tokyo-hysteria2"]);
   assert.equal(modern.body.split("\nrules:\n")[1], legacy.body.split("\nrules:\n")[1]);
 });

@@ -15,8 +15,10 @@ test("sing-box keeps AI dependencies on AI DNS and routing without broad shared-
   const aiRoute = config.route.rules.find((rule) => rule.outbound === "raylink-ai" && rule.domain);
   const aiDns = config.dns.rules.find((rule) => rule.server === "dns-ai" && rule.domain);
   for (const rule of [aiRoute, aiDns]) {
-    assert.ok(rule.domain.includes("challenges.cloudflare.com"));
+    assert.ok(rule.domain_suffix.includes("challenges.cloudflare.com"));
     assert.ok(rule.domain.includes("forwarder.workos.com"));
+    for (const host of ["aistudio.google.com", "notebooklm.google.com", "copilot.microsoft.com", "copilot.cloud.microsoft", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com"]) assert.ok(rule.domain.includes(host));
+    for (const suffix of ["githubcopilot.com", "openrouter.ai", "mistral.ai", "cohere.com"]) assert.ok(rule.domain_suffix.includes(suffix));
     assert.ok(rule.domain_suffix.includes("claude.com"));
     assert.ok(rule.domain_suffix.includes("claudeusercontent.com"));
     assert.ok(rule.domain_suffix.includes("oaistatsig.com"));
@@ -40,7 +42,7 @@ test("smart subscription distinguishes system, domestic and AI DNS paths", () =>
   assert.equal(config.dns.rules.find((rule) => rule.domain_suffix?.includes("chatgpt.com"))?.server, "dns-ai");
 });
 
-test("mobile default and AI automatic selection use TCP candidates without dropping UDP choices", () => {
+test("mobile default uses TCP while AI recovery retains every enabled transport", () => {
   const vless = defaultProtocolConfigs().find((profile) => profile.type === "vless");
   const config = buildMultiHostProtocolClientConfig({
     credential: { email: "test@example.com", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
@@ -52,7 +54,7 @@ test("mobile default and AI automatic selection use TCP candidates without dropp
   const group = (tag) => config.outbounds.find((outbound) => outbound.tag === tag);
   assert.equal(group("raylink-auto").default, "raylink-tcp");
   assert.equal(group("raylink-ai").default, "raylink-ai-stable");
-  assert.deepEqual(group("raylink-ai-stable").outbounds, ["raylink-primary-vless", "raylink-backup-vless"]);
+  assert.deepEqual(group("raylink-ai-stable").outbounds, ["raylink-primary-vless", "raylink-backup-vless", "raylink-quic-vless"]);
   assert.ok(group("raylink-auto").outbounds.includes("raylink-udp"));
   assert.equal(group("raylink-ai").interrupt_exist_connections, false);
   assert.ok(group("raylink-ai").outbounds.includes("raylink-backup-vless"), "AI exit can be explicitly pinned");

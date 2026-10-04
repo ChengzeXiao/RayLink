@@ -29,14 +29,21 @@ export const AI_DOMAIN_SUFFIXES = Object.freeze([
   "poe.com",
   "x.ai",
   "grok.com",
+  "githubcopilot.com",
+  "openrouter.ai",
+  "mistral.ai",
+  "cohere.com",
+  // Turnstile verification uses hosts within this dedicated challenge subtree.
+  "challenges.cloudflare.com",
   "gemini.google.com",
   "generativelanguage.googleapis.com"
 ]);
 
 // Login, challenge and asset dependencies must follow the selected AI exit too.
-// Keep shared providers exact: unrelated WorkOS/Cloudflare tenants retain normal routing.
+// Keep shared-provider entries exact; the dedicated Turnstile subtree is above.
 // Sources: https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps
 //          https://code.claude.com/docs/en/network-config
+// Service coverage and shared-domain boundaries: docs/ai-service-routing.md
 export const AI_DOMAIN_NAMES = Object.freeze([
   "cdn.openaimerge.com",
   "cdn.workos.com",
@@ -44,7 +51,12 @@ export const AI_DOMAIN_NAMES = Object.freeze([
   "setup.workos.com",
   "images.workoscdn.com",
   "workos.imgix.net",
-  "challenges.cloudflare.com"
+  "aistudio.google.com",
+  "notebooklm.google.com",
+  "copilot.microsoft.com",
+  "copilot.cloud.microsoft",
+  "copilot-proxy.githubusercontent.com",
+  "origin-tracker.githubusercontent.com"
 ]);
 
 // Explicit overseas services precede geographic inference; keep AI exceptions first.
