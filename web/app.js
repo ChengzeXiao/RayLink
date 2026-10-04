@@ -530,6 +530,17 @@ function canManageAiEgress() {
   return ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
 }
 
+function singleHostAiExit(form) {
+  const selection = controlPlane.aiEgress?.aiExit;
+  const hosts = controlPlane.hosts;
+  if (!selection || !Array.isArray(hosts) || hosts.length !== 1) return null;
+  if (selection.mode !== "auto" && !(selection.mode === "pinned" && selection.hostId === hosts[0].id)) return null;
+  // Keep edits visible, including a missing Host, when a background refresh changes the Host list.
+  if (aiEgressDirty && (form.elements.hostMode.value !== selection.mode
+    || (selection.mode === "pinned" && form.elements.hostId.value !== selection.hostId))) return null;
+  return { mode: selection.mode, hostId: selection.mode === "pinned" ? selection.hostId : null };
+}
+
 function renderAiEgress() {
   const form = document.querySelector("#ai-egress-form");
   if (!form) return;
@@ -557,7 +568,7 @@ function renderAiEgress() {
   }
   form.elements.password.placeholder = config.passwordConfigured ? "已配置；留空保留现有密码" : "代理密码（可选）";
   setText("#ai-egress-password-status", config.passwordConfigured ? "密码已配置，不会回显。" : "尚未配置密码。支持无用户名、无密码的白名单认证。");
-  const label = mode => mode === "residential" ? "住宅出口" : "服务器出口";
+  const label = mode => mode === "residential" ? "住宅代理出口" : "默认出口";
   const status = sync.status === "current" ? "配置已发布"
     : sync.status === "pending" ? "已保存，待发布；尚未确认切换生效"
       : sync.status === "simulated" ? "仅模拟，未确认真实出口切换" : "尚未发布";
@@ -567,8 +578,8 @@ function renderAiEgress() {
   setText("#ai-egress-status", `${status} · 已保存选择：${label(state.mode)}。${published}${sync.runtimeState ? ` · Runtime：${sync.runtimeState}` : ""}${sync.message ? `。${sync.message}` : ""}`);
   setText("#ai-egress-edit-status", aiEgressError || (aiEgressDirty ? "有未保存的修改；切换选项不会立即改变出口。" : ""));
   setText("#ai-egress-host-summary", selection.mode === "pinned"
-    ? `已保存的服务器策略：固定 ${hosts.find(host => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；不可用时停止 AI 连接。`
-    : "已保存的服务器策略：自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
+    ? `已保存的默认出口策略：固定 ${hosts.find(host => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；不可用时停止 AI 连接。`
+    : "已保存的默认出口策略：自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
   const retry = document.querySelector("#ai-egress-publish");
   retry.hidden = sync.status !== "pending";
   retry.disabled = !canManageAiEgress() || aiEgressSaving || aiEgressDirty;
@@ -587,6 +598,7 @@ function syncAiEgressForm() {
   if (!form) return;
   const locked = !canManageAiEgress() || aiEgressSaving;
   const residential = form.elements.mode.value === "residential";
+  const singleHost = Boolean(singleHostAiExit(form));
   form.querySelectorAll("input, select, button").forEach(input => { input.disabled = locked; });
   for (const [selector, visible] of [["[data-ai-egress-server]", !residential], ["[data-ai-egress-residential]", residential]]) {
     const panel = form.querySelector(selector);
@@ -595,9 +607,10 @@ function syncAiEgressForm() {
   }
   // Disabled hidden controls never participate in browser validation or submission.
   for (const key of ["type", "server", "port", "username", "password", "clearPassword"]) form.elements[key].disabled = locked || !residential;
-  form.elements.hostMode.disabled = locked || residential;
-  form.elements.hostId.disabled = locked || residential || form.elements.hostMode.value !== "pinned";
-  form.elements.hostId.required = !residential && form.elements.hostMode.value === "pinned";
+  form.querySelector("[data-ai-egress-host-options]").hidden = singleHost;
+  form.elements.hostMode.disabled = locked || residential || singleHost;
+  form.elements.hostId.disabled = locked || residential || singleHost || form.elements.hostMode.value !== "pinned";
+  form.elements.hostId.required = !residential && !singleHost && form.elements.hostMode.value === "pinned";
   form.elements.server.required = residential;
   form.elements.port.required = residential;
   const https = residential && form.elements.type.value === "https";
@@ -632,7 +645,7 @@ async function saveAiEgress(event) {
     type: form.elements.type.value, server: form.elements.server.value.trim(), port: Number(form.elements.port.value) || null,
     username: form.elements.username.value, tlsServerName: form.elements.type.value === "https" ? form.elements.tlsServerName.value.trim() : "",
     ...(password ? { password } : {}), ...(clearPassword ? { clearPassword: true } : {})
-  } } : { mode: "server", aiExit: { mode: form.elements.hostMode.value,
+  } } : { mode: "server", aiExit: singleHostAiExit(form) || { mode: form.elements.hostMode.value,
     hostId: form.elements.hostMode.value === "pinned" ? form.elements.hostId.value : null } };
   aiEgressError = ""; aiEgressSaving = true;
   button.disabled = true; form.inert = true; button.textContent = "正在保存并发布…";

@@ -36,18 +36,62 @@ function fixture(mode = "residential") {
     escapeHtml: value => String(value).replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
     document: { querySelector: () => form }
   };
-  vm.runInNewContext(`${handler("applyAiEgress")}\n${handler("saveAiEgress")}`, context);
+  vm.runInNewContext(`${handler("singleHostAiExit")}\n${handler("applyAiEgress")}\n${handler("saveAiEgress")}`, context);
   return { button, form, requests, messages, context, event: { preventDefault() {}, currentTarget: form } };
 }
 function renderer(subject) {
   const { context, form, button } = subject;
-  const retry = {}, tls = {}, server = {}, residential = {};
-  form.querySelector = selector => ({ "[data-ai-egress-tls]": tls, "[data-ai-egress-server]": server, "[data-ai-egress-residential]": residential })[selector] || button;
+  const retry = {}, tls = {}, server = {}, residential = {}, hostOptions = {};
+  form.querySelector = selector => ({ "[data-ai-egress-tls]": tls, "[data-ai-egress-server]": server, "[data-ai-egress-residential]": residential, "[data-ai-egress-host-options]": hostOptions })[selector] || button;
   form.querySelectorAll = () => [...Object.values(form.elements), button];
   context.document.querySelector = selector => selector === "#ai-egress-form" ? form : selector === "#ai-egress-publish" ? retry : null;
   vm.runInNewContext(`${handler("renderAiEgress")}\n${handler("syncAiEgressForm")}`, context);
-  return { retry, tls, server, residential };
+  return { retry, tls, server, residential, hostOptions };
 }
+
+test("a single known Host hides redundant selection while preserving the saved automatic or fixed strategy", async () => {
+  for (const aiExit of [{ mode: "auto", hostId: null }, { mode: "pinned", hostId: "local" }]) {
+    const subject = fixture("server"), { context, event, form, requests } = subject;
+    context.controlPlane.aiEgress.aiExit = aiExit;
+    context.aiEgressDirty = false;
+    const { hostOptions } = renderer(subject);
+    context.renderAiEgress();
+    assert.equal(hostOptions.hidden, true);
+    assert.equal(form.elements.hostMode.disabled, true);
+    assert.equal(form.elements.hostId.disabled, true);
+    assert.equal(form.elements.hostId.required, false);
+    await context.saveAiEgress(event);
+    assert.deepEqual(requests[0].body, { mode: "server", aiExit });
+  }
+});
+
+test("Host selection stays available for multiple Hosts, missing saved Hosts, unknown state and dirty choices", async () => {
+  for (const scenario of ["multiple", "missing", "unknown", "draft"]) {
+    const subject = fixture("server"), { context, form, event, requests } = subject;
+    if (scenario === "multiple") context.controlPlane.hosts.push({ id: "remote", name: "节点" });
+    if (scenario === "missing") context.controlPlane.aiEgress.aiExit.hostId = "removed";
+    if (scenario === "unknown") context.controlPlane.aiEgress = null;
+    if (scenario === "draft") form.elements.hostId.value = "removed-draft";
+    const { hostOptions } = renderer(subject);
+    context.renderAiEgress();
+    assert.equal(hostOptions.hidden, false, scenario);
+    assert.equal(form.elements.hostMode.disabled, false, scenario);
+    assert.equal(form.elements.hostId.disabled, false, scenario);
+    if (scenario === "multiple") {
+      form.elements.hostId.value = "remote";
+      await context.saveAiEgress(event);
+      assert.deepEqual(requests[0].body.aiExit, { mode: "pinned", hostId: "remote" });
+    }
+    if (scenario === "draft") assert.equal(form.elements.hostId.value, "removed-draft");
+  }
+});
+
+test("AI egress choices name the default path and the AI-only residential proxy path", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  assert.match(html, /<strong>默认出口<\/strong><small>沿用现有服务器，不需要额外配置<\/small>/);
+  assert.match(html, /<strong>住宅代理出口<\/strong><small>仅 AI 流量使用住宅代理<\/small>/);
+  assert.doesNotMatch(html + source, /服务器出口|住宅出口/);
+});
 
 test("server mode submits only its Host choice and ignores all hidden residential credential fields", async () => {
   const subject = fixture("server"), { context, event, form, requests, messages } = subject;
@@ -92,7 +136,7 @@ test("pending and simulated modes retain the last publication boundary and never
     assert.equal(context.controlPlane.aiUpstream.runtimeSync.status, status);
     assert.equal(messages.some(message => message.join(" ").includes("已保存并发布")), false);
     const rendered = messages.filter(([selector]) => selector === "#ai-egress-status").at(-1)[1];
-    assert.match(rendered, status === "pending" ? /尚未确认切换生效.*最近成功发布：服务器出口/ : /仅模拟.*真实发布：未验证/);
+    assert.match(rendered, status === "pending" ? /尚未确认切换生效.*最近成功发布：默认出口/ : /仅模拟.*真实发布：未验证/);
   }
 });
 
@@ -197,7 +241,7 @@ test("a pending dry-run switch labels the previous opposite mode as a simulation
   context.renderAiEgress();
   const status = messages.filter(([selector]) => selector === "#ai-egress-status").at(-1)[1];
   assert.match(status, /待发布/);
-  assert.match(status, /最近模拟记录：服务器出口/);
+  assert.match(status, /最近模拟记录：默认出口/);
   assert.match(status, /真实发布：未验证/);
   assert.doesNotMatch(status, /最近成功发布/);
 });

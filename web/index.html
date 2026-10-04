@@ -327,17 +327,18 @@
           <section class="policy-layout" data-policy-panel="ai" hidden>
             <div class="panel policy-list ai-egress-panel">
               <div class="panel-heading"><div><p class="eyebrow">连接一致性</p><h2>AI 出口</h2></div></div>
-              <p class="field-hint">选择一种 AI 出口。默认使用服务器，不需要住宅代理；切换选项后，保存并发布才会应用。</p>
+              <p class="field-hint">选择一种 AI 出口。默认出口沿用现有服务器，不需要额外配置；切换选项后，保存并发布才会应用。</p>
               <form id="ai-egress-form" class="field-grid" autocomplete="off">
                 <fieldset class="ai-egress-choices full"><legend>出口方式</legend>
-                  <label><input type="radio" name="mode" value="server" checked><span><strong>服务器出口</strong><small>沿用服务器线路，无需住宅代理</small></span></label>
-                  <label><input type="radio" name="mode" value="residential"><span><strong>住宅出口</strong><small>仅 AI 专用流量经指定住宅代理</small></span></label>
+                  <label><input type="radio" name="mode" value="server" checked><span><strong>默认出口</strong><small>沿用现有服务器，不需要额外配置</small></span></label>
+                  <label><input type="radio" name="mode" value="residential"><span><strong>住宅代理出口</strong><small>仅 AI 流量使用住宅代理</small></span></label>
                 </fieldset>
                 <fieldset class="ai-egress-fields field-grid full" data-ai-egress-server>
-                  <legend>服务器选择</legend>
+                  <div class="field-grid full" data-ai-egress-host-options>
                   <label class="field"><span>主机策略</span><select name="hostMode"><option value="auto">自动选择主机</option><option value="pinned">固定主机</option></select></label>
                   <label class="field"><span>AI 出口主机</span><select name="hostId" disabled></select></label>
-                  <p class="field-hint full">固定后保留该主机全部授权协议；协议故障可回退，主机不可用时停止 AI 连接，避免意外改变出口。服务器策略适用于智能模式及自定义 AI 规则。</p>
+                  <p class="field-hint full">固定后保留该主机全部授权协议；协议故障可回退，主机不可用时停止 AI 连接，避免意外改变出口。默认出口策略适用于智能模式及自定义 AI 规则。</p>
+                  </div>
                   <p id="ai-egress-host-summary" class="field-hint full" role="status"></p>
                 </fieldset>
                 <fieldset class="ai-egress-fields field-grid full" data-ai-egress-residential hidden disabled>
@@ -350,14 +351,14 @@
                   <p id="ai-egress-password-status" class="field-hint full">尚未配置密码。支持无用户名、无密码的白名单认证。</p>
                   <label class="ai-egress-option full"><input type="checkbox" name="clearPassword"><span>清除已保存密码（需同时清空用户名）</span></label>
                   <label class="field full" data-ai-egress-tls hidden><span>TLS 服务器名（可选）</span><input name="tlsServerName" maxlength="253" placeholder="默认使用代理主机名；严格校验证书" spellcheck="false" autocapitalize="none"></label>
-                  <p class="field-hint full">住宅出口固定智能分流与当前主控 local 入口。仅 AI 专用网站、登录与 API 经上游；Google 搜索、Gmail、YouTube 和共享登录保持原出口。代理地址本身不能证明住宅属性或固定公网 IP。</p>
+                  <p class="field-hint full">住宅代理出口固定智能分流与当前主控 local 入口。仅 AI 专用网站、登录与 API 经上游；Google 搜索、Gmail、YouTube 和共享登录保持原出口。代理地址本身不能证明住宅属性或固定公网 IP。</p>
                 </fieldset>
                 <button class="button primary full" type="submit">保存并发布</button>
               </form>
               <p id="ai-egress-access" class="field-hint">保存会校验并发布出口配置，可能重新加载或重启 Runtime。</p>
               <p id="ai-egress-edit-status" class="field-hint" role="status" aria-live="polite"></p>
               <div class="ai-egress-publication"><p id="ai-egress-status" class="field-hint" role="status">正在读取出口状态。</p><button id="ai-egress-publish" class="button secondary" type="button" hidden>重试发布</button></div>
-              <p class="field-hint">发布成功后请刷新完整订阅并重新连接；仅节点订阅不包含此策略。切回服务器出口不删除已保存的住宅参数。</p>
+              <p class="field-hint">发布成功后请刷新完整订阅并重新连接；仅节点订阅不包含此策略。切回默认出口不删除已保存的住宅参数。</p>
             </div>
             <aside class="panel policy-inspector">
               <p class="eyebrow" id="ai-diagnose-source">主控服务器直接出站</p><h2>AI 服务检测</h2>
