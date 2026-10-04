@@ -197,7 +197,7 @@ export class RuntimeManager {
       .find((deployment) => deployment.status === "active");
     if (!activeDeployment) return { changed: false, reason: "initial-publication-required" };
     const candidate = await this.prepareDeploymentCandidate();
-    const activeSnapshot = this.store.deploymentSnapshot(activeDeployment.id);
+    const activeSnapshot = this.store.deploymentSnapshotMetadata(activeDeployment.id);
     if (
       deploymentCandidateMatchesSnapshot(candidate, activeSnapshot)
       && options.forceCritical !== true
@@ -301,12 +301,21 @@ export class RuntimeManager {
     version,
     publisherAdminId
   }) {
-    let deploymentId, previousConfig;
+    let deploymentId, previousConfig, previousSecretUnavailable = false;
     try {
       // A restart rollback can report credentials from the previous snapshot,
       // including when this publication disables or rotates the upstream.
       const active = this.store.listDeployments?.(100)?.find(deployment => deployment.status === "active");
-      if (active && this.store.deploymentSnapshot) previousConfig = this.store.deploymentSnapshot(active.id)?.config;
+      if (active && this.store.deploymentSnapshot) {
+        try { previousConfig = this.store.deploymentSnapshot(active.id)?.config; }
+        catch (error) {
+          if (error.code !== "AI_UPSTREAM_SECRET_UNAVAILABLE") throw error;
+          // A new valid configuration must remain publishable when an old
+          // upstream secret is lost. Without that secret, never echo native
+          // failures: rollback diagnostics could contain its plaintext value.
+          previousSecretUnavailable = true;
+        }
+      }
       deploymentId = this.store.createDeployment({
         version,
         configJson: config,
@@ -327,7 +336,14 @@ export class RuntimeManager {
         runtime
       };
     } catch (error) {
-      const safeError = redactUpstreamFailure(error, config, previousConfig);
+      const safeError = previousSecretUnavailable
+        ? Object.assign(new Error("Runtime 发布失败；旧上游凭据不可用，原始错误已隐藏"), {
+            code: "RUNTIME_PUBLICATION_FAILED",
+            ...(Number.isInteger(error?.statusCode) ? { statusCode: error.statusCode } : {}),
+            ...(typeof error?.rolledBack === "boolean" ? { rolledBack: error.rolledBack } : {}),
+            ...(error?.rollbackError ? { rollbackError: "旧配置恢复失败，原始错误已隐藏" } : {})
+          })
+        : redactUpstreamFailure(error, config, previousConfig);
       if (deploymentId) this.store.finishDeployment(deploymentId, {
         status: "failed",
         error: safeError.rollbackError

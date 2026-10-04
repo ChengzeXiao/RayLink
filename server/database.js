@@ -1210,16 +1210,23 @@ export class RayLinkStore {
     return publicAiUpstreamSettings(this.#aiUpstreamStoredSettings());
   }
 
-  aiUpstreamRuntimeSettings() {
+  #aiUpstreamSettingsWithSecret() {
     const { passwordEncrypted, ...settings } = this.#aiUpstreamStoredSettings();
     return { ...settings, password: decryptAiUpstreamSecret(passwordEncrypted, this.subscriptionEncryptionKey, "settings:local") };
+  }
+
+  aiUpstreamRuntimeSettings() {
+    const { passwordEncrypted, ...settings } = this.#aiUpstreamStoredSettings();
+    // Disabled proxies must not become a dependency of ordinary Runtime
+    // publication or direct diagnostics, even if an old secret is unavailable.
+    return settings.enabled ? this.#aiUpstreamSettingsWithSecret() : { ...settings, password: "" };
   }
 
   updateAiUpstreamSettings(input = {}) {
     this.db.exec("SAVEPOINT update_ai_upstream");
     try {
       let previous, replacingUnavailableSecret = false;
-      try { previous = this.aiUpstreamRuntimeSettings(); }
+      try { previous = this.#aiUpstreamSettingsWithSecret(); }
       catch (error) {
         const suppliedReplacement = typeof input?.password === "string" && input.password.length > 0;
         if (error.code !== "AI_UPSTREAM_SECRET_UNAVAILABLE" || (!suppliedReplacement && input?.clearPassword !== true)) throw error;
@@ -3122,6 +3129,16 @@ export class RayLinkStore {
         publishedAt: row.published_at
       };
     });
+  }
+
+  deploymentSnapshotMetadata(id) {
+    const row = this.db.prepare("SELECT config_json FROM deployments WHERE id=?").get(id);
+    if (!row) throw domainError("DEPLOYMENT_NOT_FOUND", "部署记录不存在", 404);
+    const metadata = parseJson(row.config_json, {});
+    if (!metadata.config) throw domainError("DEPLOYMENT_SNAPSHOT_MISSING", "部署快照不可用", 409);
+    return { checksum: metadata.checksum,
+      hostSnapshots: (Array.isArray(metadata.hostSnapshots) ? metadata.hostSnapshots : [])
+        .map(({ hostId, checksum }) => ({ hostId, checksum })) };
   }
 
   deploymentSnapshot(id) {

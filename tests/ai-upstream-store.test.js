@@ -175,3 +175,24 @@ test("deployment credentials cannot be replayed between snapshot identities and 
   });
   assert.equal(store.deploymentSnapshot(first).config.outbounds[0].password, "snapshot-secret-value");
 });
+
+
+test("disabled upstream never requires its stored secret for Runtime snapshots and re-enabling preserves credentials", async (t) => {
+  const { store } = await fixture(t);
+  const policy = store.routingPolicy();
+  store.updateAiUpstreamSettings({ enabled: false, server: "proxy.example.com", username: "owner", password: "retained-password" });
+  assert.equal(store.aiUpstreamRuntimeSettings().password, "");
+  assert.equal(store.runtimeSnapshot("local").aiUpstream.password, "");
+  assert.deepEqual(store.routingPolicy(), policy);
+  store.updateAiUpstreamSettings({ port: 1081 });
+  store.updateAiUpstreamSettings({ enabled: true });
+  assert.equal(store.aiUpstreamRuntimeSettings().password, "retained-password");
+  store.updateAiUpstreamSettings({ enabled: false });
+  const row = JSON.parse(store.db.prepare("SELECT value FROM settings WHERE key='ai_upstream'").get().value);
+  row.passwordEncrypted = "unavailable-fixture-secret";
+  store.db.prepare("UPDATE settings SET value=? WHERE key='ai_upstream'").run(JSON.stringify(row));
+  assert.equal(store.aiUpstreamSettings().passwordConfigured, true);
+  assert.equal(store.runtimeSnapshot("local").aiUpstream.enabled, false);
+  assert.equal(store.aiUpstreamRuntimeSettings().password, "");
+  assert.throws(() => store.updateAiUpstreamSettings({ enabled: true }), { code: "AI_UPSTREAM_SECRET_UNAVAILABLE" });
+});

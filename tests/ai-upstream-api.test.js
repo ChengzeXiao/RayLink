@@ -142,3 +142,49 @@ test("a concurrent upstream update cannot label an old unpublished configuration
   assert.equal(result.config.revision, applied.config.revision);
   assert.equal(result.runtimeSync.status, "current");
 });
+
+
+test("an unconfigured or disabled upstream leaves Runtime and direct diagnostics independent of proxy credentials", async (t) => {
+  let direct = 0, upstream = 0;
+  const resolve = async () => [{ address: "1.1.1.1", family: 4 }];
+  const { app, request } = await fixture(t, {
+    aiDiagnosticProbe: { resolve, request: async () => { direct++; return { httpStatus: 401 }; } },
+    aiUpstreamDiagnosticProbe: { resolve, request: async () => { upstream++; throw new Error("disabled proxy was contacted"); } }
+  });
+  const before = await (await request("/api/bootstrap")).json();
+  const saved = await request("/api/settings/ai-upstream", "PATCH", {
+    enabled: false, type: "https", server: "unused.example.invalid", port: 443, username: "owner", password: "fixture-password"
+  });
+  assert.equal(saved.status, 200);
+  const row = JSON.parse(app.store.db.prepare("SELECT value FROM settings WHERE key='ai_upstream'").get().value);
+  row.passwordEncrypted = "unavailable-fixture-secret";
+  app.store.db.prepare("UPDATE settings SET value=? WHERE key='ai_upstream'").run(JSON.stringify(row));
+  const bootstrap = await request("/api/bootstrap");
+  assert.equal(bootstrap.status, 200);
+  const after = await bootstrap.json();
+  assert.deepEqual(after.routingPolicy, before.routingPolicy);
+  assert.equal(after.aiUpstream.config.enabled, false);
+  assert.equal((await request("/api/settings/ai-upstream/publish", "POST", {})).status, 200);
+  const diagnostic = await request("/api/routing/ai-check", "POST", { service: "claude" });
+  assert.equal(diagnostic.status, 200);
+  assert.equal((await diagnostic.json()).source, "control-plane-egress");
+  assert.equal(direct, 2); assert.equal(upstream, 0);
+});
+
+
+test("disabled publication and reconciliation do not need a previous deployment's unavailable upstream password", async (t) => {
+  const { app, request } = await fixture(t);
+  assert.equal((await request("/api/settings/ai-upstream", "PATCH", { enabled: true, server: "proxy.example.com", username: "owner", password: "old-password" })).status, 200);
+  const old = app.store.listDeployments().find(item => item.status === "active");
+  const raw = JSON.parse(app.store.db.prepare("SELECT config_json FROM deployments WHERE id=?").get(old.id).config_json);
+  raw.config.outbounds.find(item => item.tag === "ai-residential").password = { raylinkAiUpstreamSecret: "unavailable-fixture-secret" };
+  app.store.db.prepare("UPDATE deployments SET config_json=? WHERE id=?").run(JSON.stringify(raw), old.id);
+  app.store.updateAiUpstreamSettings({ enabled: false });
+  const reconciled = await app.runtimeManager.reconcile();
+  assert.equal(reconciled.changed, true);
+  const state = await (await request("/api/settings/ai-upstream")).json();
+  assert.equal(state.runtimeSync.status, "simulated");
+  assert.equal(state.config.enabled, false);
+  assert.equal((await app.runtimeManager.reconcile()).reason, "configuration-current");
+  await assert.rejects(app.runtimeManager.rollback(old.id), { code: "AI_UPSTREAM_SECRET_UNAVAILABLE" });
+});

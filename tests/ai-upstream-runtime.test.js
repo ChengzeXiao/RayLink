@@ -85,3 +85,29 @@ test("disabling residential egress still redacts the previous proxy password fro
   });
   assert.ok(!JSON.stringify(recorded).includes(upstream.password));
 });
+
+
+test("unavailable old upstream secrets do not block publishing a disabled Runtime and never leak failed rollback errors", async () => {
+  let publishFails = false, publications = 0;
+  const recorded = [];
+  const store = { listDeployments: () => [{ id: "previous", status: "active" }],
+    deploymentSnapshot: () => { throw Object.assign(new Error("secret unavailable"), { code: "AI_UPSTREAM_SECRET_UNAVAILABLE" }); },
+    createDeployment: () => "new", finishDeployment: (_id, outcome) => recorded.push(outcome) };
+  const adapter = { publish: async () => {
+    publications++;
+    if (publishFails) throw Object.assign(new Error("native leaked old-secret"), { code: "old-secret", rolledBack: false, rollbackError: "rollback old-secret" });
+    return { state: "running" };
+  } };
+  const manager = new RuntimeManager({ store, adapter });
+  await manager.publishCompiled({ config: buildSingBoxConfig(snapshot(undefined)) });
+  assert.equal(publications, 1);
+  publishFails = true;
+  await assert.rejects(manager.publishCompiled({ config: buildSingBoxConfig(snapshot(undefined)) }), error => {
+    assert.equal(error.rolledBack, false);
+    assert.ok(error.rollbackError);
+    assert.doesNotMatch(JSON.stringify(error) + error.stack, /old-secret/);
+    return true;
+  });
+  assert.equal(publications, 2);
+  assert.doesNotMatch(JSON.stringify(recorded), /old-secret/);
+});
