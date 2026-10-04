@@ -66,6 +66,49 @@ async function connect(t, f, scopes, existing) {
 }
 const output = (result) => result.structuredContent || JSON.parse(result.content[0].text);
 
+test("AI diagnostics are scoped read-only MCP operations with explicit server-side evidence", async (t) => {
+  const f = await fixture(t, { aiDiagnosticProbe: {
+    resolve: async () => [{ address: "1.1.1.1", family: 4 }],
+    request: async () => ({ httpStatus: 403, headers: { "cf-mitigated": "challenge" }, body: "" })
+  } });
+  assert.equal((await fetch(`${f.base}/api/routing/ai-check`)).status, 401);
+  const { client: reader } = await connect(t, f, ["read"]);
+  const readTools = (await reader.listTools()).tools.map((tool) => tool.name);
+  assert.ok(readTools.includes("routing_ai_status"));
+  assert.ok(!readTools.includes("routing_ai_check"));
+  const { client } = await connect(t, f, ["read", "runtime.manage"]);
+  const report = output(await client.callTool({ name: "routing_ai_check", arguments: { service: "claude" } }));
+  assert.equal(report.source, "control-plane-egress");
+  assert.equal(report.clientMeasured, false);
+  assert.equal(report.authenticated, false);
+  assert.ok(report.results.length >= 1);
+  assert.ok(report.results.every((result) => result.status === "challenge"));
+  const status = output(await reader.callTool({ name: "routing_ai_status", arguments: {} }));
+  assert.deepEqual(status.report, report);
+  const invalid = await f.api("/api/routing/ai-check", "POST", { service: "http://127.0.0.1" });
+  assert.equal(invalid.status, 422);
+  assert.equal((await f.api("/api/routing/ai-check", "POST", { url: "http://127.0.0.1" })).status, 422);
+  assert.equal((await f.api("/api/routing/ai-check", "POST", [])).status, 422);
+});
+
+test("MCP can pin AI to a stable Host ID and older policy writes preserve the pin", async (t) => {
+  const f = await fixture(t);
+  const { client } = await connect(t, f, ["read", "runtime.manage"]);
+  const saved = await client.callTool({ name: "routing_update", arguments: {
+    requestId: "pin-ai-host", mode: "smart", rules: [], aiExit: { mode: "pinned", hostId: "local" }
+  } });
+  assert.ok(!saved.isError, JSON.stringify(saved));
+  assert.deepEqual(output(saved).aiExit, { mode: "pinned", hostId: "local" });
+  const legacy = await client.callTool({ name: "routing_update", arguments: {
+    requestId: "legacy-policy-save", mode: "smart", rules: []
+  } });
+  assert.ok(!legacy.isError, JSON.stringify(legacy));
+  assert.deepEqual(output(legacy).aiExit, { mode: "pinned", hostId: "local" });
+  assert.equal((await f.api("/api/settings/routing", "PATCH", {
+    mode: "smart", rules: [], aiExit: { mode: "pinned", hostId: "missing" }
+  })).status, 422);
+});
+
 test("official MCP client discovers scoped tools and creates a User through the same entitlement workflow", async (t) => {
   const f = await fixture(t);
   const { client } = await connect(t, f, ["read", "users.manage"]);
@@ -195,7 +238,7 @@ test("Agent manages routing, certificates, protocol publication and rollback, ba
     installer: { async status() { return { installed: true, version: "1.14.2", platform: "linux", architecture: "amd64", tags: ["with_quic", "with_utls", "with_acme"] }; } }
   });
   const { client } = await connect(t, f, ["read", "users.manage", "runtime.manage", "hosts.provision", "system.manage", "admins.manage", "audit.read", "secrets.read"]);
-  assert.equal((await client.listTools()).tools.length, 55);
+  assert.equal((await client.listTools()).tools.length, 57);
   let sequence = 0;
   const call = async (name, args = {}, write = false) => {
     const response = await client.callTool({ name, arguments: { ...args, ...(write ? { requestId: `workflow-${++sequence}` } : {}) } });

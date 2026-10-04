@@ -45,7 +45,7 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 | Host 接入与升级 | `hosts_list`, `hosts_get`, `hosts_create`, `hosts_update`, `hosts_enrollment_rotate`, `hosts_runtime_upgrade` |
 | SSH 自动接入 | `hosts_provision_start`, `hosts_provision_list`, `hosts_provision_get`, `hosts_provision_retry` |
 | 入口协议 | `hosts_protocol_get`, `hosts_protocol_update`, `hosts_protocol_activate`, `hosts_protocol_measure` |
-| 智能分流 | `routing_get`, `routing_update`, `routing_diagnose` |
+| 智能分流 | `routing_get`, `routing_update`, `routing_diagnose`, `routing_ai_status`, `routing_ai_check` |
 | 证书设置 | `certificate_get`, `certificate_update` |
 | 节点域名自动化 | `node_domains_get`, `node_domains_update` |
 | 本地 Runtime | `runtime_status`, `runtime_installation`, `runtime_update_check`, `runtime_install`, `runtime_upgrade`, `runtime_reality_keypair` |
@@ -108,6 +108,10 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 业务结果保留既有含义：用户返回 `runtimeSync.pending` 说明已保存但发布待重试；远程 `queued` 仅表示排队；dry-run 下生成了配置不等于服务正在运行。修改路由会替换完整规则数组，先读取并合并需要保留的规则。
 
 ## HTTP 与部署
+
+`routing_update` 可传 `aiExit: { mode: "pinned", hostId: "local" }` 固定 AI 出口主机，或 `mode: "auto"` 解除固定；省略 `aiExit` 保留原设置。用户需刷新完整订阅，固定主机不可用或不在用户授权范围内时 AI 失败关闭，普通流量保持原策略。自定义规则及全局模式仍按既有优先级执行。
+
+`routing_ai_check` 接受预设 `service`（`all`、`claude`、`openai`、`gemini`、`copilot`、`perplexity`、`grok`），需 `runtime.manage`；`routing_ai_status` 仅需 `read`。检测匿名访问固定网址，不发模型请求，复用短缓存，不改变路由。结果标记 `control-plane-egress`，仅证明主控服务器出站观察，不证明远程 Host、客户端协议、账户或模型可用。最近结果只保存在进程内，重启后清空。
 
 使用官方 TypeScript SDK Server/Client 2.2.0、Node Adapter 2.1.0。支持 2026-07-28 协议及 2025 无会话 Streamable HTTP 兼容模式；没有旧式独立 `/sse` 端点。GET/DELETE 会话操作返回 405；无需在负载均衡器中保持 MCP 会话亲和，但多实例仍须遵守 RayLink 本身的 SQLite/Runtime 单控制面部署约束。
 

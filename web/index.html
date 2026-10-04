@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.39&amp;rev=tuic-alpn-1">
+  <link rel="stylesheet" href="./styles.css?v=0.2.40&amp;rev=tuic-alpn-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -272,6 +272,7 @@
             <button class="active" data-policy-tab="route" role="tab" aria-selected="true">路由模式</button>
             <button data-policy-tab="rules" role="tab" aria-selected="false">自定义规则</button>
             <button data-policy-tab="diagnose" role="tab" aria-selected="false">域名诊断</button>
+            <button data-policy-tab="ai" role="tab" aria-selected="false">AI 出口与检测</button>
           </div>
           <section class="policy-layout" data-policy-panel="route">
             <div class="panel policy-list">
@@ -322,6 +323,29 @@
               <div id="routing-diagnose-result" class="routing-diagnose-result"><span>输入域名后，将展示 DNS 结果、命中规则、出口和判断原因。</span></div>
             </div>
             <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 默认代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
+          </section>
+          <section class="policy-layout" data-policy-panel="ai" hidden>
+            <div class="panel policy-list">
+              <div class="panel-heading"><div><p class="eyebrow">连接一致性</p><h2>AI 出口主机</h2></div></div>
+              <p class="field-hint">固定主机后，AI 自动选择和手选均限定在该主机的协议内。协议故障可回退，主机不可用时停止 AI 连接，避免悄悄改变出口。</p>
+              <form id="ai-exit-form" class="field-grid">
+                <label class="field"><span>出口策略</span><select name="mode"><option value="auto">自动选择主机</option><option value="pinned">固定主机</option></select></label>
+                <label class="field"><span>AI 出口主机</span><select name="hostId" disabled></select></label>
+                <button class="button primary full" type="submit">保存 AI 出口</button>
+              </form>
+              <p id="ai-exit-summary" class="field-hint" role="status"></p>
+              <p class="field-hint">适用于智能模式及自定义 AI 规则；其他自定义规则与全局模式仍按原优先级执行。保存后请刷新完整订阅并重新连接。仅节点订阅不包含此策略。</p>
+            </div>
+            <aside class="panel policy-inspector">
+              <p class="eyebrow">主控服务器出站</p><h2>AI 服务检测</h2>
+              <p>匿名检测 DNS、TLS 和 HTTP。不会调用模型或使用账户凭据，也不代表手机线路、其他主机或登录后对话可用。</p>
+              <form id="ai-diagnose-form" class="field-grid">
+                <label class="field full"><span>检测目标</span><select name="service"><option value="all">全部预设 AI 服务</option></select></label>
+                <button class="button primary full" type="submit">开始检测</button>
+              </form>
+              <p class="field-hint">重复检测会复用最近一分钟的结果。检测不修改分流，不会因验证页或限流切换节点。</p>
+            </aside>
+            <div id="ai-diagnose-result" class="panel ai-diagnostic-results" role="status" aria-live="polite"><p>尚未检测。</p></div>
           </section>
         </section>
 
@@ -541,11 +565,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.39"></script>
-  <script src="./subscription-session.js?v=0.2.39"></script>
-  <script src="./subscription-client-url.js?v=0.2.39"></script>
-  <script src="./subscription-quick.js?v=0.2.39"></script>
-  <script src="./protocol-health.js?v=0.2.39"></script>
-  <script src="./app.js?v=0.2.39&amp;rev=tuic-alpn-1"></script>
+  <script src="./subscription-qr.js?v=0.2.40"></script>
+  <script src="./subscription-session.js?v=0.2.40"></script>
+  <script src="./subscription-client-url.js?v=0.2.40"></script>
+  <script src="./subscription-quick.js?v=0.2.40"></script>
+  <script src="./protocol-health.js?v=0.2.40"></script>
+  <script src="./app.js?v=0.2.40&amp;rev=tuic-alpn-1"></script>
 </body>
 </html>

@@ -1,5 +1,12 @@
 # RayLink Changelog
 
+## 0.2.40 - 2026-10-04
+
+- Pin AI selections to a stable Host ID across complete sing-box, Mihomo and Egern exports while retaining all authorized compatible protocols. Fail closed for AI when the pinned Host is unavailable, and preserve the pin when older clients omit it.
+- Add anonymous, bounded AI site diagnostics in the management UI and MCP, separating DNS/TLS/transport failures from challenges, authentication, permissions and rate limits without changing routing.
+- Add native Host-isolation and same-Host recovery checks to the AI release gate, including missing/ineligible Hosts and a deliberate leakage negative control.
+- Preserve User data, monthly traffic, credentials and the running sing-box Runtime during an application-only upgrade.
+
 ## 0.2.35 - 2026-10-02
 
 - Negotiate h3 ALPN consistently for managed TUIC listeners, client subscriptions and local/remote probes; existing TUIC subscriptions must be refreshed after upgrading.

@@ -6,6 +6,8 @@ let bootstrapRefreshTimer = null;
 let bootstrapRefreshInFlight = false;
 let bootstrapRefreshPromise = null;
 let bootstrapReadPromise = null;
+let aiExitDirty = false;
+let aiDiagnosticsLoading = false;
 const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
 const requiredNodeAgentVersion = "0.9.0";
 
@@ -388,6 +390,7 @@ const routingMatchLabels = {
 
 function renderRoutingPolicy() {
   const policy = controlPlane.routingPolicy;
+  if (document.querySelector("#ai-exit-form")?.elements) renderAiExit();
   const mode = routingModeCopy[policy.mode] || routingModeCopy.smart;
   document.querySelectorAll('#routing-mode-form input[name="mode"]').forEach((input) => {
     input.checked = input.value === policy.mode;
@@ -514,6 +517,98 @@ async function diagnoseRouting(event) {
   } finally {
     button.disabled = false;
   }
+}
+
+function renderAiExit() {
+  const form = document.querySelector("#ai-exit-form");
+  if (!form || aiExitDirty) return;
+  const selection = controlPlane.routingPolicy.aiExit || { mode: "auto", hostId: null };
+  const hosts = controlPlane.hosts || [];
+  form.elements.mode.value = selection.mode;
+  form.elements.hostId.innerHTML = hosts.map((host) =>
+    `<option value="${escapeHtml(host.id)}">${escapeHtml(host.name)} (${escapeHtml(host.id)})</option>`
+  ).join("");
+  if (selection.hostId && !hosts.some((host) => host.id === selection.hostId)) {
+    form.elements.hostId.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(selection.hostId)}">已移除主机 (${escapeHtml(selection.hostId)})</option>`);
+  }
+  if (selection.hostId) form.elements.hostId.value = selection.hostId;
+  form.elements.hostId.disabled = selection.mode !== "pinned";
+  setText("#ai-exit-summary", selection.mode === "pinned"
+    ? `已固定主机：${hosts.find((host) => host.id === selection.hostId)?.name || selection.hostId}。用户必须拥有该主机的使用权限；主机不在订阅内时 AI 连接被阻止。`
+    : "当前允许 AI 自动选择已授权主机。多个协议在同一主机上不等于多条独立线路。");
+}
+
+async function saveAiExit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const mode = form.elements.mode.value;
+    await persistRoutingPolicy({ ...controlPlane.routingPolicy,
+      aiExit: { mode, hostId: mode === "pinned" ? form.elements.hostId.value : null }
+    }, "请更新完整订阅并重新连接，以应用 AI 出口策略。");
+    aiExitDirty = false;
+    renderAiExit();
+  } catch (error) {
+    showToast("AI 出口未保存", error.message);
+  } finally { button.disabled = false; }
+}
+
+function renderAiDiagnosticReport(report) {
+  const container = document.querySelector("#ai-diagnose-result");
+  if (!container) return;
+  if (!report) { container.innerHTML = "<p>尚未检测；重启主控后历史检测结果会清空。</p>"; return; }
+  const labels = {
+    reachable: "HTTP 有响应", redirect: "收到重定向", challenge: "需要人机验证",
+    authentication_required: "需要 API 认证", permission_denied: "访问被拒绝",
+    rate_limited: "请求受限", upstream_error: "上游服务异常", dns_error: "DNS 解析失败",
+    tls_error: "TLS 验证失败", timeout: "连接超时", network_error: "网络错误",
+    response_too_large: "响应头超过检测上限"
+  };
+  const time = (value) => value && Number.isFinite(Date.parse(value))
+    ? new Date(value).toLocaleString("zh-CN") : "时间未知";
+  container.innerHTML = `<p>主控服务器匿名检测 · ${escapeHtml(time(report.checkedAt))}。不代表客户端、账户或模型对话可用。</p>
+    <div class="ai-diagnostic-grid">${(report.results || []).map((result) => {
+      const latency = typeof result.latencyMs === "number" && Number.isFinite(result.latencyMs)
+        ? `${Math.round(result.latencyMs)} ms` : "耗时未知";
+      return `<article><strong>${escapeHtml(result.label || result.host)}</strong>
+        <span class="status-badge ${result.status === "reachable" ? "neutral" : "warning"}">${escapeHtml(labels[result.status] || "待确认")}</span>
+        <small>${escapeHtml(result.host)} · ${escapeHtml(result.stage || "未知阶段")} · ${result.httpStatus ? `HTTP ${escapeHtml(result.httpStatus)}` : "无 HTTP 响应"} · ${latency}</small>
+        <p>${escapeHtml(result.message || "")}</p><small>检测于 ${escapeHtml(time(result.checkedAt))}</small></article>`;
+    }).join("")}</div>`;
+}
+
+async function loadAiDiagnostics() {
+  if (aiDiagnosticsLoading) return;
+  aiDiagnosticsLoading = true;
+  try {
+    const data = await api("/api/routing/ai-check");
+    const select = document.querySelector("#ai-diagnose-form select");
+    const selected = select.value;
+    select.innerHTML = '<option value="all">全部预设 AI 服务</option>' + data.services.map((service) =>
+      `<option value="${escapeHtml(service.id)}">${escapeHtml(service.label)}</option>`).join("");
+    if (["all", ...data.services.map((service) => service.id)].includes(selected)) select.value = selected;
+    renderAiDiagnosticReport(data.report);
+  } catch (error) {
+    setText("#ai-diagnose-result", error.message);
+  } finally { aiDiagnosticsLoading = false; }
+}
+
+async function diagnoseAiServices(event) {
+  event.preventDefault();
+  if (aiDiagnosticsLoading) return;
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  aiDiagnosticsLoading = true;
+  setText("#ai-diagnose-result", "正在从主控服务器检测预设 AI 服务…");
+  try {
+    renderAiDiagnosticReport(await api("/api/routing/ai-check", {
+      method: "POST", body: JSON.stringify({ service: form.elements.service.value })
+    }));
+  } catch (error) { setText("#ai-diagnose-result", error.message); }
+  finally { button.disabled = false; aiDiagnosticsLoading = false; }
 }
 
 function renderDashboard() {
@@ -3786,6 +3881,7 @@ document.addEventListener("click", async (event) => {
   const policyTab = event.target.closest("[data-policy-tab]");
   if (policyTab) {
     selectWorkspaceTab("policy", policyTab.dataset.policyTab);
+    if (policyTab.dataset.policyTab === "ai") loadAiDiagnostics();
     return;
   }
 
@@ -4032,6 +4128,12 @@ document.querySelector("#mcp-scope-list").addEventListener("change", () => {
 document.querySelector("#routing-mode-form")?.addEventListener("submit", saveRoutingMode);
 document.querySelector("#routing-rule-form")?.addEventListener("submit", addRoutingRule);
 document.querySelector("#routing-diagnose-form")?.addEventListener("submit", diagnoseRouting);
+document.querySelector("#ai-exit-form")?.addEventListener("submit", saveAiExit);
+document.querySelector("#ai-exit-form")?.addEventListener("change", (event) => {
+  aiExitDirty = true;
+  event.currentTarget.elements.hostId.disabled = event.currentTarget.elements.mode.value !== "pinned";
+});
+document.querySelector("#ai-diagnose-form")?.addEventListener("submit", diagnoseAiServices);
 
 document.querySelector("#publish-config").addEventListener("click", publishConfig);
 document.querySelector("#rollback-config").addEventListener("click", rollbackConfig);

@@ -532,6 +532,13 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     manual: manualCandidates,
     policyChoices
   } = candidates;
+  // The compiler carries Host membership through this native group's concrete
+  // members. Never infer a Host from a display name or a tag prefix.
+  const aiPinned = routePolicy.aiExit.mode === "pinned";
+  const aiNames = aiPinned ? groupMembers(singBoxConfig, ROUTE_POLICY_GROUPS.aiStable.tag)
+    .filter((name) => names.includes(name)) : names;
+  const aiFallback = aiPinned ? aiNames : fallbackGroups;
+  const aiUnavailable = aiPinned && !aiNames.length;
   const probeUrl = routeProbeUrlFromConfig(singBoxConfig);
   const proxyGroups = [
     {
@@ -543,7 +550,8 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
       name: ROUTE_POLICY_GROUPS.ai.name,
       type: "select",
       proxies: [ROUTE_POLICY_GROUPS.aiStable.name,
-        ...(sharedHealthChecks ? [ROUTE_POLICY_GROUPS.aiManual.name] : names), ...policyChoices]
+        ...(sharedHealthChecks ? [ROUTE_POLICY_GROUPS.aiManual.name] : aiNames),
+        ...(aiPinned ? [] : policyChoices)]
     },
     // Mihomo prepends provider nodes before explicit group proxies. Keep the
     // top-level AI selector free of `use`, or it defaults to an individual node
@@ -551,7 +559,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     ...(sharedHealthChecks ? [{
       name: ROUTE_POLICY_GROUPS.aiManual.name,
       type: "select",
-      proxies: names
+      proxies: aiNames.length ? aiNames : ["REJECT"]
     }] : []),
     {
       name: ROUTE_POLICY_GROUPS.smart.name,
@@ -602,14 +610,16 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     },
     {
       name: ROUTE_POLICY_GROUPS.aiStable.name,
-      type: "fallback",
-      proxies: fallbackGroups,
-      url: probeUrl,
-      interval: 60,
-      lazy: false,
-      timeout: MIHOMO_HEALTH_TIMEOUT_MS,
-      "max-failed-times": 3,
-      "expected-status": 204
+      type: aiUnavailable ? "select" : "fallback",
+      proxies: aiUnavailable ? ["REJECT"] : aiFallback,
+      ...(!aiUnavailable ? {
+        url: probeUrl,
+        interval: 60,
+        lazy: false,
+        timeout: MIHOMO_HEALTH_TIMEOUT_MS,
+        "max-failed-times": 3,
+        "expected-status": 204
+      } : {})
     },
     {
       name: ROUTE_POLICY_GROUPS.manual.name,
@@ -873,6 +883,11 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
   const tcp = candidates.tcp;
   const udp = candidates.udp;
   const fallbackGroups = candidates.fallback;
+  const aiPinned = routePolicy.aiExit.mode === "pinned";
+  const aiNames = aiPinned ? groupMembers(singBoxConfig, ROUTE_POLICY_GROUPS.aiStable.tag)
+    .filter((name) => names.includes(name)) : names;
+  const aiFallback = aiPinned ? aiNames : fallbackGroups;
+  const aiUnavailable = aiPinned && !aiNames.length;
   const probeUrl = routeProbeUrlFromConfig(singBoxConfig);
   const usesAiDns = routePolicy.mode === "smart" || routePolicy.rules.some((rule) => (
     rule.enabled && ["domain", "domain_suffix"].includes(rule.match)
@@ -1004,12 +1019,10 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
         }
       },
       {
-        fallback: {
+        [aiUnavailable ? "select" : "fallback"]: {
           name: ROUTE_POLICY_GROUPS.aiStable.name,
-          policies: fallbackGroups,
-          interval: 60,
-          timeout: 5,
-          latency_test_url: probeUrl
+          policies: aiUnavailable ? ["REJECT"] : aiFallback,
+          ...(!aiUnavailable ? { interval: 60, timeout: 5, latency_test_url: probeUrl } : {})
         }
       },
       {
@@ -1017,12 +1030,14 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
           name: ROUTE_POLICY_GROUPS.ai.name,
           policies: [
             ROUTE_POLICY_GROUPS.aiStable.name,
-            ...names,
-            "网络环境",
-            ROUTE_POLICY_GROUPS.fallback.name,
-            ROUTE_POLICY_GROUPS.smart.name,
-            ...(tcp.length ? [ROUTE_POLICY_GROUPS.tcp.name] : []),
-            ...(udp.length ? [ROUTE_POLICY_GROUPS.udp.name] : [])
+            ...aiNames,
+            ...(!aiPinned ? [
+              "网络环境",
+              ROUTE_POLICY_GROUPS.fallback.name,
+              ROUTE_POLICY_GROUPS.smart.name,
+              ...(tcp.length ? [ROUTE_POLICY_GROUPS.tcp.name] : []),
+              ...(udp.length ? [ROUTE_POLICY_GROUPS.udp.name] : [])
+            ] : [])
           ]
         }
       },
