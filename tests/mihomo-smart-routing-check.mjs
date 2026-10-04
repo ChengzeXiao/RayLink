@@ -98,6 +98,10 @@ try {
   const selected = await fetch(`http://127.0.0.1:${controllerPort}/proxies/${encodeURIComponent("AI 网站代理")}`, { method: "PUT", body: JSON.stringify({ name: "tcp-ai" }), headers: { "content-type": "application/json" } });
   assert.equal(selected.status, 204);
   for (const [domain, expectedDns, expectedRoute] of [
+    ["qianshouapp.cn", "domestic", "DIRECT"],
+    ["h5.qianshouapp.cn", "domestic", "DIRECT"],
+    ["s1.qianshouapp.cn", "domestic", "DIRECT"],
+    ["unlisted-domestic-fixture.cn", "domestic", "DIRECT"],
     ["a1.mzstatic.com", "domestic", "DIRECT"],
     ["blog.csdn.net", "domestic", "DIRECT"],
     ["www.alibaba", "domestic", "DIRECT"],

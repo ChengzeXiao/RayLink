@@ -10,6 +10,8 @@ let aiDiagnosticsLoading = false;
 let aiEgressDirty = false;
 let aiEgressSaving = false;
 let aiEgressError = "";
+let routingPolicySaving = false;
+let routingDiagnosisLoading = false;
 const controlPlaneConnection = { disconnected: false, failures: 0, active: false, generation: 0, controller: null };
 const requiredNodeAgentVersion = "0.9.0";
 
@@ -62,6 +64,7 @@ const controlPlane = {
   certificate: { mode: null, email: "" },
   routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
   routingRuleSets: null,
+  aiDomainRules: null,
   aiUpstream: null,
   aiEgress: null,
   portalProfile: null
@@ -273,6 +276,7 @@ function applyBootstrap(data) {
   controlPlane.nodeDomains = data.nodeDomains || null;
   controlPlane.aiUpstream = data.aiUpstream || null;
   controlPlane.aiEgress = data.aiEgress || null;
+  controlPlane.aiDomainRules = data.aiDomainRules || null;
   controlPlane.routingRuleSets = data.routingRuleSets || null;
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
@@ -382,8 +386,8 @@ const routingModeCopy = {
 
 const routingActionLabels = {
   direct: "直连",
-  proxy: "代理",
-  ai: "AI 代理",
+  proxy: "默认代理出口",
+  ai: "AI 出口",
   block: "拦截"
 };
 
@@ -396,11 +400,14 @@ const routingMatchLabels = {
 
 function renderRoutingPolicy() {
   const policy = controlPlane.routingPolicy;
+  const locked = !canManageRoutingPolicy() || routingPolicySaving;
+  renderAiDomainRules();
   if (document.querySelector("#ai-egress-form")?.elements) renderAiEgress();
+  document.querySelectorAll('#routing-mode-form input, #routing-mode-form button, #routing-rule-form input, #routing-rule-form select, #routing-rule-form button').forEach(input => { input.disabled = locked; });
   const mode = routingModeCopy[policy.mode] || routingModeCopy.smart;
   document.querySelectorAll('#routing-mode-form input[name="mode"]').forEach((input) => {
     input.checked = input.value === policy.mode;
-    input.disabled = Boolean(controlPlane.aiUpstream?.config?.enabled) && input.value !== "smart";
+    input.disabled = locked || (Boolean(controlPlane.aiUpstream?.config?.enabled) && input.value !== "smart");
   });
   setText("#routing-mode-title", mode.title);
   setText("#routing-mode-description", mode.description);
@@ -427,46 +434,89 @@ function renderRoutingPolicy() {
       </div>
       <div class="routing-rule-actions">
         <span class="tag">${escapeHtml(routingActionLabels[rule.action] || rule.action)}</span>
-        <button class="icon-button" type="button" data-routing-rule-delete="${escapeHtml(rule.id)}" aria-label="删除规则">${icon("x")}</button>
+        <button class="icon-button" type="button" data-routing-rule-delete="${escapeHtml(rule.id)}" aria-label="删除规则"${locked ? " disabled" : ""}>${icon("x")}</button>
       </div>
     </div>
   `).join("");
 }
 
+function canManageRoutingPolicy() {
+  return ["owner", "operator"].includes(controlPlane.currentAdmin?.role);
+}
+
+function renderAiDomainRules() {
+  const container = document.querySelector("#ai-domain-rules");
+  if (!container) return;
+  const coverage = controlPlane.aiDomainRules;
+  if (!coverage) { container.innerHTML = "<p>当前服务未返回 AI 域名摘要；可通过域名诊断检查具体域名。</p>"; return; }
+  const domains = (title, values = []) => `<details><summary>${escapeHtml(title)} · ${values.length}</summary>
+    <ul class="ai-domain-list">${values.map(domain => `<li>${escapeHtml(domain)}</li>`).join("") || "<li>暂无条目</li>"}</ul></details>`;
+  const rules = coverage.customRules || [];
+  container.innerHTML = `<p class="field-hint">内置版本：${escapeHtml(coverage.version || "未提供")} · 自定义域名规则 ${rules.length} 条</p>
+    <div class="ai-domain-grid">${domains("内置完整域名", coverage.domainNames)}${domains("内置域名后缀", coverage.domainSuffixes)}
+    ${domains("已知共享服务保护", coverage.sharedDomains)}${domains("已知普通大域保护", coverage.protectedDomains)}</div>
+    <details${rules.length ? " open" : ""}><summary>自定义覆盖与排除 · ${rules.length}</summary>
+      <ul class="ai-domain-overrides">${rules.map(rule => `<li><strong>${escapeHtml(rule.value)}</strong>
+        <span>${escapeHtml(routingMatchLabels[rule.match] || rule.match)} · ${escapeHtml(routingActionLabels[rule.action] || rule.action)} · 优先级 ${escapeHtml(rule.priority)} · ${rule.enabled === false ? "已停用" : "已启用"}</span></li>`).join("") || "<li>尚无自定义域名规则；沿用内置识别。</li>"}</ul>
+    </details>`;
+}
+
+function routingPublicationStatus(sync) {
+  if (!sync) return "发布状态未返回；请检查 Runtime 状态";
+  if (sync.status === "not-required") return "仅更新订阅；无需 Runtime 发布";
+  const simulated = sync.runtimeMode === "dry-run" || sync.status === "simulated";
+  if (sync.status === "pending") return `待发布；尚未确认 Runtime 应用${simulated ? "（模拟运行）" : ""}`;
+  if (simulated) return "仅模拟；未确认真实 Runtime 应用";
+  if (sync.status === "current") return "Runtime 配置已发布；不代表客户端已应用";
+  return "发布状态未确认";
+}
+
 async function persistRoutingPolicy(nextPolicy, successMessage) {
-  const saved = await api("/api/settings/routing", {
-    method: "PATCH",
-    body: JSON.stringify(nextPolicy)
-  });
-  controlPlane.routingPolicy = saved;
+  if (!canManageRoutingPolicy() || routingPolicySaving) return null;
+  const adminId = controlPlane.currentAdmin?.id;
+  const generation = controlPlaneConnection.generation;
+  const sameSession = () => adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation;
+  const { runtimeSync: previousSync, ...policy } = nextPolicy;
+  routingPolicySaving = true;
   renderRoutingPolicy();
-  showToast("策略已保存", successMessage);
-  return saved;
+  try {
+    const response = await api("/api/settings/routing", { method: "PATCH", body: JSON.stringify(policy) });
+    if (!sameSession()) return null;
+    const { runtimeSync, ...saved } = response;
+    controlPlane.routingPolicy = saved;
+    const message = `${successMessage} ${runtimeSync ? routingPublicationStatus(runtimeSync) + "。" : ""}请刷新完整订阅并重新连接。`;
+    setText("#routing-save-status", message);
+    showToast(runtimeSync?.status === "pending" ? "策略已保存，待发布" : "策略已保存", message);
+    await loadBootstrap().catch(() => {});
+    return sameSession() ? saved : null;
+  } catch (error) {
+    if (sameSession()) throw error;
+    return null;
+  } finally {
+    if (sameSession()) { routingPolicySaving = false; renderRoutingPolicy(); }
+  }
 }
 
 async function saveRoutingMode(event) {
   event.preventDefault();
+  if (!canManageRoutingPolicy() || routingPolicySaving) return;
   const form = event.currentTarget;
   const mode = new FormData(form).get("mode");
-  const button = form.querySelector('button[type="submit"]');
-  button.disabled = true;
   try {
     await persistRoutingPolicy(
       { ...controlPlane.routingPolicy, mode },
-      "新订阅和客户端配置会立即使用统一路由模式。"
+      "统一路由模式已保存。"
     );
   } catch (error) {
     showToast("保存失败", error.message);
-  } finally {
-    button.disabled = false;
   }
 }
 
 async function addRoutingRule(event) {
   event.preventDefault();
+  if (!canManageRoutingPolicy() || routingPolicySaving) return;
   const form = event.currentTarget;
   const fields = new FormData(form);
-  const button = form.querySelector('button[type="submit"]');
   const rule = {
     id: `rule-${Date.now().toString(36)}`,
     match: fields.get("match"),
@@ -477,29 +527,60 @@ async function addRoutingRule(event) {
     enabled: true,
     note: String(fields.get("note") || "").trim()
   };
-  button.disabled = true;
   try {
-    await persistRoutingPolicy(
+    const saved = await persistRoutingPolicy(
       {
         ...controlPlane.routingPolicy,
         rules: [...controlPlane.routingPolicy.rules, rule]
       },
       "自定义规则已写入所有完整订阅格式。"
     );
-    form.reset();
-    form.elements.priority.value = "100";
+    if (saved) { form.reset(); form.elements.priority.value = "100"; }
   } catch (error) {
     showToast("规则未保存", error.message);
-  } finally {
-    button.disabled = false;
   }
+}
+
+function renderRoutingDiagnostic(diagnostic) {
+  const result = document.querySelector("#routing-diagnose-result");
+  if (!result) return;
+  const ai = diagnostic.aiDomain;
+  const sources = { custom: "自定义规则", builtin: "内置 AI 域名", shared: "已知共享 / 普通域名保护", none: "未匹配 AI 域名", ai: "内置 AI 规则", mode: "全局路由模式" };
+  const addresses = diagnostic.addresses || [];
+  const aiClassification = ai?.eligible ? "AI 专用域名" : ai?.source === "shared" ? "共享 / 普通保护域名" : "未识别为 AI 专用域名";
+  const egressLabels = { residential: "住宅代理出口", server: "默认出口", blocked: "已拦截，无出口", "client-direct": "客户端直连" };
+  const terminalAction = ["blocked", "client-direct"].includes(ai?.desiredEgress);
+  const sync = ai?.runtimeSync;
+  const published = sync?.publishedMode ? `${sync.runtimeMode === "dry-run" || sync.status === "simulated" ? "最近模拟记录" : "最近发布记录"}：${sync.publishedMode === "residential" ? "住宅代理出口" : "默认出口"}` : "";
+  result.innerHTML = `
+    <div class="full"><small>本次检查域名</small><strong>${escapeHtml(diagnostic.domain || "未提供")}</strong></div>
+    <div><small>当前策略推断动作</small><strong>${escapeHtml(routingActionLabels[diagnostic.action] || diagnostic.action || "待确认")}</strong></div>
+    <div><small>本次路由命中规则</small><strong>${escapeHtml(sources[diagnostic.source] || diagnostic.source)}${diagnostic.ruleId ? ` · ${escapeHtml(diagnostic.ruleId)}` : ""}</strong></div>
+    <div><small>推断代理组</small><strong>${escapeHtml(diagnostic.outbound || "混合结果，需客户端确认")}</strong></div>
+    <div><small>策略 DNS</small><strong>${escapeHtml(diagnostic.dns)}</strong></div>
+    ${ai ? `<div><small>AI 域名分类</small><strong>${aiClassification}</strong></div>
+      <div><small>分类依据</small><strong>${escapeHtml(sources[ai.source] || ai.source)}${ai.match ? ` · ${escapeHtml(routingMatchLabels[ai.match] || ai.match)}` : ""}${ai.value ? ` · ${escapeHtml(ai.value)}` : ""}${ai.ruleId ? ` · ${escapeHtml(ai.ruleId)}` : ""}</strong></div>
+      <div><small>${terminalAction ? "当前策略预期结果" : "目标到达主控后的预期出口"}</small><strong>${escapeHtml(egressLabels[ai.desiredEgress] || "尚未确认")}</strong></div>
+      <div><small>Runtime 发布状态</small><strong>${escapeHtml(routingPublicationStatus(sync))}</strong></div>
+      <p>${escapeHtml(ai.reason || "")}${published ? ` · ${escapeHtml(published)}` : ""}${sync?.message ? ` · ${escapeHtml(sync.message)}` : ""}</p>
+      ${ai.note ? `<p>${escapeHtml(ai.note)}</p>` : ""}` : "<p>当前服务未返回 AI 域名分类；以下为现有路由证据。</p>"}
+    <div><small>证据来源</small><strong>${diagnostic.evidence?.kind === "control-plane-dns" ? "主控系统 DNS" : "规则推断"}</strong></div>
+    <div class="full"><small>解析地址</small><strong>${escapeHtml(addresses.length ? addresses.map(entry => entry.address).join("、") : "无需解析")}</strong></div>
+    <p>${escapeHtml(diagnostic.explanation || "")} · ${escapeHtml(new Date(diagnostic.checkedAt).toLocaleString("zh-CN"))}</p>
+    <p>这是服务端规则与配置判断，非客户端实测；发布后仍需刷新完整订阅并重新连接。</p>
+    ${(diagnostic.warnings || []).map(warning => `<p>${escapeHtml(warning)}</p>`).join("")}`;
 }
 
 async function diagnoseRouting(event) {
   event.preventDefault();
+  if (routingDiagnosisLoading || !controlPlane.currentAdmin) return;
+  const adminId = controlPlane.currentAdmin.id;
+  const generation = controlPlaneConnection.generation;
+  const sameSession = () => adminId === controlPlane.currentAdmin?.id && generation === controlPlaneConnection.generation;
   const form = event.currentTarget;
   const result = document.querySelector("#routing-diagnose-result");
   const button = form.querySelector('button[type="submit"]');
+  routingDiagnosisLoading = true;
   button.disabled = true;
   result.innerHTML = "<span>正在解析域名并匹配规则集…</span>";
   try {
@@ -507,22 +588,11 @@ async function diagnoseRouting(event) {
       method: "POST",
       body: JSON.stringify({ domain: form.elements.domain.value.trim() })
     });
-    const addressText = diagnostic.addresses.length
-      ? diagnostic.addresses.map((entry) => entry.address).join("、")
-      : "无需解析";
-    result.innerHTML = `
-      <div><small>推断出口</small><strong>${escapeHtml(diagnostic.outbound || "混合结果，需客户端确认")}</strong></div>
-      <div><small>命中来源</small><strong>${escapeHtml(diagnostic.source)}</strong></div>
-      <div><small>策略 DNS</small><strong>${escapeHtml(diagnostic.dns)}</strong></div>
-      <div><small>证据来源</small><strong>${diagnostic.evidence?.kind === "control-plane-dns" ? "主控系统 DNS" : "规则推断"}</strong></div>
-      <div class="full"><small>解析地址</small><strong>${escapeHtml(addressText)}</strong></div>
-      <p>${escapeHtml(diagnostic.explanation)} · ${escapeHtml(new Date(diagnostic.checkedAt).toLocaleString("zh-CN"))}</p>
-      ${(diagnostic.warnings || []).map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}
-    `;
+    if (sameSession()) renderRoutingDiagnostic(diagnostic);
   } catch (error) {
-    result.innerHTML = `<span class="danger-text">${escapeHtml(error.message)}</span>`;
+    if (sameSession()) result.innerHTML = `<span class="danger-text">${escapeHtml(error.message)}</span>`;
   } finally {
-    button.disabled = false;
+    if (sameSession()) { routingDiagnosisLoading = false; button.disabled = false; }
   }
 }
 
@@ -2098,6 +2168,13 @@ function showAdminLogin() {
   controlPlane.nodeDomains = null;
   controlPlane.aiUpstream = null;
   controlPlane.aiEgress = null;
+  controlPlane.aiDomainRules = null;
+  routingPolicySaving = false;
+  routingDiagnosisLoading = false;
+  const routingDiagnoseButton = document.querySelector('#routing-diagnose-form button[type="submit"]');
+  if (routingDiagnoseButton) routingDiagnoseButton.disabled = false;
+  setText("#routing-diagnose-result", "输入域名后，将展示分类、规则与发布状态。");
+  setText("#routing-save-status", "");
   aiEgressDirty = false;
   aiEgressSaving = false;
   aiEgressError = "";
@@ -4037,7 +4114,7 @@ document.addEventListener("click", async (event) => {
 
   const deleteRoutingRule = event.target.closest("[data-routing-rule-delete]");
   if (deleteRoutingRule) {
-    deleteRoutingRule.disabled = true;
+    if (!canManageRoutingPolicy() || routingPolicySaving) return;
     try {
       await persistRoutingPolicy(
         {
@@ -4046,10 +4123,9 @@ document.addEventListener("click", async (event) => {
             (rule) => rule.id !== deleteRoutingRule.dataset.routingRuleDelete
           )
         },
-        "规则已删除，订阅配置会立即使用新的规则顺序。"
+        "规则已删除，完整订阅将使用新的规则顺序。"
       );
     } catch (error) {
-      deleteRoutingRule.disabled = false;
       showToast("删除失败", error.message);
     }
     return;

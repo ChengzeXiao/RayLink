@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.42/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.43/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.42/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.43/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.42/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.43/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,6 +295,10 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
+### v0.2.43 / 国内分流与 AI 域名规则一致性
+
+修复牵手等未收录 `.cn` 域名依赖海外 DNS 的问题，将既有国内兜底同步到完整订阅。自定义“AI 出口”域名规则同时用于完整订阅与已启用的住宅 Runtime，普通 Google、YouTube、X、Instagram 和共享服务有独立住宅保护。界面与 MCP 显示内置覆盖、规则版本、具体命中原因及发布状态；住宅未启用不影响默认使用。保存后刷新完整订阅并重连。详见 [发布说明](docs/release/v0.2.43.md)。
+
 ### v0.2.42 / AI 出口二选一
 
 「智能路由 → AI 出口与检测 → AI 出口」统一选择 **默认出口** 或 **住宅代理出口**，仅展示所选配置，一次保存并发布。服务器模式保留住宅参数但停止使用；住宅模式支持 SOCKS5、HTTP、HTTPS。界面与 MCP 区分已保存的选择和最近成功发布模式，发布失败可重试；普通 Google 和浏览范围不变。旧接口兼容，详见 [发布说明](docs/release/v0.2.42.md)。
@@ -325,6 +329,6 @@ TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握�
 
 v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
 
-当前正式版本为 v0.2.42，可使用上面的 Release 下载命令安装或升级。
+当前正式版本为 v0.2.43，可使用上面的 Release 下载命令安装或升级。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

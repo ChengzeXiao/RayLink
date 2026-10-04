@@ -1,6 +1,6 @@
 {
   "name": "raylink-control-plane",
-  "version": "0.2.42",
+  "version": "0.2.43",
   "private": true,
   "type": "module",
   "engines": {
@@ -22,7 +22,7 @@
     "check:tuic": "node tests/tuic-interop-check.mjs",
     "check:runtime-dns": "node tests/runtime-dns-check.mjs",
     "check:health": "node tests/mihomo-health-check.mjs",
-    "check:ai-upstream": "node tests/ai-upstream-runtime-check.mjs"
+    "check:ai-upstream": "node tests/ai-upstream-runtime-check.mjs && node tests/ai-upstream-runtime-check.mjs --custom-domains"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",

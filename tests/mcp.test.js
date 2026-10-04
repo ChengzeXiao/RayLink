@@ -345,3 +345,32 @@ test("Agent manages routing, certificates, protocol publication and rollback, ba
   assert.equal((await call("runtime_certificates")).status, "disabled");
   assert.equal((await call("runtime_certificates_sync", {}, true)).status, "disabled");
 });
+
+
+test("MCP shares AI rule coverage and publication evidence without exposing proxy credentials", async t => {
+  const f = await fixture(t);
+  const { client: reader } = await connect(t, f, ["read"]);
+  const { client } = await connect(t, f, ["read", "runtime.manage"]);
+  const secret = "private-domain-routing-secret";
+  const enabled = await client.callTool({ name: "routing_ai_egress_update", arguments: {
+    requestId: "domain-proxy-enable", mode: "residential", upstream: { type: "socks5", server: "proxy.example", port: 1080, username: "fixture-user", password: secret }
+  } });
+  assert.ok(!enabled.isError);
+  const args = { requestId: "domain-custom-save", mode: "smart", rules: [
+    { id: "custom-ai", match: "domain_suffix", value: "assistant.example", action: "ai" }
+  ] };
+  const saved = await client.callTool({ name: "routing_update", arguments: args });
+  assert.ok(!saved.isError, JSON.stringify(saved));
+  assert.equal(output(saved).runtimeSync.status, "simulated");
+  assert.deepEqual(output(await client.callTool({ name: "routing_update", arguments: args })), output(saved));
+  const view = output(await reader.callTool({ name: "routing_get", arguments: {} }));
+  assert.ok(view.aiDomainRules.version);
+  assert.equal(view.aiDomainRules.customRules[0].id, "custom-ai");
+  const diagnosis = output(await client.callTool({ name: "routing_diagnose", arguments: { domain: "api.assistant.example" } }));
+  assert.equal(diagnosis.aiDomain.ruleId, "custom-ai");
+  assert.equal(diagnosis.aiDomain.desiredEgress, "residential");
+  assert.equal(diagnosis.aiDomain.runtimeSync.status, "simulated");
+  assert.equal(diagnosis.evidence.clientMeasured, false);
+  assert.ok(!JSON.stringify({ view, diagnosis, saved }).includes(secret));
+  await assert.rejects(() => reader.callTool({ name: "routing_update", arguments: { ...args, requestId: "reader-denied" } }), /not found/);
+});

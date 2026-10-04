@@ -33,7 +33,8 @@ test("routing policy renders during the post-login bootstrap", async () => {
 
   const nodes = new Map();
   const context = {
-    controlPlane: { routingPolicy: { mode: "smart", rules: [] } },
+    controlPlane: { currentAdmin: { role: "owner" }, routingPolicy: { mode: "smart", rules: [] } },
+    routingPolicySaving: false,
     document: {
       querySelectorAll() {
         return [];
@@ -53,4 +54,57 @@ test("routing policy renders during the post-login bootstrap", async () => {
 
   assert.equal(nodes.get("#routing-mode-title").textContent, "智能分流");
   assert.equal(nodes.get("#routing-rule-count").textContent, "0");
+});
+
+test("saving routing rules separates publication metadata and refreshes coverage without clearing the AI draft", async () => {
+  const script = await readFile(new URL("app.js", webRoot), "utf8");
+  const start = script.indexOf("async function persistRoutingPolicy(");
+  const end = script.indexOf("\nasync function saveRoutingMode", start);
+  const saved = { mode: "smart", rules: [], runtimeSync: { status: "pending" } };
+  const messages = [], requests = [];
+  let refreshed = 0;
+  const context = {
+    controlPlane: { currentAdmin: { id: "owner-1", role: "owner" }, routingPolicy: {} },
+    controlPlaneConnection: { generation: 1 }, routingPolicySaving: false, aiEgressDirty: true,
+    canManageRoutingPolicy: () => true, routingPublicationStatus: () => "待发布；尚未确认 Runtime 应用",
+    api: async (_path, options) => { requests.push(JSON.parse(options.body)); return saved; },
+    renderRoutingPolicy() {}, showToast: (...args) => messages.push(args), setText: (...args) => messages.push(args),
+    loadBootstrap: async () => { refreshed++; }
+  };
+  vm.runInNewContext(script.slice(start, end), context);
+  await context.persistRoutingPolicy({ mode: "smart", rules: [], runtimeSync: { status: "old" } }, "订阅已更新");
+  assert.equal(Object.hasOwn(requests[0], "runtimeSync"), false);
+  assert.equal(Object.hasOwn(context.controlPlane.routingPolicy, "runtimeSync"), false);
+  assert.equal(refreshed, 1);
+  assert.equal(context.aiEgressDirty, true);
+  assert.ok(messages.some(message => message.join(" ").includes("待发布")));
+});
+
+test("routing saves reject read-only roles, coalesce duplicate writes and discard a previous session response", async () => {
+  const script = await readFile(new URL("app.js", webRoot), "utf8");
+  const start = script.indexOf("async function persistRoutingPolicy(");
+  const end = script.indexOf("\nasync function saveRoutingMode", start);
+  let release, calls = 0;
+  const messages = [];
+  const original = { mode: "smart", rules: [] };
+  const context = { controlPlane: { currentAdmin: { id: "read-only", role: "auditor" }, routingPolicy: original },
+    controlPlaneConnection: { generation: 1 }, routingPolicySaving: false,
+    canManageRoutingPolicy: () => ["owner", "operator"].includes(context.controlPlane.currentAdmin.role),
+    api: () => { calls++; return new Promise(resolve => { release = resolve; }); },
+    renderRoutingPolicy() {}, showToast: (...args) => messages.push(args), setText: (...args) => messages.push(args),
+    loadBootstrap: async () => { throw new Error("stale writes must not refresh the next session"); } };
+  vm.runInNewContext(script.slice(start, end), context);
+  assert.equal(await context.persistRoutingPolicy(original, "saved"), null);
+  assert.equal(calls, 0);
+  context.controlPlane.currentAdmin = { id: "owner-1", role: "owner" };
+  const pending = context.persistRoutingPolicy(original, "saved");
+  assert.equal(await context.persistRoutingPolicy(original, "duplicate"), null);
+  assert.equal(calls, 1);
+  context.controlPlaneConnection.generation++;
+  context.controlPlane.currentAdmin = { id: "owner-2", role: "owner" };
+  context.routingPolicySaving = false;
+  release({ mode: "direct", rules: [], runtimeSync: { status: "current" } });
+  assert.equal(await pending, null);
+  assert.equal(context.controlPlane.routingPolicy, original);
+  assert.deepEqual(messages, []);
 });

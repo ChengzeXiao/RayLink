@@ -2939,6 +2939,7 @@ export class RayLinkStore {
       masterPassword: setting.value,
       users,
       protocols: this.listHostProtocolConfigs(hostId),
+      routingPolicy: this.routingPolicy(),
       ...(hostId === "local" ? { aiUpstream: this.aiUpstreamRuntimeSettings() } : {})
     };
   }

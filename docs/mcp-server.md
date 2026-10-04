@@ -151,3 +151,10 @@ Owner 在管理员列表可修改其他管理员登录名、角色、密码。�
 ```
 
 可配置 `http`/`https`、`username`、写入专用 `password` 和 HTTPS 的 `tlsServerName`；密码省略/留空保留，`clearPassword:true` 显式清除。服务器模式停止使用住宅上游并保留凭据；住宅模式固定 smart/local，仅 AI 专用域名使用上游，普通 Google/浏览保留原出口。发布失败后用 `routing_ai_egress_publish` 加新 `requestId` 重试；同一次请求的传输重试复用原 `requestId`。旧 `routing_ai_upstream_*` 和 `routing_update` 保持兼容。
+
+
+### AI 域名识别与发布状态（v0.2.43）
+
+`routing_get` 返回 `aiDomainRules`（version、内置 domainNames/domainSuffixes、sharedDomains、protectedDomains 和有序 customRules）。`routing_update` 继续接受完整规则数组；域名类 AI 规则同步住宅 Runtime，返回 `runtimeSync`。状态 not-required 表示住宅未启用、不需要发布 Runtime；current/pending/simulated 分别表示已确认、待发布、仅模拟。发布失败可用 `routing_ai_egress_publish` 重试，刷新完整客户端订阅仍需在客户端完成。
+
+`routing_diagnose` 的 `aiDomain` 包含 eligible/source/match/value/ruleId/reason、desiredEgress、runtimeSync 与规则版本。desiredEgress 可为 server/residential/blocked/client-direct；仅规则推断，不证明实际客户端出口。IP/CIDR 自定义规则不扩充住宅域名范围，共享普通域名有独立保护。工具数和权限不变。

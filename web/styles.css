@@ -1775,6 +1775,18 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
 .ai-diagnostic-grid article > .status-badge { margin-bottom: 10px; }
 .ai-diagnostic-grid small, .ai-diagnostic-results > p { color: var(--text-soft); }
 .ai-egress-panel { min-width: 0; }
+.ai-domain-coverage { grid-column: 1 / -1; min-width: 0; padding: 22px; }
+.ai-domain-coverage .field-hint { line-height: 1.7; margin: 0 0 14px; }
+.ai-domain-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; margin-bottom: 14px; }
+.ai-domain-coverage details { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.ai-domain-coverage summary { cursor: pointer; font-size: 12px; color: var(--text-soft); }
+.ai-domain-list, .ai-domain-overrides { margin: 14px 0 0; padding: 0; list-style: none; max-height: 260px; overflow: auto; }
+.ai-domain-list li, .ai-domain-overrides li { overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; }
+.ai-domain-overrides li + li { margin-top: 9px; }
+.ai-domain-overrides strong, .ai-domain-overrides span { display: block; }
+.ai-domain-overrides span { color: var(--text-soft); font-size: 11px; }
+.ai-domain-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+@media (max-width: 560px) { .ai-domain-grid { grid-template-columns: 1fr; } }
 #ai-egress-form > .full, .ai-egress-fields > .full, [data-ai-egress-host-options] > .full { grid-column: 1 / -1; }
 .ai-egress-panel > .field-hint { margin: 10px 0 18px; line-height: 1.7; overflow-wrap: anywhere; }
 .ai-egress-fields, .ai-egress-choices { min-width: 0; margin: 0; padding: 0; border: 0; }

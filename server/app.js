@@ -21,6 +21,7 @@ import { createMcpService } from "./mcp.js";
 import { NodeProvisioning } from "./node-provisioning.js";
 import { NodeDomains } from "./node-domains.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
+import { AI_DOMAIN_RULES_VERSION, describeAiDomain, aiDomainRulesView } from "./routing/ai-upstream-domains.js";
 import { AiServiceDiagnostics, AI_DIAGNOSTIC_SERVICES, defaultAiDiagnosticProbe } from "./routing/ai-diagnostics.js";
 import { createAiUpstreamProbe } from "./routing/ai-upstream-probe.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
@@ -649,25 +650,53 @@ export async function createRayLinkApp(options) {
     tlsAssetPackager,
     runtimeDns: options.runtimeDns
   });
+  const runtimePreviewView = () => {
+    try { return { preview: runtimeManager.preview(), error: null }; }
+    catch (error) {
+      // A read must still expose saved settings when credentials or compilation
+      // are unavailable. Never copy native errors/configuration into the view.
+      return { preview: null, error: error?.code === "AI_UPSTREAM_SECRET_UNAVAILABLE"
+        ? { code: "AI_UPSTREAM_SECRET_UNAVAILABLE", message: "AI 上游凭据不可用；设置已保存但无法确认运行配置。请恢复加密密钥或重新填写住宅代理密码后重试发布。" }
+        : { code: "RUNTIME_PREVIEW_UNAVAILABLE", message: "运行配置无法编译；设置已保存但尚未确认 Runtime 应用。请检查配置后重试发布。" } };
+    }
+  };
   const aiEgressView = async (knownRuntime) => {
     const runtime = knownRuntime || await runtimeManager.status();
     // Capture desired and published configurations in one synchronous turn.
     // Otherwise a concurrent save could pair an old revision with new status.
     const config = store.aiUpstreamSettings();
     const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
-    const matches = active?.checksum === runtimeManager.preview().checksum;
+    const { preview, error } = runtimePreviewView();
+    const matches = preview !== null && active?.checksum === preview.checksum;
     const status = matches && runtime.mode === "dry-run" ? "simulated"
       : matches && runtime.state === "running" ? "current" : "pending";
     const publishedMode = active ? store.deploymentSnapshotMetadata(active.id).aiEgressMode : null;
     return { mode: config.enabled ? "residential" : "server", aiExit: store.routingPolicy().aiExit, upstream: config,
       runtimeSync: { status, runtimeState: runtime.state, runtimeMode: runtime.mode, publishedMode,
       ...(status === "pending" ? { message: "设置已保存，尚未确认 Runtime 已应用；请发布配置并检查运行状态。" }
-        : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}) } };
+        : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}),
+      ...(error ? { errorCode: error.code, message: error.message } : {}) } };
   };
   const aiUpstreamView = async (knownRuntime) => {
     const { upstream: config, runtimeSync } = await aiEgressView(knownRuntime);
     return { config, runtimeSync };
   };
+  const publishAiConfiguration = async (publisherId) => {
+    try {
+      await refreshLocalRuntimeCapabilities();
+      const active = store.listDeployments(100).find(deployment => deployment.status === "active");
+      const runtime = await runtimeManager.status();
+      const ready = runtime.state === "running" || (runtime.mode === "dry-run" && runtime.state === "staged");
+      if (active?.checksum !== runtimeManager.preview().checksum || !ready) await runtimeManager.publish(publisherId);
+      return false;
+    } catch {
+      // Native errors can contain upstream credentials; expose publication state only.
+      return true;
+    }
+  };
+  const pendingAiPublication = runtimeSync => ({ ...runtimeSync, status: "pending",
+    message: runtimeSync.errorCode ? runtimeSync.message
+      : "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" });
   const currentAiDiagnostics = () => {
     const config = store.aiUpstreamRuntimeSettings();
     const key = `${config.enabled ? "upstream" : "direct"}:${config.revision}`;
@@ -1426,13 +1455,14 @@ export async function createRayLinkApp(options) {
         nodeDomains: nodeDomains.settings(),
         provisioning: nodeProvisioning.availability(),
         routingPolicy: store.routingPolicy(),
+        aiDomainRules: aiDomainRulesView(store.routingPolicy()),
         aiUpstream: await aiUpstreamView(runtime),
         aiEgress: await aiEgressView(runtime),
         routingRuleSets,
         telemetry: store.telemetryOverview(),
         runtime,
         bbr, runtimeSetup, systemUpdate: await systemUpdateManager.status(),
-        runtimePreview: runtimeManager.preview(),
+        runtimePreview: runtimePreviewView().preview,
         deployments,
         backups,
         alerts,
@@ -1462,11 +1492,19 @@ export async function createRayLinkApp(options) {
       request.method === "PATCH"
       && url.pathname === "/api/settings/routing"
     ) {
-      sendJson(
-        response,
-        200,
-        store.updateRoutingPolicy(await readJson(request))
-      );
+      const body = await readJson(request);
+      let saved, runtimeSync;
+      await runLocalRuntimeOperation("AI 域名规则发布", async () => {
+        saved = store.updateRoutingPolicy(body);
+        if (store.aiUpstreamSettings().enabled) {
+          const failed = await publishAiConfiguration(admin.id);
+          runtimeSync = (await aiEgressView()).runtimeSync;
+          if (failed) runtimeSync = pendingAiPublication(runtimeSync);
+        } else {
+          runtimeSync = { status: "not-required", message: "住宅代理未启用；规则已保存到完整订阅，无需修改 Runtime。请刷新完整订阅并重新连接。" };
+        }
+      });
+      sendJson(response, 200, { ...saved, runtimeSync });
       return;
     }
 
@@ -1493,21 +1531,10 @@ export async function createRayLinkApp(options) {
           if (unified) store.updateAiEgressSettings(body);
           else store.updateAiUpstreamSettings(body);
         }
-        try {
-          await refreshLocalRuntimeCapabilities();
-          const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
-          const runtime = await runtimeManager.status();
-          const ready = runtime.state === "running" || (runtime.mode === "dry-run" && runtime.state === "staged");
-          if (active?.checksum !== runtimeManager.preview().checksum || !ready) await runtimeManager.publish(admin.id);
-        } catch {
-          // Native validation may include configuration text. Never return or log
-          // raw errors from a publication carrying an upstream credential.
-          publicationFailed = true;
-        }
+        publicationFailed = await publishAiConfiguration(admin.id);
       });
       const result = await (unified ? aiEgressView() : aiUpstreamView());
-      if (publicationFailed) result.runtimeSync = { ...result.runtimeSync, status: "pending",
-        message: "设置已保存，运行配置发布未成功；修复 Runtime 后重试发布。现有运行配置未确认应用本次修改。" };
+      if (publicationFailed) result.runtimeSync = pendingAiPublication(result.runtimeSync);
       sendJson(response, 200, result);
       return;
     }
@@ -1530,12 +1557,14 @@ export async function createRayLinkApp(options) {
       && url.pathname === "/api/routing/diagnose"
     ) {
       const body = await readJson(request);
-      sendJson(
-        response,
-        200,
-        await diagnoseRoutingDomain({
+      const runtime = await runtimeManager.status();
+      const policy = store.routingPolicy();
+      const upstream = store.aiUpstreamSettings();
+      const { runtimeSync } = await aiEgressView(runtime);
+      const aiDomain = describeAiDomain(body.domain, policy);
+      const diagnostic = await diagnoseRoutingDomain({
           domain: body.domain,
-          policy: store.routingPolicy(),
+          policy,
           matchRuleSet: ruleSetCache.available()
             && typeof ruleSetCache.matches === "function"
             ? (filename, value) => ruleSetCache.matches(
@@ -1544,8 +1573,15 @@ export async function createRayLinkApp(options) {
                 options.singBoxBinary || "sing-box"
               )
             : null
-        })
-      );
+        });
+      sendJson(response, 200, { ...diagnostic, aiDomain: { ...aiDomain,
+        version: AI_DOMAIN_RULES_VERSION,
+        desiredEgress: diagnostic.action === "block" ? "blocked" : diagnostic.action === "direct" ? "client-direct"
+          : aiDomain.eligible && upstream.enabled ? "residential" : "server",
+        runtimeSync,
+        evidence: "saved-domain-rules",
+        note: "仅判断域名到达当前主控后的出口；客户端自定义 IP 规则、直连或拦截可能改变实际路径。刷新完整订阅后仍须在客户端验证。"
+      } });
       return;
     }
 
