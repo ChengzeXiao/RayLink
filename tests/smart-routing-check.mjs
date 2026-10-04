@@ -114,7 +114,16 @@ try {
   assert.ok(lookups.includes("api.known.cn"), "known domestic hostname must use its selected DNS policy before direct dialing");
   assert.ok(proxyTargets.includes(`192.0.2.40:${originPort}`), "custom proxy DNS must supply the actual dial address, not just a diagnostic label");
   assert.ok(proxyTargets.includes(`192.0.2.50:${originPort}`), "known overseas DNS must supply the proxy dial address even for a China IP answer");
-  assert.ok(proxyTargets.includes(`192.0.2.60:${originPort}`), "AI DNS must supply the AI proxy dial address");
+  if (testIpPriority) {
+    // An explicit IP rule must inspect the resolved address first and keep
+    // that same address for dialing, including AI targets (DNS-rebind safety).
+    assert.ok(proxyTargets.includes(`192.0.2.60:${originPort}`), "custom IP precedence must retain the checked AI dial address");
+  } else {
+    // The default AI path preserves its hostname for server-side upstream
+    // classification and DNS at the chosen exit, rather than resolving early.
+    assert.ok(proxyTargets.includes(`chatgpt.com:${originPort}`), "AI proxy requests must retain the original domain");
+    assert.ok(!lookups.includes("chatgpt.com"), "default AI routing must not pre-resolve its proxy destination");
+  }
   if (testIpPriority) {
     await assert.rejects(request("blocked.example.test"), "higher priority IP block must win over a later domain direct rule");
     assert.match(logs, /192\.0\.2\.30.*reject/, "the rejection must come from the matching IP rule");
