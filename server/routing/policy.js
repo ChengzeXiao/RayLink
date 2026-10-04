@@ -116,6 +116,7 @@ const MAX_ROUTING_RULES = 500;
 export const DEFAULT_ROUTING_POLICY = Object.freeze({
   mode: "smart",
   unknownDomain: "resolve-geoip",
+  aiExit: Object.freeze({ mode: "auto", hostId: null }),
   rules: Object.freeze([])
 });
 
@@ -226,9 +227,20 @@ export function normalizeRoutingPolicy(input = {}) {
   if (new Set(rules.map((rule) => rule.id)).size !== rules.length) {
     throw routingError("INVALID_ROUTING_RULE", "路由规则 ID 不能重复");
   }
+  const requestedExit = input?.aiExit === undefined ? DEFAULT_ROUTING_POLICY.aiExit : input.aiExit;
+  if (!requestedExit || !["auto", "pinned"].includes(requestedExit.mode)
+    || (requestedExit.mode === "pinned" && (typeof requestedExit.hostId !== "string"
+      || !requestedExit.hostId.trim() || requestedExit.hostId.length > 128))) {
+    throw routingError("INVALID_AI_EXIT", "AI 出口必须选择自动模式或有效的固定主机");
+  }
+  const aiExit = Object.freeze({
+    mode: requestedExit.mode,
+    hostId: requestedExit.mode === "pinned" ? requestedExit.hostId.trim() : null
+  });
   return Object.freeze({
     mode,
     unknownDomain: "resolve-geoip",
+    aiExit,
     rules: Object.freeze(rules)
   });
 }

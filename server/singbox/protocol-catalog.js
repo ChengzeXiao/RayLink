@@ -415,6 +415,7 @@ export function buildMultiHostProtocolClientConfig({
   now = Date.now()
 }) {
   const smartExcludedTags = new Set();
+  const outboundHostIds = new Map();
   const protocolOutbounds = hosts.flatMap((host) => {
     const managed = (host.protocols || [])
       .filter((profile) => {
@@ -430,6 +431,7 @@ export function buildMultiHostProtocolClientConfig({
     );
     return managed.map((profile) => {
       const tag = `raylink-${hostTag}-${profile.type}`;
+      outboundHostIds.set(tag, host.id);
       if (
         usesUdpTransport(profile)
         && !protocolIsStableForSmartSelection(activations.get(profile.type), now)
@@ -443,7 +445,8 @@ export function buildMultiHostProtocolClientConfig({
     ruleSetBaseUrl,
     smartExcludedTags,
     probeUrl,
-    routePolicy
+    routePolicy,
+    outboundHostIds
   });
 }
 
@@ -464,6 +467,7 @@ function clientConfigForOutbounds(
   {
     ruleSetBaseUrl = null,
     smartExcludedTags = new Set(),
+    outboundHostIds = new Map(),
     probeUrl = DEFAULT_ROUTE_PROBE_URL,
     routePolicy: inputRoutePolicy
   } = {}
@@ -477,6 +481,9 @@ function clientConfigForOutbounds(
   const udpTags = protocolOutbounds
     .filter(usesUdpTransport)
     .map((outbound) => outbound.tag);
+  const aiTags = [...tcpTags, ...udpTags].filter((tag) => routePolicy.aiExit.mode === "auto"
+    || outboundHostIds.get(tag) === routePolicy.aiExit.hostId);
+  const aiUnavailable = aiTags.length === 0;
   const healthyUdpTags = udpTags.filter((tag) => !smartExcludedTags.has(tag));
   const smartTags = [...tcpTags, ...healthyUdpTags];
   const usableSmartTags = smartTags.length ? smartTags : tags;
@@ -492,7 +499,7 @@ function clientConfigForOutbounds(
   // Include every enabled transport: server-side UDP health cannot establish
   // the client's path, and a healthy UDP node must recover an all-TCP outage.
   const aiStableGroup = {
-    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, [...tcpTags, ...udpTags], probeUrl, 15_000),
+    ...urlTestOutbound(ROUTE_POLICY_GROUPS.aiStable.tag, aiTags, probeUrl, 15_000),
     interval: "1m"
   };
   for (const outbound of automaticGroups) {
@@ -532,6 +539,9 @@ function clientConfigForOutbounds(
       ];
   const customDnsRules = routePolicy.rules.flatMap((rule) => {
     if (!rule.enabled || !["domain", "domain_suffix"].includes(rule.match)) return [];
+    if (aiUnavailable && rule.action === "ai" && rule.dns === "remote") {
+      return [{ [rule.match]: [rule.value], action: "reject" }];
+    }
     const field = rule.match === "domain" ? "domain" : "domain_suffix";
     return [{
       [field]: [rule.value],
@@ -557,7 +567,7 @@ function clientConfigForOutbounds(
       ? [{ action: "resolve" }]
       : [];
     if (field === "ip_cidr") resolvesCustomIps = true;
-    if (rule.action === "block") {
+    if (rule.action === "block" || (aiUnavailable && rule.action === "ai")) {
       return [...resolveRules, { [field]: [value], action: "reject" }];
     }
     return [...resolveRules,
@@ -577,12 +587,11 @@ function clientConfigForOutbounds(
   const resolveRemaining = (match = {}) => resolvesCustomIps ? [] : [{ ...match, action: "resolve" }];
   const managedRouteRules = routePolicy.mode === "smart"
     ? [
-        ...resolveRemaining({ domain: [...AI_DOMAIN_NAMES], domain_suffix: [...AI_DOMAIN_SUFFIXES] }),
+        ...(aiUnavailable ? [] : resolveRemaining({ domain: [...AI_DOMAIN_NAMES], domain_suffix: [...AI_DOMAIN_SUFFIXES] })),
         {
           domain: [...AI_DOMAIN_NAMES],
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
-          action: "route",
-          outbound: ROUTE_POLICY_GROUPS.ai.tag
+          ...(aiUnavailable ? { action: "reject" } : { action: "route", outbound: ROUTE_POLICY_GROUPS.ai.tag })
         },
         ...resolveRemaining({ domain_suffix: [...PROXY_DOMAIN_SUFFIXES] }),
         {
@@ -637,12 +646,12 @@ function clientConfigForOutbounds(
           server: "8.8.8.8",
           detour: "raylink-auto"
         },
-        {
+        ...(!aiUnavailable ? [{
           type: "tls",
           tag: "dns-ai",
           server: "8.8.8.8",
           detour: ROUTE_POLICY_GROUPS.ai.tag
-        }
+        }] : [])
       ],
       rules: [
         {
@@ -655,8 +664,7 @@ function clientConfigForOutbounds(
         ...(routePolicy.mode === "smart" ? [{
           domain: [...AI_DOMAIN_NAMES],
           domain_suffix: [...AI_DOMAIN_SUFFIXES],
-          action: "route",
-          server: "dns-ai"
+          ...(aiUnavailable ? { action: "reject" } : { action: "route", server: "dns-ai" })
         }, {
           domain_suffix: [...PROXY_DOMAIN_SUFFIXES],
           action: "route",
@@ -689,7 +697,7 @@ function clientConfigForOutbounds(
     outbounds: [
       ...protocolOutbounds,
       ...automaticGroups,
-      aiStableGroup,
+      ...(!aiUnavailable ? [aiStableGroup] : []),
       {
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.proxy.tag,
@@ -697,18 +705,17 @@ function clientConfigForOutbounds(
         default: tcpTags.length ? ROUTE_POLICY_GROUPS.tcp.tag : ROUTE_POLICY_GROUPS.smart.tag,
         interrupt_exist_connections: false
       },
-      {
+      ...(!aiUnavailable ? [{
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.ai.tag,
         outbounds: [
           ROUTE_POLICY_GROUPS.aiStable.tag,
-          ROUTE_POLICY_GROUPS.proxy.tag,
-          ...selectorGroups,
-          ...tags
+          ...(routePolicy.aiExit.mode === "auto" ? [ROUTE_POLICY_GROUPS.proxy.tag, ...selectorGroups] : []),
+          ...aiTags
         ],
         default: ROUTE_POLICY_GROUPS.aiStable.tag,
         interrupt_exist_connections: false
-      },
+      }] : []),
       { type: "direct", tag: "direct" }
     ],
     route: {

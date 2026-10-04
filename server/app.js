@@ -21,6 +21,7 @@ import { createMcpService } from "./mcp.js";
 import { NodeProvisioning } from "./node-provisioning.js";
 import { NodeDomains } from "./node-domains.js";
 import { diagnoseRoutingDomain } from "./routing/diagnostics.js";
+import { AiServiceDiagnostics, AI_DIAGNOSTIC_SERVICES } from "./routing/ai-diagnostics.js";
 import { getBundledRoutingVersion } from "./routing/rule-sets/bundled.js";
 import { validateNodeEncryptionPublicKey } from "./node-secrets.js";
 import {
@@ -110,6 +111,7 @@ function adminPermissionForRequest(method, pathname) {
     || pathname.startsWith("/api/deployments/")
     || pathname === "/api/settings/routing"
     || pathname === "/api/routing/diagnose"
+    || pathname === "/api/routing/ai-check"
   ) {
     return "runtime.manage";
   }
@@ -510,6 +512,7 @@ function clearedSessionCookie(name, secure) {
 }
 
 export async function createRayLinkApp(options) {
+  const aiDiagnostics = new AiServiceDiagnostics({ probe: options.aiDiagnosticProbe });
   const dbPath = options.dbPath || join(options.dataDir, "raylink.db");
   const publicOrigin = new URL(options.publicOrigin);
   const configuredSubscriptionOrigin = new URL(options.subscriptionOrigin || publicOrigin);
@@ -1427,6 +1430,19 @@ export async function createRayLinkApp(options) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/routing/ai-check") {
+      sendJson(response, 200, { services: AI_DIAGNOSTIC_SERVICES, report: aiDiagnostics.snapshot() });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/routing/ai-check") {
+      const body = await readJson(request);
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).some((key) => key !== "service")) {
+        throw httpError("INVALID_AI_DIAGNOSTIC_INPUT", "仅支持选择预设 AI 服务", 422);
+      }
+      sendJson(response, 200, await aiDiagnostics.run({ service: body.service }));
+      return;
+    }
     if (
       request.method === "POST"
       && url.pathname === "/api/routing/diagnose"

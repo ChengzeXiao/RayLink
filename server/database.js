@@ -1192,7 +1192,13 @@ export class RayLinkStore {
   }
 
   updateRoutingPolicy(input = {}) {
-    const policy = normalizeRoutingPolicy(input);
+    const policy = normalizeRoutingPolicy({
+      ...input,
+      aiExit: input.aiExit === undefined ? this.routingPolicy().aiExit : input.aiExit
+    });
+    if (policy.aiExit.mode === "pinned" && !this.getHost(policy.aiExit.hostId)) {
+      throw domainError("INVALID_AI_EXIT", "固定的 AI 出口主机不存在", 422);
+    }
     this.db.prepare(`
       INSERT INTO settings (key, value, updated_at)
       VALUES ('routing_policy', ?, ?)

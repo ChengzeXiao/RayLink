@@ -1768,6 +1768,12 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-colo
   font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .terminal-log time { margin-right: 10px; color: var(--faint); }
+.ai-diagnostic-results { grid-column: 1 / -1; padding: 24px; }
+.ai-diagnostic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 16px; }
+.ai-diagnostic-grid article { border: 1px solid var(--border); border-radius: 12px; padding: 16px; overflow-wrap: anywhere; }
+.ai-diagnostic-grid article > strong, .ai-diagnostic-grid article > small { display: block; margin-bottom: 8px; }
+.ai-diagnostic-grid article > .status-badge { margin-bottom: 10px; }
+.ai-diagnostic-grid small, .ai-diagnostic-results > p { color: var(--text-soft); }
 .diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
 .diagnostic-grid article {
   display: grid;

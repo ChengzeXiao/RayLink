@@ -113,6 +113,7 @@ const protocolFields = {
 const protocolPath = (args) => `${hostPath(args)}/protocols/${encodeURIComponent(args.protocolType)}`;
 const routingFields = {
   mode: z.enum(["smart", "global-proxy", "direct"]),
+  aiExit: z.strictObject({ mode: z.enum(["auto", "pinned"]), hostId: id.nullable().optional() }).optional(),
   unknownDomain: z.literal("resolve-geoip").optional(),
   rules: z.array(z.strictObject({
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).optional(),
@@ -184,7 +185,10 @@ export const mcpTools = [
     permission: "runtime.manage", mutating: true, fields: { hostId: id }, method: "POST", path: (args) => `${hostPath(args)}/protocols/latency`, select: (value) => pick(value, ["hostId", "checkedAt", "results"]) }),
   defineTool({ name: "routing_get", description: "Read routing policy and verified rule-set status.", path: "/api/bootstrap", select: (value) => ({ policy: value.routingPolicy, ruleSets: value.routingRuleSets }) }),
   defineTool({ name: "routing_update", description: "Replace the routing policy. Supply the full rules array; omitted rules are not preserved. Regenerate or refresh client subscriptions to consume the new policy.",
-    permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules"]) }),
+    permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules", "aiExit"]) }),
+  defineTool({ name: "routing_ai_status", description: "Read the latest anonymous control-plane AI site checks. Results are server-egress evidence, not a phone/client, proxy protocol, account or model-generation test.", path: "/api/routing/ai-check" }),
+  defineTool({ name: "routing_ai_check", description: "Check preset AI website/API endpoints anonymously from the control plane, with short caching and bounded requests. Reports DNS/TLS/HTTP, challenges, authentication, permissions and rate limits separately. Does not call models, use credentials, change routing or prove account availability.",
+    permission: "runtime.manage", fields: { service: z.enum(["all", "claude", "openai", "gemini", "copilot", "perplexity", "grok"]).optional() }, method: "POST", path: "/api/routing/ai-check", body: true }),
   defineTool({ name: "routing_diagnose", description: "Diagnose a domain using current routing policy and rule sets without changing settings. This may perform DNS/rule matching; it does not prove the user's final network path.",
     permission: "runtime.manage", fields: { domain: z.string().trim().min(1).max(253) }, method: "POST", path: "/api/routing/diagnose", body: true }),
   defineTool({ name: "certificate_get", description: "Read automatic-certificate notification settings, not certificate private keys.", path: "/api/bootstrap", select: (value) => pick(value.certificate, ["mode", "email"]) }),
