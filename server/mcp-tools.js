@@ -31,6 +31,7 @@ function safeOutput(value) {
   return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
     const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
     if (key === "passwordReset" && typeof child === "boolean") return [[key, child]];
+    if (key === "passwordConfigured" && typeof child === "boolean") return [[key, child]];
     if (key === "tokenConfigured" && typeof child === "boolean") return [[key, child]];
     if (key === "subscriptionVerified" && typeof child === "boolean") return [[key, child]];
     if (key === "subscriptionStatus" && ["verified", "awaiting-users"].includes(child)) return [[key, child]];
@@ -122,6 +123,10 @@ const routingFields = {
     priority: z.number().int().min(0).max(100000).optional(), enabled: z.boolean().optional(), note: z.string().max(160).optional()
   })).max(500)
 };
+const aiUpstreamView = (value) => ({
+  upstream: pick(value.config, ["enabled", "hostId", "type", "server", "port", "username", "tlsServerName", "passwordConfigured", "revision"]),
+  runtimeSync: pick(value.runtimeSync, ["status", "runtimeState", "message"])
+});
 
 export const mcpTools = [
   defineTool({ name: "runtime_certificates", description: "Read local managed certificate expiration and last renewal synchronization status. Never returns keys or certificate paths and never restarts the Runtime.", path: "/api/runtime/certificates" }),
@@ -187,6 +192,15 @@ export const mcpTools = [
   defineTool({ name: "routing_update", description: "Replace the routing policy. Supply the full rules array; omitted rules are not preserved. Regenerate or refresh client subscriptions to consume the new policy.",
     permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules", "aiExit"]) }),
   defineTool({ name: "routing_ai_status", description: "Read the latest anonymous control-plane AI site checks. Results are server-egress evidence, not a phone/client, proxy protocol, account or model-generation test.", path: "/api/routing/ai-check" }),
+  defineTool({ name: "routing_ai_upstream_get", description: "Read the local Host AI-only SOCKS5/HTTP/HTTPS upstream settings and actual publication state. Never returns the proxy password.",
+    path: "/api/settings/ai-upstream", select: aiUpstreamView }),
+  defineTool({ name: "routing_ai_upstream_update", description: "Save the local Host AI-only upstream and attempt Runtime publication. Enabling pins smart AI routing to local; Google and ordinary browsing keep their existing egress. Blank or omitted password preserves it; clearPassword explicitly removes it. Publication can remain pending; dry-run is simulated. Proxy credentials never enter client subscriptions.",
+    permission: "runtime.manage", mutating: true, method: "PATCH", path: "/api/settings/ai-upstream", body: true, select: aiUpstreamView,
+    fields: { enabled: z.boolean().optional(), hostId: z.literal("local").optional(), type: z.enum(["socks5", "http", "https"]).optional(),
+      server: z.string().max(253).optional(), port: port.optional(), username: z.string().max(255).optional(), password: z.string().max(255).optional(),
+      tlsServerName: z.string().max(253).optional(), clearPassword: z.boolean().optional() } }),
+  defineTool({ name: "routing_ai_upstream_publish", description: "Retry publishing the saved AI upstream through managed Runtime validation and rollback. May restart the Runtime; inspect returned publication state.",
+    permission: "runtime.manage", mutating: true, method: "POST", path: "/api/settings/ai-upstream/publish", select: aiUpstreamView }),
   defineTool({ name: "routing_ai_check", description: "Check preset AI website/API endpoints anonymously from the control plane, with short caching and bounded requests. Reports DNS/TLS/HTTP, challenges, authentication, permissions and rate limits separately. Does not call models, use credentials, change routing or prove account availability.",
     permission: "runtime.manage", fields: { service: z.enum(["all", "claude", "openai", "gemini", "copilot", "perplexity", "grok"]).optional() }, method: "POST", path: "/api/routing/ai-check", body: true }),
   defineTool({ name: "routing_diagnose", description: "Diagnose a domain using current routing policy and rule sets without changing settings. This may perform DNS/rule matching; it does not prove the user's final network path.",

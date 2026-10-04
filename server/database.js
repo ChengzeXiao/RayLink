@@ -17,6 +17,11 @@ import {
   verifyPassword
 } from "./security.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
+import {
+  DEFAULT_AI_UPSTREAM, aiUpstreamSecretError, decryptAiUpstreamSecret,
+  encryptAiUpstreamSecret, normalizeAiUpstreamSettings, publicAiUpstreamSettings,
+  protectAiUpstreamConfig, revealAiUpstreamConfig
+} from "./ai-upstream.js";
 import { MonthlyUsagePeriods, monthlyUsagePeriod } from "./usage/monthly-periods.js";
 import {
   DEFAULT_ROUTING_POLICY,
@@ -1191,11 +1196,66 @@ export class RayLinkStore {
     return normalizeRoutingPolicy(parseJson(row?.value, DEFAULT_ROUTING_POLICY));
   }
 
+  #aiUpstreamStoredSettings() {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'ai_upstream'").get();
+    if (!row) {
+      const { password, ...defaults } = DEFAULT_AI_UPSTREAM;
+      return { ...defaults, passwordEncrypted: "" };
+    }
+    try { return JSON.parse(row.value); }
+    catch { throw aiUpstreamSecretError(); }
+  }
+
+  aiUpstreamSettings() {
+    return publicAiUpstreamSettings(this.#aiUpstreamStoredSettings());
+  }
+
+  aiUpstreamRuntimeSettings() {
+    const { passwordEncrypted, ...settings } = this.#aiUpstreamStoredSettings();
+    return { ...settings, password: decryptAiUpstreamSecret(passwordEncrypted, this.subscriptionEncryptionKey, "settings:local") };
+  }
+
+  updateAiUpstreamSettings(input = {}) {
+    this.db.exec("SAVEPOINT update_ai_upstream");
+    try {
+      let previous, replacingUnavailableSecret = false;
+      try { previous = this.aiUpstreamRuntimeSettings(); }
+      catch (error) {
+        const suppliedReplacement = typeof input?.password === "string" && input.password.length > 0;
+        if (error.code !== "AI_UPSTREAM_SECRET_UNAVAILABLE" || (!suppliedReplacement && input?.clearPassword !== true)) throw error;
+        const { passwordEncrypted, ...metadata } = this.#aiUpstreamStoredSettings();
+        previous = { ...metadata, password: "" };
+        replacingUnavailableSecret = true;
+      }
+      const next = normalizeAiUpstreamSettings(input, previous);
+      if (replacingUnavailableSecret) next.revision = previous.revision + 1;
+      if (!this.getHost("local")) throw domainError("HOST_NOT_FOUND", "本地主机不存在", 404);
+      if (next.revision !== previous.revision) {
+        const { password, ...metadata } = next;
+        const stored = { ...metadata,
+          passwordEncrypted: encryptAiUpstreamSecret(password, this.subscriptionEncryptionKey, "settings:local") };
+        this.db.prepare(`INSERT INTO settings(key,value,updated_at) VALUES ('ai_upstream',?,?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`)
+          .run(JSON.stringify(stored), nowIso());
+      }
+      if (next.enabled) this.updateRoutingPolicy({ ...this.routingPolicy(), mode: "smart", aiExit: { mode: "pinned", hostId: "local" } });
+      this.db.exec("RELEASE update_ai_upstream");
+      return publicAiUpstreamSettings(next);
+    } catch (error) {
+      this.db.exec("ROLLBACK TO update_ai_upstream; RELEASE update_ai_upstream");
+      throw error;
+    }
+  }
+
   updateRoutingPolicy(input = {}) {
     const policy = normalizeRoutingPolicy({
       ...input,
       aiExit: input.aiExit === undefined ? this.routingPolicy().aiExit : input.aiExit
     });
+    if (this.aiUpstreamSettings().enabled && (policy.mode !== "smart"
+      || policy.aiExit.mode !== "pinned" || policy.aiExit.hostId !== "local")) {
+      throw domainError("AI_UPSTREAM_ROUTING_CONFLICT", "AI 上游启用期间须保留智能模式并固定本地主机，请先禁用上游", 409);
+    }
     if (policy.aiExit.mode === "pinned" && !this.getHost(policy.aiExit.hostId)) {
       throw domainError("INVALID_AI_EXIT", "固定的 AI 出口主机不存在", 422);
     }
@@ -2824,7 +2884,8 @@ export class RayLinkStore {
       host,
       masterPassword: setting.value,
       users,
-      protocols: this.listHostProtocolConfigs(hostId)
+      protocols: this.listHostProtocolConfigs(hostId),
+      ...(hostId === "local" ? { aiUpstream: this.aiUpstreamRuntimeSettings() } : {})
     };
   }
 
@@ -2936,11 +2997,12 @@ export class RayLinkStore {
       id,
       version,
       JSON.stringify({
-        config: configJson,
+        config: protectAiUpstreamConfig(configJson, this.subscriptionEncryptionKey, `deployment:${id}:local`),
         checksum,
         eligibleUsers,
         protocols,
-        hostSnapshots
+        hostSnapshots: hostSnapshots.map((snapshot) => ({ ...snapshot,
+          config: protectAiUpstreamConfig(snapshot.config, this.subscriptionEncryptionKey, `deployment:${id}:host:${snapshot.hostId}`) }))
       }),
       publisherAdminId,
       nowIso()
@@ -3080,11 +3142,12 @@ export class RayLinkStore {
       id: row.id,
       version: row.version,
       status: row.status,
-      config: metadata.config,
+      config: revealAiUpstreamConfig(metadata.config, this.subscriptionEncryptionKey, `deployment:${id}:local`),
       checksum: metadata.checksum,
       eligibleUsers: metadata.eligibleUsers,
       protocols,
-      hostSnapshots: Array.isArray(metadata.hostSnapshots) ? metadata.hostSnapshots : []
+      hostSnapshots: Array.isArray(metadata.hostSnapshots) ? metadata.hostSnapshots.map((snapshot) => ({ ...snapshot,
+        config: revealAiUpstreamConfig(snapshot.config, this.subscriptionEncryptionKey, `deployment:${id}:host:${snapshot.hostId}`) })) : []
     };
   }
 

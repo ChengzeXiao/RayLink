@@ -55,6 +55,25 @@ function deploymentCandidateMatchesSnapshot(candidate, snapshot) {
   return [...expectedHosts].every(([hostId, checksum]) => activeHosts.get(hostId) === checksum);
 }
 
+function redactUpstreamFailure(error, ...configs) {
+  const upstreams = configs.flatMap(config => (config?.outbounds || []).filter(outbound => outbound.tag === "ai-residential"));
+  if (!upstreams.some(upstream => upstream.password)) return error;
+  const values = upstreams.flatMap(upstream => [upstream.password, upstream.username]).filter(Boolean);
+  const secrets = [...new Set(values.flatMap(value => [
+    value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value), Buffer.from(value).toString("base64")
+  ]).concat(upstreams.filter(upstream => upstream.password).map(upstream => Buffer.from(`${upstream.username || ""}:${upstream.password}`).toString("base64"))))]
+    .sort((left, right) => right.length - left.length);
+  const redact = value => secrets.reduce((text, secret) => text.replaceAll(secret, "[redacted]"), String(value));
+  // Construct a fresh stack and copy only known safe metadata: native process
+  // errors may carry stdout, stderr, argv or a cause containing raw config.
+  const sanitized = new Error(redact(error?.message || "Runtime publication failed"));
+  if (typeof error?.code === "string") sanitized.code = redact(error.code);
+  if (Number.isInteger(error?.statusCode)) sanitized.statusCode = error.statusCode;
+  if (typeof error?.rolledBack === "boolean") sanitized.rolledBack = error.rolledBack;
+  if (error?.rollbackError) sanitized.rollbackError = redact(error.rollbackError);
+  return sanitized;
+}
+
 export class RuntimeManager {
   constructor({ store, adapter, listenPort = 8388, tlsAssetPackager = null, runtimeDns }) {
     this.store = store;
@@ -282,8 +301,12 @@ export class RuntimeManager {
     version,
     publisherAdminId
   }) {
-    let deploymentId;
+    let deploymentId, previousConfig;
     try {
+      // A restart rollback can report credentials from the previous snapshot,
+      // including when this publication disables or rotates the upstream.
+      const active = this.store.listDeployments?.(100)?.find(deployment => deployment.status === "active");
+      if (active && this.store.deploymentSnapshot) previousConfig = this.store.deploymentSnapshot(active.id)?.config;
       deploymentId = this.store.createDeployment({
         version,
         configJson: config,
@@ -304,13 +327,14 @@ export class RuntimeManager {
         runtime
       };
     } catch (error) {
+      const safeError = redactUpstreamFailure(error, config, previousConfig);
       if (deploymentId) this.store.finishDeployment(deploymentId, {
         status: "failed",
-        error: error.rollbackError
-          ? `${error.message}；恢复失败：${error.rollbackError}`
-          : error.message
+        error: safeError.rollbackError
+          ? `${safeError.message}；恢复失败：${safeError.rollbackError}`
+          : safeError.message
       });
-      throw error;
+      throw safeError;
     }
   }
 

@@ -109,6 +109,31 @@ test("MCP can pin AI to a stable Host ID and older policy writes preserve the pi
   })).status, 422);
 });
 
+test("MCP AI upstream writes are scoped and replay without re-publishing or exposing proxy credentials", async (t) => {
+  const f = await fixture(t);
+  const { client: reader } = await connect(t, f, ["read"]);
+  const names = (await reader.listTools()).tools.map((item) => item.name);
+  assert.ok(names.includes("routing_ai_upstream_get"));
+  assert.ok(!names.includes("routing_ai_upstream_update"));
+  assert.ok(!names.includes("routing_ai_upstream_publish"));
+  const { client } = await connect(t, f, ["read", "runtime.manage"]);
+  const args = { requestId: "save-ai-upstream", enabled: true, type: "socks5", server: "proxy.example.com", port: 1080,
+    username: "proxy-user", password: "private-residential-password" };
+  const first = await client.callTool({ name: "routing_ai_upstream_update", arguments: args });
+  assert.ok(!first.isError, JSON.stringify(first));
+  assert.equal(output(first).upstream.passwordConfigured, true);
+  assert.equal(output(first).runtimeSync.status, "simulated");
+  const deployments = output(await client.callTool({ name: "deployments_list", arguments: {} })).deployments.length;
+  assert.deepEqual(output(await client.callTool({ name: "routing_ai_upstream_update", arguments: args })), output(first));
+  assert.equal(output(await client.callTool({ name: "deployments_list", arguments: {} })).deployments.length, deployments);
+  const observed = output(await reader.callTool({ name: "routing_ai_upstream_get", arguments: {} }));
+  assert.equal(observed.upstream.enabled, true);
+  assert.doesNotMatch(JSON.stringify(observed), /private-residential-password/);
+  await assert.rejects(reader.callTool({ name: "routing_ai_upstream_update", arguments: { requestId: "denied", enabled: false } }),
+    (error) => error.code === -32602);
+  assert.equal(output(await reader.callTool({ name: "routing_ai_upstream_get", arguments: {} })).upstream.enabled, true);
+});
+
 test("official MCP client discovers scoped tools and creates a User through the same entitlement workflow", async (t) => {
   const f = await fixture(t);
   const { client } = await connect(t, f, ["read", "users.manage"]);
@@ -238,7 +263,7 @@ test("Agent manages routing, certificates, protocol publication and rollback, ba
     installer: { async status() { return { installed: true, version: "1.14.2", platform: "linux", architecture: "amd64", tags: ["with_quic", "with_utls", "with_acme"] }; } }
   });
   const { client } = await connect(t, f, ["read", "users.manage", "runtime.manage", "hosts.provision", "system.manage", "admins.manage", "audit.read", "secrets.read"]);
-  assert.equal((await client.listTools()).tools.length, 57);
+  assert.equal((await client.listTools()).tools.length, 60);
   let sequence = 0;
   const call = async (name, args = {}, write = false) => {
     const response = await client.callTool({ name, arguments: { ...args, ...(write ? { requestId: `workflow-${++sequence}` } : {}) } });
