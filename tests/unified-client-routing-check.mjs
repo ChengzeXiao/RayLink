@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { once } from "node:events";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import { buildSubscriptionArtifact, stringifyYaml } from "../server/subscription
 
 const run = promisify(execFile);
 const binary = process.env.MIHOMO_BIN || "mihomo";
+const deferredStartup = process.argv.includes("--deferred-startup");
 const directory = await mkdtemp(join(tmpdir(), "raylink-unified-routing-"));
 const fixtures = new Map();
 const resolvers = [];
@@ -27,6 +28,8 @@ let log = "";
 let base;
 let mixedPort;
 let requestNumber = 0;
+let pendingStartup;
+let startupFailure;
 
 async function listen(server) {
   server.listen(0, "127.0.0.1");
@@ -67,6 +70,54 @@ async function api(path, body) {
 async function select(group, name) {
   await api(`/proxies/${encodeURIComponent(group)}`, { name });
   assert.equal((await api(`/proxies/${encodeURIComponent(group)}`)).now, name);
+}
+
+async function waitForProfile(format, nodes, aiNodes) {
+  // Mihomo starts its controller before executor.ApplyConfig installs proxies,
+  // listeners and providers. /version alone therefore says nothing about the
+  // requested profile. Keep the strict membership assertions below this gate.
+  const groups = ["AI 网站代理", "未分类流量", "RayLink 代理", "手动选择"];
+  const paths = ["/configs", "/proxies", "/providers/rules", ...(format === "mihomo-modern" ? ["/providers/proxies"] : [])];
+  let observed = {};
+  const requireRunning = () => {
+    if (startupFailure) throw startupFailure;
+    if (core.exitCode !== null || core.signalCode !== null || core.pid === undefined) {
+      throw new Error(`Mihomo exited before profile readiness (code=${core.exitCode}, signal=${core.signalCode})\n${log.slice(-3000)}`);
+    }
+  };
+  try {
+    await waitFor(async () => {
+      requireRunning();
+      const results = await Promise.all(paths.map(async (path) => {
+        try {
+          const response = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(1000) });
+          if (!response.ok) { await response.body?.cancel(); return { path, status: response.status }; }
+          return { path, status: response.status, value: await response.json() };
+        } catch { return { path, status: "unavailable" }; }
+      }));
+      requireRunning();
+      const values = Object.fromEntries(results.map(({ path, value }) => [path, value]));
+      const proxies = values["/proxies"]?.proxies || {};
+      const providerNodes = values["/providers/proxies"]?.providers?.["raylink-health"]?.proxies?.map(({ name }) => name) || [];
+      const rules = values["/providers/rules"]?.providers || {};
+      observed = {
+        statuses: Object.fromEntries(results.map(({ path, status }) => [path, status])),
+        missingGroups: groups.filter((name) => !Array.isArray(proxies[name]?.all) || !proxies[name].all.length),
+        missingNodes: nodes.filter((name) => !proxies[name]),
+        aiCandidates: proxies["AI 网站代理"]?.all || [],
+        providerCandidates: providerNodes,
+        ruleCounts: ["raylink-cn-domain", "raylink-cn-ip"].map((name) => rules[name]?.ruleCount || 0),
+        listenerReady: values["/configs"]?.["mixed-port"] === mixedPort
+      };
+      return results.every(({ status }) => status === 200)
+        && observed.listenerReady && !observed.missingGroups.length && !observed.missingNodes.length
+        && aiNodes.every((name) => observed.aiCandidates.includes(name))
+        && (format !== "mihomo-modern" || nodes.every((name) => providerNodes.includes(name)))
+        && observed.ruleCounts.every((count) => count > 0);
+    }, "Native Mihomo profile did not become ready", 10000);
+  } catch (error) {
+    throw new Error(`${format}: profile startup state ${JSON.stringify(observed)}\n${error.message}`, { cause: error });
+  }
 }
 
 // HTTP proxies return distinct payloads and retain request records. A stopped
@@ -193,6 +244,7 @@ try {
 
   for (const format of ["mihomo", "mihomo-modern"]) {
     const formatDir = join(directory, format);
+    await mkdir(formatDir, { mode: 0o700 });
     for (const [name, marker] of [[aiFirst, "AI_FIRST"], [aiChosen, "AI_CHOSEN"], [ordinary, "ORDINARY"]]) {
       const fixture = proxyFixture(name, marker);
       fixture.port = await listen(fixture.server);
@@ -220,11 +272,18 @@ try {
         stringifyYaml({ payload: fixtureProxies }).split("\n").filter(Boolean).map((line) => `    ${line}\n`).join(""));
     }
     assert.ok(!yaml.includes("fixture.invalid"), "Only the fixture transports may remain in the isolated native config");
-    const path = join(directory, `${format}.yaml`);
+    const path = join(formatDir, "config.yaml");
     await writeFile(path, yaml, { mode: 0o600 });
     await run(binary, ["-t", "-d", formatDir, "-f", path], { timeout: 10000 });
+    let startupPath = path;
+    if (deferredStartup && format === "mihomo-modern") {
+      // Make the controller/config readiness gap deterministic using the real
+      // native API, then load the unchanged generated profile shortly after.
+      startupPath = join(formatDir, "bootstrap.yaml");
+      await writeFile(startupPath, `external-controller: "127.0.0.1:${controllerPort}"\nlog-level: debug\nfind-process-mode: off\ngeo-auto-update: false\n`, { mode: 0o600 });
+    }
     log = "";
-    core = spawn(binary, ["-d", formatDir, "-f", path], { stdio: ["ignore", "pipe", "pipe"] });
+    core = spawn(binary, ["-d", formatDir, "-f", startupPath], { stdio: ["ignore", "pipe", "pipe"] });
     coreClosed = new Promise((resolve) => { core.once("exit", resolve); core.once("error", resolve); });
     const capture = (chunk) => { log = (log + chunk).slice(-16000); };
     core.stdout.on("data", capture);
@@ -234,6 +293,19 @@ try {
       if (core.exitCode !== null || core.signalCode !== null) throw new Error(log);
       try { return (await fetch(`${base}/version`, { signal: AbortSignal.timeout(1000) })).ok; } catch { return false; }
     }, "Native Mihomo controller did not start");
+    if (deferredStartup && format === "mihomo-modern") {
+      const absent = await fetch(`${base}/proxies/${encodeURIComponent("AI 网站代理")}`, { signal: AbortSignal.timeout(1000) });
+      assert.equal(absent.status, 404, "Controller-only bootstrap must not contain subscription groups");
+      await absent.body?.cancel();
+      console.log(JSON.stringify({ format, phase: "controller-before-profile", versionAvailable: true, aiGroupStatus: 404 }));
+      pendingStartup = delay(250).then(() => api("/configs?force=true", { path })).then(() => null, error => { startupFailure = error; return error; });
+    }
+    await waitForProfile(format, fixtureProxies.map(({ name }) => name), expectedAi);
+    if (pendingStartup) {
+      const failure = await pendingStartup;
+      pendingStartup = undefined;
+      if (failure) throw failure;
+    }
     const aiGroup = await api(`/proxies/${encodeURIComponent("AI 网站代理")}`);
     assert.equal(aiGroup.type, "Selector");
     assert.deepEqual(aiGroup.all, expectedAi, `${format}: AI provider membership must not add other Hosts or automatic groups`);
@@ -281,6 +353,7 @@ try {
   }
   console.log(JSON.stringify({ version, passed: true, scope: "synthetic native regression; not production or handset acceptance" }));
 } finally {
+  await pendingStartup;
   await stopCore();
   for (const fixture of fixtures.values()) await stopFixture(fixture);
   for (const { socket } of resolvers) socket.close();
