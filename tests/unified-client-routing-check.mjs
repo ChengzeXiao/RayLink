@@ -161,9 +161,12 @@ async function stopFixture(fixture) {
 
 async function resolver(name, address) {
   const socket = createSocket("udp4");
+  const queries = [];
   socket.on("message", (query, peer) => {
     let end = 12;
-    while (query[end]) end += query[end] + 1;
+    const labels = [];
+    while (query[end]) { const size = query[end++]; labels.push(query.toString("ascii", end, end + size)); end += size; }
+    const domain = labels.join(".");
     const isA = query.readUInt16BE(end + 1) === 1;
     end += 5;
     const header = Buffer.from(query.subarray(0, 12));
@@ -171,12 +174,14 @@ async function resolver(name, address) {
     header.writeUInt16BE(isA ? 1 : 0, 6);
     header.writeUInt16BE(0, 8);
     header.writeUInt16BE(0, 10);
-    const answer = Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4, ...address]);
+    const resolved = typeof address === "function" ? address(domain) : address;
+    if (isA) queries.push({ domain, address: resolved.join(".") });
+    const answer = Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4, ...resolved]);
     socket.send(Buffer.concat([header, query.subarray(12, end), ...(isA ? [answer] : [])]), peer.port, peer.address);
   });
   socket.bind(0, "127.0.0.1");
   await once(socket, "listening");
-  const result = { name, socket, endpoint: `udp://127.0.0.1:${socket.address().port}#DIRECT` };
+  const result = { name, socket, queries, endpoint: `udp://127.0.0.1:${socket.address().port}#DIRECT` };
   resolvers.push(result);
   return result;
 }
@@ -201,11 +206,11 @@ async function dnsAddress(domain, port) {
   } finally { clearTimeout(timer); client.close(); }
 }
 
-async function request(domain, targetPort, expected, rule, chains) {
+async function request(domain, targetPort, expected, rule, chains, address = domain) {
   // A delayed response lets us inspect this request's real native connection,
   // rather than infer its route from the exported YAML or marker alone.
   const pending = run("curl", ["--silent", "--show-error", "--fail", "--noproxy", "", "--max-time", "3",
-    "--socks5-hostname", `127.0.0.1:${mixedPort}`, `http://${domain}:${targetPort}/case-${++requestNumber}`], { timeout: 5000 });
+    "--socks5-hostname", `127.0.0.1:${mixedPort}`, `http://${address}:${targetPort}/case-${++requestNumber}`], { timeout: 5000 });
   const outcome = pending.then((result) => ({ result }), (error) => ({ error }));
   let connection;
   try {
@@ -218,6 +223,7 @@ async function request(domain, targetPort, expected, rule, chains) {
   }
   assert.equal(connection.rule, rule, `${domain}: incorrect native matching rule`);
   assert.deepEqual(connection.chains, chains, `${domain}: incorrect native strategy chain`);
+  return connection;
 }
 
 const origin = createServer((_request, response) => setTimeout(() => response.end("DIRECT"), 180));
@@ -229,8 +235,20 @@ try {
   // 0.0.0.0 connects only to the local origin while not matching the generated
   // private/CN CIDR rules. This preserves MATCH behavior without replacing any
   // routing rule, installing routes, or contacting an external test endpoint.
-  const remote = await resolver("remote", [0, 0, 0, 0]);
-  const aiDns = await resolver("ai", [0, 0, 0, 0]);
+  const geolocationCases = new Map([
+    ["unlisted-cloud-141.fixture.invalid", "8.141.181.226"],
+    ["unlisted-cloud-130.fixture.invalid", "8.130.1.1"],
+    ["unlisted-cloud-152.fixture.invalid", "8.152.1.1"],
+    ["unlisted-foreign.fixture.invalid", "1.1.1.1"]
+  ]);
+  const remote = await resolver("remote", (domain) => (geolocationCases.get(domain)
+    || (["www.google.com.hk", "forced-cloud.fixture.invalid"].includes(domain) ? "8.141.181.226" : "0.0.0.0")).split(".").map(Number));
+  const aiDns = await resolver("ai", [8, 141, 181, 226]);
+  // Only after DIRECT has matched, native direct-nameserver resolves its dial
+  // to this loopback origin. The first route lookup retains the real public
+  // geographic IP, so no OS routes, public TCP dials or routing-rule rewrites
+  // are needed. Both the HTTP response and native matching rule are required.
+  const directDial = await resolver("direct-dial", [127, 0, 0, 1]);
   const credential = { email: "fixture@example.invalid", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "fixture-only" };
   const profiles = defaultProtocolConfigs().filter(({ type }) => ["vmess", "vless"].includes(type)).map((profile) => ({ ...profile, enabled: true }));
   const hosts = [
@@ -253,13 +271,15 @@ try {
     const controllerPort = await unusedPort();
     const dnsPort = await unusedPort();
     base = `http://127.0.0.1:${controllerPort}`;
-    const routePolicy = { mode: "smart", aiSelection: "manual", aiExit: { mode: "pinned", hostId: "pinned" } };
+    const routePolicy = { mode: "smart", aiSelection: "manual", aiExit: { mode: "pinned", hostId: "pinned" }, rules: [
+      { match: "domain", value: "forced-cloud.fixture.invalid", action: "proxy", dns: "remote" }
+    ] };
     const generated = buildMultiHostProtocolClientConfig({ hosts, credential, probeUrl: `http://127.0.0.1:${targetPort}/health`, routePolicy });
     const exported = buildSubscriptionArtifact({ format, singBoxConfig: generated, routePolicy }).body;
     const fixtureProxies = [...fixtures.values()].map(({ name, port }) => ({ name, type: "http", server: "127.0.0.1", port }));
     let yaml = exported.replace(/^mixed-port:.*$/m, `mixed-port: ${mixedPort}\nexternal-controller: "127.0.0.1:${controllerPort}"\nfind-process-mode: off\ngeo-auto-update: false`)
       .replace('log-level: "info"', 'log-level: "debug"')
-      .replace('  enhanced-mode: "fake-ip"', `  enhanced-mode: "fake-ip"\n  listen: "127.0.0.1:${dnsPort}"`)
+      .replace('  enhanced-mode: "fake-ip"', `  enhanced-mode: "fake-ip"\n  listen: "127.0.0.1:${dnsPort}"\n  direct-nameserver: ["${directDial.endpoint}"]\n  direct-nameserver-follow-policy: false`)
       .replaceAll("https://223.5.5.5/dns-query", domestic.endpoint)
       .replaceAll("https://1.1.1.1/dns-query#AI 网站代理", aiDns.endpoint)
       .replaceAll("https://1.1.1.1/dns-query#RayLink 代理", remote.endpoint)
@@ -271,7 +291,7 @@ try {
       yaml = yaml.replace(/    payload:\n[\s\S]*?(?=    health-check:\n)/,
         stringifyYaml({ payload: fixtureProxies }).split("\n").filter(Boolean).map((line) => `    ${line}\n`).join(""));
     }
-    assert.ok(!yaml.includes("fixture.invalid"), "Only the fixture transports may remain in the isolated native config");
+    assert.doesNotMatch(yaml, /\bserver: "(?:pinned|other)\.fixture\.invalid"/, "Only loopback fixture transports may remain in the isolated native config");
     const path = join(formatDir, "config.yaml");
     await writeFile(path, yaml, { mode: 0o600 });
     await run(binary, ["-t", "-d", formatDir, "-f", path], { timeout: 10000 });
@@ -318,6 +338,30 @@ try {
     await select("RayLink 代理", "手动选择");
     await select("AI 网站代理", aiChosen);
 
+    // A geographical answer must not steal explicit AI, overseas or custom
+    // rules. Prime and inspect native DNS before exercising those routes.
+    for (const domain of ["chatgpt.com", "www.google.com.hk", "forced-cloud.fixture.invalid"]) {
+      const answer = await api(`/dns/query?name=${domain}&type=A`);
+      assert.equal(answer.Status, 0);
+      assert.ok(answer.Answer?.some(({ data }) => data === "8.141.181.226"), `${domain}: priority fixture must resolve to a geographical CN IP`);
+    }
+
+    for (const [domain, address] of geolocationCases) {
+      const domesticIp = address !== "1.1.1.1";
+      const fakeIp = await dnsAddress(domain, dnsPort);
+      assert.match(fakeIp, /^198\.18\./, `${domain}: must use native fake-IP recovery`);
+      const connection = await request(domain, targetPort, domesticIp ? "DIRECT" : "ORDINARY", domesticIp ? "RuleSet" : "Match",
+        domesticIp ? ["DIRECT"] : [ordinary, "手动选择", "RayLink 代理", "未分类流量"], fakeIp);
+      assert.ok(remote.queries.some((query) => query.domain === domain && query.address === address), `${domain}: route lookup must receive ${address}`);
+      if (domesticIp) {
+        assert.equal(connection.rulePayload, "raylink-cn-ip", `${domain}: must match the bundled geographic IP provider`);
+        assert.ok(directDial.queries.some((query) => query.domain === domain), `${domain}: direct dial must remain on the loopback fixture`);
+      }
+    }
+    await request("forced-cloud.fixture.invalid", targetPort, "ORDINARY", "Domain", [ordinary, "手动选择", "RayLink 代理"]);
+    assert.equal((await api(`/proxies/${encodeURIComponent("AI 网站代理")}`)).now, aiChosen);
+    assert.equal((await api(`/proxies/${encodeURIComponent("未分类流量")}`)).now, "RayLink 代理");
+
     for (const domain of ["localhost", "printer.lan", "router.local", "router.home.arpa"]) {
       assert.equal(await dnsAddress(domain, dnsPort), "127.0.0.1", `${format}: ${domain} must avoid fake-IP`);
     }
@@ -346,7 +390,8 @@ try {
     await request("www.google.com.hk", targetPort, "ORDINARY", "DomainSuffix", [ordinary, "手动选择", "RayLink 代理"]);
     await request("unlisted-domestic-fixture.cn", targetPort, "DIRECT", "DomainSuffix", ["DIRECT"]);
     console.log(JSON.stringify({ format, manualAiMembership: expectedAi, unknownSwitchIsolated: true, lanFakeIpExcluded: true,
-      aiOutageDoesNotChangeNode: true, realNativeConnections: 14, scope: "loopback fixtures only" }));
+      aiOutageDoesNotChangeNode: true, geographicCnCloudIps: [...geolocationCases.values()].filter((address) => address !== "1.1.1.1"),
+      foreignIpRetainsUnknownGroup: true, realNativeConnections: 19, scope: "loopback fixtures only" }));
     await stopCore();
     for (const fixture of fixtures.values()) await stopFixture(fixture);
     fixtures.clear();

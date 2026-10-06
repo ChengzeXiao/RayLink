@@ -16,7 +16,12 @@ import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
 const chinaFallbackSuffixes = CHINA_FALLBACK_DOMAIN_SUFFIXES.map(suffix => suffix.replace(/^\./, ""));
 
 const bundledRulesVersion = JSON.parse(readFileSync(new URL("../routing/rule-sets/manifest.json", import.meta.url))).version;
-const bundledRulesComment = `# 智能分流内置规则版本: ${bundledRulesVersion}\n# 随 RayLink 应用发布更新；单独更新主控 SRS 清单不会刷新此内置基线。\n`;
+const bundledRulesComment = `# 智能分流内置规则版本: ${bundledRulesVersion}\n`
+  + "# 随 RayLink 应用发布更新；单独更新主控 SRS 清单不会刷新此内置基线。\n"
+  + "# IP Geolocation by DB-IP: https://db-ip.com — CC BY 4.0: https://creativecommons.org/licenses/by/4.0/\n"
+  + "# CN ranges selected and converted by RayLink; data is provided without warranties.\n"
+  + "# Domestic domains: https://github.com/SagerNet/sing-geosite — GPL-3.0-or-later: https://www.gnu.org/licenses/gpl-3.0.html\n"
+  + "# Full source, adaptation and license notices: /rule-sets/attribution.txt on the subscription server.\n";
 
 // sing-box leading-dot suffixes match subdomains only. Preserve that distinction
 // when compiling clients whose native suffix rule also includes the apex.

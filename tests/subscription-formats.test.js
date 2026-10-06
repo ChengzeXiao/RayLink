@@ -4,6 +4,25 @@ import test from "node:test";
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 import { buildMultiHostProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
 
+test("full YAML profiles carry reusable routing data attribution without changing native configuration", () => {
+  for (const format of ["mihomo", "mihomo-modern", "egern-profile"]) {
+    const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;
+    const comments = body.split("\n").filter((line) => line.startsWith("#")).join("\n");
+    assert.ok(comments.includes("IP Geolocation by DB-IP: https://db-ip.com"), `${format}: missing IP data creator`);
+    assert.ok(comments.includes("https://creativecommons.org/licenses/by/4.0/"), `${format}: missing IP data license`);
+    assert.ok(comments.includes("CN ranges selected and converted by RayLink"), `${format}: missing adaptation notice`);
+    assert.ok(comments.includes("https://github.com/SagerNet/sing-geosite"), `${format}: missing domestic domain source`);
+    assert.ok(comments.includes("https://www.gnu.org/licenses/gpl-3.0.html"), `${format}: missing domestic domain license`);
+    assert.ok(comments.includes("/rule-sets/attribution.txt"), `${format}: missing full notice reference`);
+  }
+  for (const format of ["egern", "loon"]) {
+    const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;
+    assert.ok(!body.includes("DB-IP"), `${format}: node-only exports do not include bundled routing data`);
+  }
+  const native = JSON.parse(buildSubscriptionArtifact({ format: "singbox", singBoxConfig }).body);
+  assert.deepEqual(native, singBoxConfig, "JSON attribution must be delivered beside the file, without unsupported configuration fields");
+});
+
 test("full smart profiles expose a manual unclassified group after all domain and IP rules", () => {
   for (const format of ["mihomo", "mihomo-modern", "egern-profile"]) {
     const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "version": "cn-a9958574-5605651c",
-  "publishedAt": "2026-10-01T00:00:00Z",
-  "description": "Complete geolocation-cn domain and CN IP baseline from previously pinned SagerNet commits; packaging date is not upstream freshness.",
+  "version": "cn-a9958574-dbip-202610-097426b8",
+  "publishedAt": "2026-10-06T00:00:00Z",
+  "description": "Pinned SagerNet geolocation-cn domains with DB-IP Country Lite October 2026 geographical CN addresses; packaging date is not source freshness.",
   "rules": [
     {
       "filename": "geosite-geolocation-cn.srs",
@@ -19,14 +19,80 @@
     },
     {
       "filename": "geoip-cn.srs",
-      "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/5605651c12ed5b2fcf3b5de580c041eb9d8d938e/geoip-cn.srs",
-      "sha256": "bc1a9eb66f9c6a0fe9fc5300cf5b5e885e0f9eadd7213b085b767a95d6af3d2a",
-      "bytes": 33920,
-      "statistics": {
-        "ip_cidr": 7774
-      },
+      "delivery": "bundled",
+      "sha256": "474a9ead467a995699fccc4e7568b4e3c8cca5dc63eb3d03317a41a4a17a8a39",
+      "bytes": 56795,
       "jsonFilename": "geoip-cn.json",
-      "jsonSha256": "9c5ade468337a9589e55c61fac536d52f951eff4b7eae291ff2af655fcba5161"
+      "jsonSha256": "a325e1fa3d86489bd210ee9783c89ffce7d5a05897574ae693461b7346a9d779",
+      "statistics": {
+        "ip_cidr": 15365
+      },
+      "source": {
+        "format": "dbip-country-lite-csv-gzip",
+        "provider": "DB-IP",
+        "edition": "IP to Country Lite",
+        "release": "2026-10",
+        "publishedAt": "2026-10-01T00:00:00Z",
+        "url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz",
+        "sha256": "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80",
+        "bytes": 4491785,
+        "uncompressedSha256": "53864a68fbfef02c27c717d08d431a6d453e9e00e77d9e8da841d382267fca88",
+        "uncompressedBytes": 31210433,
+        "upstreamSha1": "c8ad1dfe98cb29bcacd82a5c3ec361c880e5bb59",
+        "records": 710834,
+        "selection": "country=CN",
+        "semantics": "IP geolocation country; never ISP registration or ASN ownership",
+        "documentationUrl": "https://db-ip.com/db/format/ip-to-country-lite/csv.html",
+        "attributionUrl": "https://db-ip.com",
+        "license": "CC-BY-4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+        "validationCases": [
+          {
+            "ip": "8.141.181.226",
+            "domestic": true
+          },
+          {
+            "ip": "8.142.1.1",
+            "domestic": true
+          },
+          {
+            "ip": "114.114.114.114",
+            "domestic": true
+          },
+          {
+            "ip": "223.5.5.5",
+            "domestic": true
+          },
+          {
+            "ip": "2400:3200::1",
+            "domestic": true
+          },
+          {
+            "ip": "8.8.8.8",
+            "domestic": false
+          },
+          {
+            "ip": "1.1.1.1",
+            "domestic": false
+          },
+          {
+            "ip": "47.88.0.1",
+            "domestic": false
+          },
+          {
+            "ip": "104.18.32.7",
+            "domestic": false
+          },
+          {
+            "ip": "160.79.104.10",
+            "domestic": false
+          },
+          {
+            "ip": "2606:4700:4700::1111",
+            "domestic": false
+          }
+        ]
+      }
     }
   ]
 }

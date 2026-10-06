@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ManagedRuleSetCache } from "../server/singbox/rule-set-cache.js";
+import { ManagedRuleSetCache, validateRuleSetManifest } from "../server/singbox/rule-set-cache.js";
 
 const filenames = ["geosite-geolocation-cn.srs", "geoip-cn.srs"];
 async function directory(t) {
@@ -32,6 +32,9 @@ async function candidate(t) {
   for (let i = 0; i < filenames.length; i++) {
     const bytes = await readFile(new URL(`../server/routing/rule-sets/${filenames[1-i]}`, import.meta.url));
     const rule = manifest.rules[i];
+    delete rule.delivery;
+    delete rule.source;
+    rule.url = `https://raw.githubusercontent.com/SagerNet/sing-${i ? "geoip" : "geosite"}/${"a".repeat(40)}/${filenames[i]}`;
     rule.bytes = bytes.length;
     rule.sha256 = createHash("sha256").update(bytes).digest("hex");
     payloads.set(rule.url, bytes);
@@ -40,6 +43,57 @@ async function candidate(t) {
   await writeFile(path, JSON.stringify(manifest));
   return { path, manifest, payloads };
 }
+
+async function geographicalManifest() {
+  const manifest = JSON.parse(await readFile(new URL("../server/routing/rule-sets/manifest.json", import.meta.url)));
+  const ip = manifest.rules.find(rule => rule.filename === "geoip-cn.srs");
+  delete ip.url;
+  ip.delivery = "bundled";
+  ip.source = JSON.parse(await readFile(new URL("../server/routing/rule-sets/country-source.json", import.meta.url)));
+  return manifest;
+}
+
+test("generated country bundles accept only the reviewed source format and pinned monthly artifact", async () => {
+  const manifest = await geographicalManifest();
+  assert.equal(validateRuleSetManifest(manifest), manifest);
+  for (const patch of [
+    { url: "http://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz" },
+    { url: "https://download.db-ip.com/free/dbip-country-lite-latest.csv.gz" },
+    { url: "https://download.db-ip.com.evil.test/free/dbip-country-lite-2026-10.csv.gz" },
+    { selection: "registered_country=CN" }, { sha256: "unverified" }, { bytes: 0 }
+  ]) {
+    const invalid = structuredClone(manifest);
+    Object.assign(invalid.rules[1].source, patch);
+    assert.throws(() => validateRuleSetManifest(invalid), /Invalid approved rule-set source/);
+  }
+  const wrongTarget = structuredClone(manifest);
+  Object.assign(wrongTarget.rules[0], { delivery: "bundled", source: manifest.rules[1].source });
+  delete wrongTarget.rules[0].url;
+  assert.throws(() => validateRuleSetManifest(wrongTarget), /Invalid approved rule-set source/);
+});
+
+test("a missing generated candidate keeps the last good set without downloading CSV as SRS", async (t) => {
+  const dataDir = await directory(t);
+  const previous = new ManagedRuleSetCache({ dataDir });
+  await previous.prepare();
+  const manifest = await geographicalManifest();
+  manifest.version = "missing-reviewed-geographical-bundle";
+  manifest.rules[1].sha256 = "f".repeat(64);
+  const manifestPath = join(dataDir, "approved.json");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  let requests = 0;
+  const upgraded = new ManagedRuleSetCache({ dataDir, manifestPath, fetchImpl: async () => {
+    requests++;
+    throw new Error("must not fetch source CSV at runtime");
+  } });
+  await upgraded.prepare();
+  assert.equal(upgraded.status().version, previous.status().version);
+  assert.equal(upgraded.status().desiredVersion, manifest.version);
+  assert.equal(upgraded.status().degraded, true);
+  assert.match(upgraded.status().lastError, /requires the reviewed application bundle/);
+  assert.equal(requests, 0);
+  assert.deepEqual(await upgraded.get("geoip-cn.srs"), await previous.get("geoip-cn.srs"));
+});
 test("a failed candidate keeps the complete previous version and successful update survives restart", async (t) => {
   const dataDir = await directory(t);
   const update = await candidate(t);
@@ -114,12 +168,32 @@ test("restart rejects a corrupt new generation and retains the last good approve
 test("checksum-rejected candidate never publishes a partial rule set", async (t) => {
   const update = await candidate(t);
   const cache = new ManagedRuleSetCache({ dataDir: await directory(t), manifestPath: update.path,
-    fetchImpl: async () => new Response("SRS-unapproved-content") });
+    fetchImpl: async (url) => {
+      const corrupt = Buffer.from(update.payloads.get(url));
+      corrupt[corrupt.length - 1] ^= 1;
+      return new Response(corrupt);
+    } });
   await cache.prepare();
   assert.equal(cache.available(), true);
   assert.notEqual(cache.status().version, update.manifest.version);
   assert.match(cache.status().lastError, /checksum/);
   assert.equal(await cache.get("../../private"), null);
+});
+
+test("an oversized approved download is cancelled while the complete previous cache remains available", async (t) => {
+  const update = await candidate(t);
+  let cancellations = 0;
+  const cache = new ManagedRuleSetCache({ dataDir: await directory(t), manifestPath: update.path,
+    fetchImpl: async (url) => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(update.payloads.get(url).length + 1)); },
+      cancel() { cancellations++; }
+    })) });
+  await cache.prepare();
+  assert.equal(cache.available(), true);
+  assert.notEqual(cache.status().version, update.manifest.version);
+  assert.match(cache.status().lastError, /response exceeds approved size/);
+  assert.equal(cancellations, 1);
+  for (const name of filenames) assert.deepEqual(await cache.get(name), await readFile(new URL(`../server/routing/rule-sets/${name}`, import.meta.url)));
 });
 
 test("offline restart reports repairing a corrupt bundled cache generation", async (t) => {

@@ -1,0 +1,38 @@
+RayLink routing data attribution
+
+IP Geolocation by DB-IP: https://db-ip.com
+
+The domestic IP ranges included in full client profiles and geoip-cn.srs are
+derived from the DB-IP IP to Country Lite database. The edition, source URL,
+verified hashes and coverage review for each release are recorded at:
+https://github.com/Zane-SI/RayLink/tree/main/server/routing/rule-sets
+
+Source and publication: https://db-ip.com/db/download/ip-to-country-lite
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+Full legal text: https://creativecommons.org/licenses/by/4.0/legalcode.en
+
+Changes by RayLink: selected geographical country=CN records, normalized
+their exact IPv4/IPv6 ranges, and converted them to native rule sets and
+client configuration formats. No registration-country or ASN-wide fallback
+is added. DB-IP does not endorse RayLink. Retain this attribution and the
+license reference when sharing these data or their adaptations.
+
+Domestic domain data: SagerNet sing-geosite
+https://github.com/SagerNet/sing-geosite
+Copyright (C) 2022 by nekohasekai.
+The original data and RayLink's domain-format conversions are distributed
+under GNU General Public License version 3 or, at your option, any later
+version (GPL-3.0-or-later):
+https://www.gnu.org/licenses/gpl-3.0.html
+Source, exact upstream revision and retained notices:
+https://github.com/Zane-SI/RayLink/tree/main/server/routing/rule-sets
+
+These data are provided without warranties, including accuracy or fitness
+for a particular purpose. Geolocation and domain classifications can be
+incomplete or incorrect and do not guarantee connectivity. The full license
+terms govern; this notice does not add restrictions or replace those terms.
+
+Node-only subscriptions contain no bundled routing database. This notice
+licenses the routing data only; it grants no rights to private node access
+credentials, accounts or traffic entitlements.
