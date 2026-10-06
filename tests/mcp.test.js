@@ -95,15 +95,17 @@ test("MCP can pin AI to a stable Host ID and older policy writes preserve the pi
   const f = await fixture(t);
   const { client } = await connect(t, f, ["read", "runtime.manage"]);
   const saved = await client.callTool({ name: "routing_update", arguments: {
-    requestId: "pin-ai-host", mode: "smart", rules: [], aiExit: { mode: "pinned", hostId: "local" }
+    requestId: "pin-ai-host", mode: "smart", rules: [], aiSelection: "manual", aiExit: { mode: "pinned", hostId: "local" }
   } });
   assert.ok(!saved.isError, JSON.stringify(saved));
   assert.deepEqual(output(saved).aiExit, { mode: "pinned", hostId: "local" });
+  assert.equal(output(saved).aiSelection, "manual");
   const legacy = await client.callTool({ name: "routing_update", arguments: {
     requestId: "legacy-policy-save", mode: "smart", rules: []
   } });
   assert.ok(!legacy.isError, JSON.stringify(legacy));
   assert.deepEqual(output(legacy).aiExit, { mode: "pinned", hostId: "local" });
+  assert.equal(output(legacy).aiSelection, "manual");
   assert.equal((await f.api("/api/settings/routing", "PATCH", {
     mode: "smart", rules: [], aiExit: { mode: "pinned", hostId: "missing" }
   })).status, 422);

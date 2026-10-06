@@ -36,7 +36,7 @@ test("both full Mihomo exports preserve the same domestic fallback in DNS and ro
     const routes = body.split("\nrules:\n")[1];
     assert.ok(routes.indexOf("DOMAIN-SUFFIX,cn,DIRECT") > routes.indexOf("DOMAIN-SUFFIX,google.com,RayLink 代理"), format);
     assert.ok(routes.indexOf("DOMAIN-SUFFIX,cn,DIRECT") < routes.indexOf("RULE-SET,raylink-cn-domain,DIRECT"), format);
-    assert.ok(routes.endsWith('"MATCH,RayLink 代理"\n'), "unknown overseas traffic keeps its default proxy");
+    assert.ok(routes.endsWith('"MATCH,未分类流量"\n'), "unclassified traffic uses its selector after domestic classification");
   }
 });
 

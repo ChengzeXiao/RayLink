@@ -1759,7 +1759,7 @@ test("user creates a stable subscription URL and rotating it revokes the old URL
   assert.match(subscriptionEtag, /^"[a-f0-9]{64}"$/);
   const subscriptionConfig = await subscriptionResponse.json();
   assert.equal(subscriptionConfig.inbounds[0].type, "tun");
-  assert.equal(subscriptionConfig.route.final, "raylink-auto");
+  assert.equal(subscriptionConfig.route.final, "raylink-unknown");
   const notModifiedResponse = await fetch(`${testApp.baseUrl}${firstSingBoxPath}`, {
     headers: { "if-none-match": subscriptionEtag }
   });
@@ -1885,13 +1885,13 @@ test("one universal subscription URL negotiates Mihomo, Loon, Egern and sing-box
   const singBox = await fetch(`${testApp.baseUrl}${subscription.pathname}?format=singbox`);
   assert.equal(singBox.status, 200);
   assert.match(singBox.headers.get("content-type"), /application\/json/);
-  assert.equal((await singBox.json()).route.final, "raylink-auto");
+  assert.equal((await singBox.json()).route.final, "raylink-unknown");
 
   const legacySingBox = await fetch(
     `${testApp.baseUrl}${subscription.pathname}/sing-box.json`
   );
   assert.equal(legacySingBox.status, 200);
-  assert.equal((await legacySingBox.json()).route.final, "raylink-auto");
+  assert.equal((await legacySingBox.json()).route.final, "raylink-unknown");
 
   const unsupported = await fetch(
     `${testApp.baseUrl}${subscription.pathname}?format=unknown`

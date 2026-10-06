@@ -546,6 +546,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
     .filter((name) => names.includes(name)) : names;
   const aiFallback = aiPinned ? aiNames : fallbackGroups;
   const aiUnavailable = aiPinned && !aiNames.length;
+  const aiManual = routePolicy.aiSelection === "manual";
   const probeUrl = routeProbeUrlFromConfig(singBoxConfig);
   const proxyGroups = [
     {
@@ -553,17 +554,23 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
       type: "select",
       proxies: policyChoices
     },
+    ...(routePolicy.mode === "smart" ? [{
+      name: ROUTE_POLICY_GROUPS.unknown.name,
+      type: "select",
+      proxies: [ROUTE_POLICY_GROUPS.proxy.name, ROUTE_POLICY_GROUPS.direct.name]
+    }] : []),
     {
       name: ROUTE_POLICY_GROUPS.ai.name,
       type: "select",
-      proxies: [ROUTE_POLICY_GROUPS.aiStable.name,
+      proxies: aiManual ? (aiNames.length ? aiNames : ["REJECT"]) : [ROUTE_POLICY_GROUPS.aiStable.name,
         ...(sharedHealthChecks ? [ROUTE_POLICY_GROUPS.aiManual.name] : aiNames),
         ...(aiPinned ? [] : policyChoices)]
     },
     // Mihomo prepends provider nodes before explicit group proxies. Keep the
-    // top-level AI selector free of `use`, or it defaults to an individual node
-    // and bypasses automatic recovery. Its manual child stays independent.
-    ...(sharedHealthChecks ? [{
+    // automatic top-level AI selector free of `use`, or it defaults to an
+    // individual node and bypasses recovery. Manual mode intentionally exposes
+    // only concrete nodes and does not need this extra child selector.
+    ...(sharedHealthChecks && !aiManual ? [{
       name: ROUTE_POLICY_GROUPS.aiManual.name,
       type: "select",
       proxies: aiNames.length ? aiNames : ["REJECT"]
@@ -670,7 +677,9 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
       ...(pinnedHostnames.length ? { "use-hosts": true } : {}),
       "enhanced-mode": "fake-ip",
       "fake-ip-range": "198.18.0.1/16",
-      ...(pinnedHostnames.length ? { "fake-ip-filter": pinnedHostnames } : {}),
+      "fake-ip-filter": [...new Set([
+        ...pinnedHostnames, "localhost", ...LOCAL_DOMAIN_SUFFIXES.map((suffix) => `+.${suffix}`)
+      ])],
       "respect-rules": true,
       "default-nameserver": ["223.5.5.5"],
       nameserver: routePolicy.mode === "direct"
@@ -736,7 +745,7 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
               "RULE-SET,raylink-cn-domain,DIRECT",
               ...mihomoPrivateIpRules({ resolveDomains: true }),
               "RULE-SET,raylink-cn-ip,DIRECT",
-              `MATCH,${ROUTE_POLICY_GROUPS.proxy.name}`
+              `MATCH,${ROUTE_POLICY_GROUPS.unknown.name}`
             ])
     ]
   };
@@ -896,6 +905,7 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
     .filter((name) => names.includes(name)) : names;
   const aiFallback = aiPinned ? aiNames : fallbackGroups;
   const aiUnavailable = aiPinned && !aiNames.length;
+  const aiManual = routePolicy.aiSelection === "manual";
   const probeUrl = routeProbeUrlFromConfig(singBoxConfig);
   const usesAiDns = routePolicy.mode === "smart" || routePolicy.rules.some((rule) => (
     rule.enabled && ["domain", "domain_suffix"].includes(rule.match)
@@ -1029,6 +1039,12 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
           policies: ["网络环境", ...candidates.policyChoices]
         }
       },
+      ...(routePolicy.mode === "smart" ? [{
+        select: {
+          name: ROUTE_POLICY_GROUPS.unknown.name,
+          policies: [ROUTE_POLICY_GROUPS.proxy.name, ROUTE_POLICY_GROUPS.direct.name]
+        }
+      }] : []),
       {
         [aiUnavailable ? "select" : "fallback"]: {
           name: ROUTE_POLICY_GROUPS.aiStable.name,
@@ -1039,7 +1055,7 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
       {
         select: {
           name: ROUTE_POLICY_GROUPS.ai.name,
-          policies: [
+          policies: aiManual ? (aiNames.length ? aiNames : ["REJECT"]) : [
             ROUTE_POLICY_GROUPS.aiStable.name,
             ...aiNames,
             ...(!aiPinned ? [
@@ -1091,7 +1107,7 @@ function buildEgernProfile(singBoxConfig, inputPolicy) {
               ...egernChinaDomains("policy", "DIRECT"),
               ...egernPrivateIpRules({ resolveDomains: true }),
               ...chinaIpCidrs.map((cidr) => ({ [isIpv6Value(cidr) ? "ip_cidr6" : "ip_cidr"]: { match: cidr, policy: "DIRECT" } })),
-              { default: { policy: ROUTE_POLICY_GROUPS.proxy.name } }
+              { default: { policy: ROUTE_POLICY_GROUPS.unknown.name } }
             ])
     ]
   };

@@ -53,6 +53,10 @@ test("routing diagnostics separates AI classification, matched routing rule and 
   diagnostic.aiDomain.desiredEgress = "client-direct";
   context.renderRoutingDiagnostic(diagnostic);
   assert.match(container.innerHTML, /客户端直连/);
+  diagnostic.aiDomain.desiredEgress = "client-selection";
+  context.renderRoutingDiagnostic(diagnostic);
+  assert.match(container.innerHTML, /未分类流量组，由客户端选择/);
+  assert.doesNotMatch(container.innerHTML, /目标到达主控后的预期出口/);
   delete diagnostic.aiDomain;
   context.renderRoutingDiagnostic(diagnostic);
   assert.match(container.innerHTML, /未返回 AI 域名分类/);

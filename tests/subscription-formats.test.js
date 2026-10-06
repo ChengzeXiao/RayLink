@@ -2,6 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
+import { buildMultiHostProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
+
+test("full smart profiles expose a manual unclassified group after all domain and IP rules", () => {
+  for (const format of ["mihomo", "mihomo-modern", "egern-profile"]) {
+    const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;
+    const unknown = body.split('name: "未分类流量"')[1]?.split(/\n  - |\nrules:|\nrule-providers:/)[0];
+    assert.ok(unknown, `${format} must declare the manual fallback`);
+    assert.match(unknown, /(?:proxies|policies):\n\s+- "RayLink 代理"\n\s+- "DIRECT"/);
+    const rules = body.split("\nrules:\n")[1].trim();
+    assert.ok(rules.endsWith(format === "egern-profile" ? 'policy: "未分类流量"' : '"MATCH,未分类流量"'));
+    for (const [mode, expected] of [["global-proxy", "RayLink 代理"], ["direct", "DIRECT"]]) {
+      const other = buildSubscriptionArtifact({ format, singBoxConfig, routePolicy: { mode } }).body;
+      assert.ok(!other.includes('name: "未分类流量"'));
+      const otherRules = other.split("\nrules:\n")[1].trim();
+      assert.ok(otherRules.endsWith(format === "egern-profile" ? `policy: "${expected}"` : `"MATCH,${expected}"`));
+    }
+  }
+});
 
 test("full exports preserve exact AI dependency matching and custom DNS overrides", () => {
   for (const format of ["mihomo", "mihomo-modern"]) {
@@ -52,7 +70,7 @@ test("Egern preserves manual default selection, system DNS and domestic domain r
   assert.match(body, /match: "office\.example"\n\s+value: "local"/);
   const rules = body.split("\nrules:\n")[1];
   assert.match(rules, /match: "baidu\.com"\n\s+policy: "DIRECT"/);
-  assert.match(rules, /default:\n\s+policy: "RayLink 代理"/);
+  assert.match(rules, /default:\n\s+policy: "未分类流量"/);
 });
 
 test("AI subscriptions choose an independent stable exit and expose concrete node choices", () => {
@@ -70,6 +88,39 @@ test("AI subscriptions choose an independent stable exit and expose concrete nod
   const mihomo = buildSubscriptionArtifact({ format: "mihomo", singBoxConfig }).body;
   assert.match(mihomo, /store-selected: true/);
   assert.match(mihomo, /"\+\.openai\.com":\n\s+- "https:\/\/1\.1\.1\.1\/dns-query#AI 网站代理"/);
+});
+
+test("manual AI exports exclude automatic groups and unauthorized Host candidates", () => {
+  const profiles = defaultProtocolConfigs().filter((profile) => ["vless", "hysteria2"].includes(profile.type))
+    .map((profile) => ({ ...profile, enabled: true }));
+  for (const hostId of ["primary", "no-longer-authorized"]) {
+    const routePolicy = { aiSelection: "manual", aiExit: { mode: "pinned", hostId } };
+    const nativeConfig = buildMultiHostProtocolClientConfig({
+      credential: { email: "test@example.com", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "fixture", serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+      hosts: ["primary", "other-region"].map((id) => ({ id, address: `${id}.example.com`, protocols: profiles })),
+      routePolicy
+    });
+    for (const format of ["mihomo", "mihomo-modern", "egern-profile"]) {
+      const body = buildSubscriptionArtifact({ format, singBoxConfig: nativeConfig, routePolicy }).body;
+      const ai = body.split('name: "AI 网站代理"')[1].split(/\n  - |\nrules:|\nrule-providers:/)[0];
+      assert.doesNotMatch(ai, /AI 稳定出口|AI 节点选择|RayLink 智能|TCP 稳定|UDP 高速|故障回退|网络环境|RayLink 代理/);
+      assert.doesNotMatch(ai, /raylink-other-region/);
+      if (hostId === "no-longer-authorized") {
+        assert.match(ai, /- "REJECT"/);
+        assert.doesNotMatch(ai, /use:|filter:|raylink-primary/);
+      } else if (format === "mihomo-modern") {
+        assert.match(ai, /use:\n\s+- "raylink-health"/);
+        const patterns = JSON.parse(ai.match(/filter: (.+)/)[1]).split("`").map((pattern) => new RegExp(pattern));
+        assert.deepEqual(patterns.map((pattern) => ["raylink-primary-vless", "raylink-primary-hysteria2"].find((name) => pattern.test(name))),
+          ["raylink-primary-vless", "raylink-primary-hysteria2"]);
+        for (const name of ["raylink-other-region-vless", "raylink-other-region-hysteria2", "raylink-primary-vless-extra"]) {
+          assert.ok(!patterns.some((pattern) => pattern.test(name)), `Provider must not introduce ${name} into AI selection`);
+        }
+      } else {
+        assert.match(ai, /(?:proxies|policies):\n\s+- "raylink-primary-vless"\n\s+- "raylink-primary-hysteria2"/);
+      }
+    }
+  }
 });
 
 test("Egern AI DNS follows its exit while explicit user IP rules retain priority", () => {
@@ -147,6 +198,19 @@ test("Mihomo DNS protects local names and respects a higher priority broader dom
   assert.doesNotMatch(policy, /"mail\.google\.com"/);
   assert.doesNotMatch(policy, /"\+\.gemini\.google\.com"/);
   assert.match(policy, /"\+\.google\.com":\n\s+- "https:\/\/223\.5\.5\.5\/dns-query"/);
+});
+
+test("Mihomo preserves endpoint pins while excluding local discovery names from fake IP", () => {
+  for (const format of ["mihomo", "mihomo-modern"]) {
+    for (const endpointOverrides of [{}, { "node.example.com": "203.0.113.20" }]) {
+      const body = buildSubscriptionArtifact({ format, singBoxConfig, endpointOverrides }).body;
+      const filter = body.split("  fake-ip-filter:\n")[1]?.split("  respect-rules:")[0];
+      assert.ok(filter, `${format} must exclude local discovery names even without endpoint pins`);
+      const names = [...filter.matchAll(/- "([^"]+)"/g)].map((match) => match[1]);
+      assert.deepEqual(names, [...Object.keys(endpointOverrides), "localhost", "+.local", "+.lan", "+.home.arpa"]);
+      assert.equal(new Set(names).size, names.length);
+    }
+  }
 });
 
 test("TCP-only Shadowsocks never advertises UDP relay in exported subscriptions", () => {
@@ -354,7 +418,7 @@ test("Mihomo subscription contains compatible nodes, smart groups, routing and D
   assert.match(artifact.body, /DOMAIN-SUFFIX,chatgpt\.com,AI 网站代理/);
   assert.match(artifact.body, /RULE-SET,raylink-cn-ip,DIRECT/);
   assert.doesNotMatch(artifact.body, /RULE-SET,raylink-cn-ip,DIRECT,no-resolve/);
-  assert.match(artifact.body, /MATCH,RayLink 代理/);
+  assert.match(artifact.body, /MATCH,未分类流量/);
   assert.match(artifact.body, /DOMAIN-SUFFIX,local,DIRECT/);
   assert.match(artifact.body, /IP-CIDR,192\.168\.0\.0\/16,DIRECT/);
   assert.match(artifact.body, /IP-CIDR6,fc00::\/7,DIRECT/);
@@ -702,7 +766,7 @@ test("Egern profile adds smart TCP UDP manual policies, routing and encrypted DN
   );
   assert.match(artifact.body, /match: "baidu\.com"/);
   assert.match(artifact.body, /policy: "DIRECT"/);
-  assert.match(artifact.body, /default:[\s\S]*?policy: "RayLink 代理"/);
+  assert.match(artifact.body, /default:[\s\S]*?policy: "未分类流量"/);
   assert.match(artifact.body, /^dns:/m);
   assert.ok(artifact.body.includes("https://1.1.1.1/dns-query"));
   assert.match(artifact.body, /bypass_tunnel_proxy:[\s\S]*?- "\*\.local"/);

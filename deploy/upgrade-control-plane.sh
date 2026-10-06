@@ -23,6 +23,11 @@ environment_file_input="${RAYLINK_ENV_FILE:-/etc/raylink/raylink.env}"
 source_root="${RAYLINK_SOURCE_DIR:-}"
 health_port="${RAYLINK_PORT:-}"
 force_upgrade="${RAYLINK_FORCE_UPGRADE:-false}"
+preserve_data_on_rollback="${RAYLINK_PRESERVE_DATA_ON_ROLLBACK:-false}"
+case "$preserve_data_on_rollback" in
+  true|false) ;;
+  *) fail "RAYLINK_PRESERVE_DATA_ON_ROLLBACK 必须是 true 或 false" ;;
+esac
 public_ip="${RAYLINK_PUBLIC_IP:-}"
 runtime_version=1.14.2
 case "$(uname -m)" in
@@ -158,7 +163,8 @@ rollback() {
       fi
       mv "$previous_root" "$install_root"
     fi
-    if [ "$data_backup_ready" = true ] && [ "$data_migration_started" = true ]; then
+    if [ "$data_backup_ready" = true ] && [ "$data_migration_started" = true ] \
+      && [ "$preserve_data_on_rollback" != true ]; then
       if [ -e "$data_root" ]; then
         mv "$data_root" "$backup_directory/failed-data" 2>/dev/null || true
       fi
@@ -214,10 +220,29 @@ if [ "$backfill_local_host_dial_address" = true ]; then
   environment_changed=true
 fi
 if [ -f "$backup_directory/data/raylink.db" ]; then
-  "$node_root/bin/node" \
-    "$candidate_root/deploy/check-database-compatibility.mjs" \
-    "$backup_directory/data/raylink.db" \
-    || fail "候选版本数据库迁移兼容检查未通过"
+  if [ "$preserve_data_on_rollback" = true ]; then
+    compatibility_report="$("$node_root/bin/node" \
+      "$candidate_root/deploy/check-database-compatibility.mjs" \
+      "$backup_directory/data/raylink.db" --require-unchanged-schema)" \
+      || fail "候选版本数据库 schema 检查未通过，拒绝启用保留数据回滚"
+    printf '%s' "$compatibility_report" | "$node_root/bin/node" -e '
+      let body = "";
+      process.stdin.on("data", (chunk) => { body += chunk; });
+      process.stdin.on("end", () => {
+        try {
+          const result = JSON.parse(body);
+          if (result?.compatible !== true || result?.schemaUnchanged !== true) process.exit(1);
+        } catch { process.exit(1); }
+      });
+    ' || fail "未确认数据库 schema 不变，拒绝启用保留数据回滚"
+  else
+    "$node_root/bin/node" \
+      "$candidate_root/deploy/check-database-compatibility.mjs" \
+      "$backup_directory/data/raylink.db" \
+      || fail "候选版本数据库迁移兼容检查未通过"
+  fi
+elif [ "$preserve_data_on_rollback" = true ]; then
+  fail "缺少可验证的 raylink.db 备份，拒绝启用保留数据回滚"
 fi
 mv "$install_root" "$previous_root"
 switch_started=true

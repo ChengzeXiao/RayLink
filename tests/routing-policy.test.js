@@ -8,6 +8,18 @@ import {
   routingDecisionForDomain
 } from "../server/routing/policy.js";
 
+test("AI manual selection is explicit and legacy policies retain protocol fallback", () => {
+  assert.equal(normalizeRoutingPolicy({}).aiSelection, "fallback");
+  assert.equal(normalizeRoutingPolicy({ aiSelection: "manual" }).aiSelection, "manual");
+  for (const aiSelection of ["auto", "", null, {}, true]) {
+    assert.throws(() => normalizeRoutingPolicy({ aiSelection }), error => error.code === "INVALID_AI_SELECTION");
+  }
+  assert.deepEqual(routingDecisionForDomain({}, "www.google.com.hk"), {
+    action: "proxy", source: "proxy-domain", ruleId: null, dns: "remote"
+  });
+  assert.equal(routingDecisionForDomain({}, "google.com.hk.example").action, "resolve");
+});
+
 test("AI authentication and streaming dependencies follow AI while adjacent shared-provider hosts do not", () => {
   for (const domain of ["platform.claude.com", "bridge.claudeusercontent.com", "artifact.frame.claudeusercontent.com", "cdn.oaistatsig.com", "cdn.openaimerge.com", "forwarder.workos.com", "challenges.cloudflare.com", "brunhild.challenges.cloudflare.com", "hagen.challenges.cloudflare.com"]) {
     assert.deepEqual(routingDecisionForDomain({}, domain), { action: "ai", source: "ai", ruleId: null, dns: "remote" }, domain);

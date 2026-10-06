@@ -10,6 +10,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createRayLinkApp } from "../server/app.js";
+import { RayLinkStore } from "../server/database.js";
 import { hashSessionSecret } from "../server/security.js";
 
 const execFile = promisify(execFileCallback);
@@ -925,6 +926,7 @@ test("candidate database compatibility checks never mutate the upgrade backup", 
     databasePath
   ]);
   assert.match(result.stdout, /"compatible":true/);
+  assert.equal(JSON.parse(result.stdout).schemaUnchanged, false);
   const after = createHash("sha256").update(await readFile(databasePath)).digest("hex");
   assert.equal(after, before);
 
@@ -940,6 +942,35 @@ test("candidate database compatibility checks never mutate the upgrade backup", 
       return true;
     }
   );
+});
+
+test("the schema guard accepts current databases and rejects index-only migrations without changing its input", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "raylink-schema-guard-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, "raylink.db");
+  const store = new RayLinkStore({
+    dbPath: databasePath, adminUsername: "schema-test",
+    adminPassword: "{{SECRET_8ojhtpj2}}", seedDemoData: false
+  });
+  store.close();
+  const database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA user_version = 7");
+  database.close();
+  const checker = new URL("../deploy/check-database-compatibility.mjs", import.meta.url).pathname;
+  const before = await readFile(databasePath);
+  const result = await execFile(process.execPath, [checker, databasePath, "--require-unchanged-schema"]);
+  assert.equal(JSON.parse(result.stdout).schemaUnchanged, true);
+  assert.deepEqual(await readFile(databasePath), before);
+
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec("DROP INDEX audit_events_created");
+  legacy.close();
+  const legacyBytes = await readFile(databasePath);
+  await assert.rejects(execFile(process.execPath, [checker, databasePath, "--require-unchanged-schema"]),
+    (error) => /schema 已变化/.test(error.stderr));
+  const compatible = await execFile(process.execPath, [checker, databasePath]);
+  assert.equal(JSON.parse(compatible.stdout).schemaUnchanged, false);
+  assert.deepEqual(await readFile(databasePath), legacyBytes);
 });
 
 test("repository workflows run RayLink checks from the repository root and release both native architectures", async () => {
@@ -972,7 +1003,11 @@ test("repository workflows run RayLink checks from the repository root and relea
   assert.match(packager, /CHANGELOG\.md/);
 });
 
-async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingCronet = false, dependencyFailure = false } = {}) {
+async function runControlPlaneUpgradeHarness(t, {
+  healthFails = false, existingCronet = false, dependencyFailure = false,
+  preserveData, currentSchema = false, writeAfterStart = false,
+  missingDatabase = false, emptyCompatibilityReport = false
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-upgrade-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const installRoot = join(directory, "installed");
@@ -1000,6 +1035,14 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
     INSERT INTO upgrade_harness (value) VALUES ('durable-state');
   `);
   durableDatabase.close();
+  if (currentSchema) {
+    const store = new RayLinkStore({
+      dbPath: join(dataRoot, "raylink.db"), adminUsername: "upgrade-test",
+      adminPassword: "Upgrade-test-password-2026", seedDemoData: false
+    });
+    store.close();
+  }
+  if (missingDatabase) await rm(join(dataRoot, "raylink.db"));
   const previousServiceUnit = "[Service]\nExecStart=/opt/raylink/server/old-index.js\n";
   const previousRuntimeServiceUnit = "[Service]\nProtectSystem=strict\n";
   const previousEnvironment = "RAYLINK_PROXY_HOST=node.example.com\n";
@@ -1017,6 +1060,9 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
     systemctl: [
       "#!/usr/bin/env bash",
       "printf 'systemctl %s\\n' \"$*\" >> \"${ORDER_LOG:?}\"",
+      "if [[ \"$*\" = 'start raylink' && \"${UPGRADE_WRITE_AFTER_START:-false}\" = true ]]; then",
+      "  \"${TEST_NODE_BIN:?}\" -e 'const fs = require(\"node:fs\"); if (JSON.parse(fs.readFileSync(process.env.RAYLINK_INSTALL_ROOT + \"/package.json\", \"utf8\")).version !== \"0.2.12\") { const { DatabaseSync } = require(\"node:sqlite\"); const db = new DatabaseSync(process.env.RAYLINK_DATA_ROOT + \"/raylink.db\"); db.prepare(\"UPDATE upgrade_harness SET value = ?\").run(\"written-after-start\"); db.close(); }'",
+      "fi",
       "exit 0",
       ""
     ].join("\n"),
@@ -1050,6 +1096,7 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
     [
       "#!/usr/bin/env bash",
       "printf 'node %s\\n' \"$*\" >> \"${ORDER_LOG:?}\"",
+      "if [[ \"${UPGRADE_EMPTY_COMPATIBILITY_REPORT:-false}\" = true && \"${1:-}\" = */deploy/check-database-compatibility.mjs ]]; then exit 0; fi",
       "exec \"${TEST_NODE_BIN:?}\" \"$@\"",
       ""
     ].join("\n")
@@ -1076,6 +1123,9 @@ async function runControlPlaneUpgradeHarness(t, { healthFails = false, existingC
         ORDER_LOG: orderLog,
         TEST_NODE_BIN: process.execPath,
         UPGRADE_HEALTH_FAIL: String(healthFails),
+        UPGRADE_WRITE_AFTER_START: String(writeAfterStart),
+        UPGRADE_EMPTY_COMPATIBILITY_REPORT: String(emptyCompatibilityReport),
+        RAYLINK_PRESERVE_DATA_ON_ROLLBACK: preserveData === undefined ? undefined : String(preserveData),
         RAYLINK_INSTALL_ROOT: installRoot,
         RAYLINK_DATA_ROOT: dataRoot,
         RAYLINK_BACKUP_ROOT: backupRoot,
@@ -1207,6 +1257,60 @@ test("a failed control-plane health check restores application, data and service
     operations.filter((entry) => entry === "systemctl start raylink").length,
     2
   );
+});
+
+test("opt-in rollback retains candidate writes when the database schema is unchanged", async (t) => {
+  const result = await runControlPlaneUpgradeHarness(t, {
+    healthFails: true, preserveData: true, currentSchema: true, writeAfterStart: true
+  });
+  assert.match(result.error?.stderr || "", /新控制面在 30 秒内未通过本机健康检查/);
+  assert.equal(JSON.parse(await readFile(join(result.installRoot, "package.json"), "utf8")).version, "0.2.12");
+  const database = new DatabaseSync(join(result.dataRoot, "raylink.db"), { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT value FROM upgrade_harness").get().value, "written-after-start");
+  } finally { database.close(); }
+  assert.equal(await readFile(result.serviceUnit, "utf8"), result.previousServiceUnit);
+  assert.equal(await readFile(result.runtimeServiceUnit, "utf8"), result.previousRuntimeServiceUnit);
+  assert.ok(!result.operations.some((entry) => /^systemctl (start|stop|restart).*sing-box/.test(entry)));
+});
+
+test("preserving rollback data rejects a candidate schema migration before switching applications", async (t) => {
+  const result = await runControlPlaneUpgradeHarness(t, { preserveData: true, writeAfterStart: true });
+  assert.ok(result.error, "a schema-changing candidate cannot preserve the live database on rollback");
+  assert.match(result.error.stderr, /schema 已变化/);
+  assert.equal(JSON.parse(await readFile(join(result.installRoot, "package.json"), "utf8")).version, "0.2.12");
+  assert.ok(!result.operations.some((entry) => entry.startsWith(`mv ${result.installRoot} `)));
+  const database = new DatabaseSync(join(result.dataRoot, "raylink.db"), { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT value FROM upgrade_harness").get().value, "durable-state");
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type='table'").get().count, 1);
+  } finally { database.close(); }
+  assert.equal(await readFile(result.serviceUnit, "utf8"), result.previousServiceUnit);
+});
+
+test("default rollback restores the backup even when the candidate wrote without changing schema", async (t) => {
+  const result = await runControlPlaneUpgradeHarness(t, { healthFails: true, currentSchema: true, writeAfterStart: true });
+  assert.match(result.error?.stderr || "", /新控制面在 30 秒内未通过本机健康检查/);
+  const database = new DatabaseSync(join(result.dataRoot, "raylink.db"), { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT value FROM upgrade_harness").get().value, "durable-state");
+  } finally { database.close(); }
+  assert.equal(JSON.parse(await readFile(join(result.installRoot, "package.json"), "utf8")).version, "0.2.12");
+});
+
+test("preserving rollback data requires a database backup and an affirmative schema report", async (t) => {
+  for (const [label, options, message] of [
+    ["missing database", { missingDatabase: true }, /缺少可验证的 raylink.db/],
+    ["empty successful report", { currentSchema: true, emptyCompatibilityReport: true }, /未确认数据库 schema 不变/]
+  ]) {
+    await t.test(label, async (child) => {
+      const result = await runControlPlaneUpgradeHarness(child, { ...options, preserveData: true });
+      assert.ok(result.error);
+      assert.match(result.error.stderr, message);
+      assert.equal(JSON.parse(await readFile(join(result.installRoot, "package.json"), "utf8")).version, "0.2.12");
+      assert.ok(!result.operations.some((entry) => entry.startsWith(`mv ${result.installRoot} `)));
+    });
+  }
 });
 
 test("one-command bootstrap verifies and prepares the matching release package", async (t) => {

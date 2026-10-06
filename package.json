@@ -1,6 +1,6 @@
 {
   "name": "raylink-control-plane",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "private": true,
   "type": "module",
   "engines": {
@@ -17,7 +17,7 @@
     "check:production": "npm run check && npm run check:protocols && npm run check:traffic && npm run check:tuic && npm run check:dns && npm run check:runtime-dns && npm run check:health && npm run check:routing && npm run check:ai && npm run check:ai-upstream && npm run check:soak",
     "check:traffic": "node tests/runtime-traffic-check.mjs",
     "check:dns": "node tests/dns-resilience-check.mjs",
-    "check:routing": "node tests/smart-routing-check.mjs && node tests/smart-routing-check.mjs --ip-priority && node tests/route-failover-check.mjs",
+    "check:routing": "node tests/smart-routing-check.mjs && node tests/smart-routing-check.mjs --ip-priority && node tests/route-failover-check.mjs && node tests/unified-client-routing-check.mjs --deferred-startup",
     "check:ai": "node tests/ai-domain-routing-check.mjs && node tests/ai-domain-routing-check.mjs --modern && node tests/ai-stability-check.mjs && node tests/ai-all-protocol-failover-check.mjs && node tests/ai-egress-check.mjs && node tests/ai-websocket-check.mjs --idle-ms=70000",
     "check:tuic": "node tests/tuic-interop-check.mjs",
     "check:runtime-dns": "node tests/runtime-dns-check.mjs",

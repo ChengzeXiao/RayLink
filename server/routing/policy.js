@@ -2,6 +2,7 @@ import { BlockList, isIP } from "node:net";
 
 export const ROUTE_POLICY_GROUPS = Object.freeze({
   proxy: Object.freeze({ tag: "raylink-auto", name: "RayLink 代理" }),
+  unknown: Object.freeze({ tag: "raylink-unknown", name: "未分类流量" }),
   ai: Object.freeze({ tag: "raylink-ai", name: "AI 网站代理" }),
   aiStable: Object.freeze({ tag: "raylink-ai-stable", name: "AI 稳定出口" }),
   aiManual: Object.freeze({ tag: "raylink-ai-manual", name: "AI 节点选择" }),
@@ -61,7 +62,7 @@ export const AI_DOMAIN_NAMES = Object.freeze([
 
 // Explicit overseas services precede geographic inference; keep AI exceptions first.
 export const PROXY_DOMAIN_SUFFIXES = Object.freeze([
-  "google.com", "googleapis.com", "gstatic.com", "youtube.com", "youtu.be",
+  "google.com", "google.com.hk", "googleapis.com", "gstatic.com", "youtube.com", "youtu.be",
   "googlevideo.com", "ytimg.com", "github.com", "githubusercontent.com",
   "githubassets.com", "wikipedia.org", "wikimedia.org", "twitter.com", "x.com",
   "t.co", "twimg.com", "telegram.org", "t.me"
@@ -116,6 +117,7 @@ const MAX_ROUTING_RULES = 500;
 export const DEFAULT_ROUTING_POLICY = Object.freeze({
   mode: "smart",
   unknownDomain: "resolve-geoip",
+  aiSelection: "fallback",
   aiExit: Object.freeze({ mode: "auto", hostId: null }),
   rules: Object.freeze([])
 });
@@ -217,6 +219,10 @@ export function normalizeRoutingPolicy(input = {}) {
   if (!ROUTING_MODES.has(mode)) {
     throw routingError("INVALID_ROUTING_MODE", "路由模式不受支持");
   }
+  const aiSelection = input?.aiSelection === undefined ? DEFAULT_ROUTING_POLICY.aiSelection : input.aiSelection;
+  if (!["manual", "fallback"].includes(aiSelection)) {
+    throw routingError("INVALID_AI_SELECTION", "AI 节点选择方式必须是手动固定或协议自动回退");
+  }
   const sourceRules = input?.rules === undefined ? [] : input.rules;
   if (!Array.isArray(sourceRules) || sourceRules.length > MAX_ROUTING_RULES) {
     throw routingError("INVALID_ROUTING_RULE", `自定义路由规则不能超过 ${MAX_ROUTING_RULES} 条`);
@@ -240,6 +246,7 @@ export function normalizeRoutingPolicy(input = {}) {
   return Object.freeze({
     mode,
     unknownDomain: "resolve-geoip",
+    aiSelection,
     aiExit,
     rules: Object.freeze(rules)
   });

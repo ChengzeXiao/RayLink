@@ -208,7 +208,7 @@ test("client configuration includes every enabled user-facing protocol", () => {
   });
 
   assert.deepEqual(config.outbounds.slice(0, 2).map((outbound) => outbound.type), ["shadowsocks", "vless"]);
-  assert.equal(config.route.final, "raylink-auto");
+  assert.equal(config.route.final, "raylink-unknown");
   assert.deepEqual(
     config.outbounds.find((outbound) => outbound.type === "selector").outbounds,
     [

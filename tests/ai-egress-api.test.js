@@ -38,6 +38,27 @@ test("AI egress defaults to server, is authenticated and exposes a safe bootstra
   assert.deepEqual((await (await request("/api/bootstrap")).json()).aiEgress, view);
 });
 
+test("routing API saves manual AI selection and legacy writes or egress changes preserve it", async t => {
+  const { request } = await fixture(t);
+  const baseline = (await (await request("/api/bootstrap")).json()).routingPolicy;
+  assert.equal(baseline.aiSelection, "fallback");
+  const save = await request("/api/settings/routing", "PATCH", {
+    ...baseline, aiSelection: "manual", aiExit: { mode: "pinned", hostId: "local" }
+  });
+  assert.equal(save.status, 200);
+  const saved = await save.json();
+  assert.equal(saved.aiSelection, "manual");
+  assert.equal(saved.runtimeSync.status, "not-required");
+  const legacy = await request("/api/settings/routing", "PATCH", { mode: "smart", rules: [] });
+  assert.equal((await legacy.json()).aiSelection, "manual");
+  assert.equal((await request("/api/settings/ai-egress", "PATCH", { mode: "server" })).status, 200);
+  const read = (await (await request("/api/bootstrap")).json()).routingPolicy;
+  assert.equal(read.aiSelection, "manual");
+  assert.deepEqual(read.aiExit, { mode: "pinned", hostId: "local" });
+  assert.equal((await request("/api/settings/routing", "PATCH", { ...read, aiSelection: "random" })).status, 422);
+  assert.equal((await (await request("/api/bootstrap")).json()).routingPolicy.aiSelection, "manual");
+});
+
 test("AI egress switches exclusively, preserves credentials and stays compatible with legacy settings", async (t) => {
   const { request } = await fixture(t);
   const secret = "private-unified-egress-password";

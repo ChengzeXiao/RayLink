@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.43&amp;rev=tuic-alpn-1">
+  <link rel="stylesheet" href="./styles.css?v=0.2.44&amp;rev=tuic-alpn-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -279,9 +279,12 @@
             <div class="panel policy-list">
               <div class="panel-heading"><div><p class="eyebrow">简单模式</p><h2>选择路由行为</h2></div><span class="status-badge good"><i></i>按客户端适配</span></div>
               <form id="routing-mode-form" class="routing-mode-grid">
-                <label class="routing-mode-card"><input type="radio" name="mode" value="smart"><span><strong>智能分流</strong><small>内网和国内直连；AI 与境外流量走代理；未知域名解析真实 IP 后判断。</small></span></label>
+                <label class="routing-mode-card"><input type="radio" name="mode" value="smart"><span><strong>智能分流</strong><small>内网和国内直连；AI 与境外流量走代理；未知域名解析真实 IP 后判断，仍未分类时可手动选择出口。</small></span></label>
                 <label class="routing-mode-card"><input type="radio" name="mode" value="global-proxy"><span><strong>全局代理</strong><small>除内网和显式直连规则外，全部流量使用 RayLink 代理。</small></span></label>
                 <label class="routing-mode-card"><input type="radio" name="mode" value="direct"><span><strong>全部直连</strong><small>默认直连，仍遵从自定义代理、AI 和拦截例外。</small></span></label>
+                <label class="field"><span>AI 节点选择方式</span><select name="aiSelection"><option value="manual">手动固定节点</option><option value="fallback">协议自动回退</option></select></label>
+                <p class="field-hint">手动固定：在客户端 AI 策略组选择具体节点，故障时不会自动切换。协议自动回退：由客户端在允许的节点内切换；固定主机限制仍然生效。请核对所选节点或主机的地区是否符合服务要求。</p>
+                <p class="field-hint">仅影响完整订阅中的 AI 策略组；保存后请更新完整订阅并重新连接。各设备的手动节点选择独立保存。</p>
                 <button class="button primary" type="submit">保存路由模式</button>
               </form>
             </div>
@@ -289,7 +292,7 @@
               <p class="eyebrow">已保存的路由模式</p><h2 id="routing-mode-title">智能分流</h2>
               <p id="routing-mode-description">正在读取统一路由策略。</p>
               <div class="setting-row"><div><strong>DNS 分流</strong><small>直连域名使用国内 DNS，代理域名使用远程加密 DNS</small></div><span class="status-badge good"><i></i>自动</span></div>
-              <div class="setting-row"><div><strong>未知域名</strong><small>先解析真实 A / AAAA，再由 GeoIP 判断</small></div><span class="status-badge good"><i></i>安全判定</span></div>
+              <div class="setting-row"><div><strong>未分类流量</strong><small>智能模式先解析真实 A / AAAA 并按 GeoIP 判断；仍未分类时默认走普通代理，可在客户端切换直连</small></div><span class="status-badge neutral"><i></i>手动兜底</span></div>
               <div class="setting-row"><div><strong>主控 / sing-box 规则集</strong><small id="routing-rule-set-status">正在加载规则集状态</small></div><span id="routing-rule-set-version">—</span></div>
               <div class="setting-row"><div><strong>Mihomo / Egern 基线</strong><small>完整规则随应用发布更新</small></div><span id="routing-bundled-version">—</span></div>
               <div class="setting-row"><div><strong>自定义规则</strong><small>按优先级先于内置规则执行</small></div><span class="status-badge neutral"><i></i><span id="routing-rule-count">0</span> 条</span></div>
@@ -324,7 +327,7 @@
               </form>
               <div id="routing-diagnose-result" class="routing-diagnose-result"><span>输入域名后，将展示 DNS 结果、命中规则、出口和判断原因。</span></div>
             </div>
-            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>规则顺序</strong><small>自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 默认代理</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
+            <aside class="panel policy-inspector"><p class="eyebrow">诊断边界</p><h2>服务器判断，不冒充用户网络</h2><p>这里验证策略和服务端 DNS/规则集。客户端真实 Wi‑Fi 或蜂窝网络的耗时、抖动与丢包，仍由 Mihomo、Egern 或 sing-box 在本机测量。</p><div class="setting-row"><div><strong>智能模式规则顺序</strong><small>局域网 → 自定义 → AI → 境外域名 → 国内域名 → 解析 IP → 未分类流量</small></div><span class="status-badge good"><i></i>可解释</span></div></aside>
           </section>
           <section class="policy-layout" data-policy-panel="ai" hidden>
             <section class="panel ai-domain-coverage" aria-labelledby="ai-domain-heading">
@@ -346,7 +349,7 @@
                   <div class="field-grid full" data-ai-egress-host-options>
                   <label class="field"><span>主机策略</span><select name="hostMode"><option value="auto">自动选择主机</option><option value="pinned">固定主机</option></select></label>
                   <label class="field"><span>AI 出口主机</span><select name="hostId" disabled></select></label>
-                  <p class="field-hint full">固定后保留该主机全部授权协议；协议故障可回退，主机不可用时停止 AI 连接，避免意外改变出口。默认出口策略适用于智能模式及自定义 AI 规则。</p>
+                  <p class="field-hint full">固定后，AI 节点仅限该主机的授权协议。是否自动回退由“AI 节点选择方式”决定；主机不可用时停止 AI 连接，避免意外改变出口。默认出口策略适用于智能模式及自定义 AI 规则。</p>
                   </div>
                   <p id="ai-egress-host-summary" class="field-hint full" role="status"></p>
                 </fieldset>
@@ -598,11 +601,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.43"></script>
-  <script src="./subscription-session.js?v=0.2.43"></script>
-  <script src="./subscription-client-url.js?v=0.2.43"></script>
-  <script src="./subscription-quick.js?v=0.2.43"></script>
-  <script src="./protocol-health.js?v=0.2.43"></script>
-  <script src="./app.js?v=0.2.43&amp;rev=tuic-alpn-1"></script>
+  <script src="./subscription-qr.js?v=0.2.44"></script>
+  <script src="./subscription-session.js?v=0.2.44"></script>
+  <script src="./subscription-client-url.js?v=0.2.44"></script>
+  <script src="./subscription-quick.js?v=0.2.44"></script>
+  <script src="./protocol-health.js?v=0.2.44"></script>
+  <script src="./app.js?v=0.2.44&amp;rev=tuic-alpn-1"></script>
 </body>
 </html>

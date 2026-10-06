@@ -3,6 +3,31 @@ import test from "node:test";
 
 import { diagnoseRoutingDomain } from "../server/routing/diagnostics.js";
 
+test("manual AI diagnostics disclose client-owned node selection for built-in and custom rules", async () => {
+  for (const [domain, rules] of [["claude.ai", []], ["custom.example", [{ match: "domain", value: "custom.example", action: "ai" }]],
+    ["custom-ip.example", [{ match: "ip_cidr", value: "203.0.113.0/24", action: "ai" }]]]) {
+    const result = await diagnoseRoutingDomain({ domain, policy: { mode: "smart", aiSelection: "manual", rules },
+      lookup: async () => [{ address: "203.0.113.8", family: 4 }] });
+    assert.equal(result.action, "ai");
+    assert.equal(result.outbound, "raylink-ai");
+    assert.equal(result.clientSelection, undefined, "must not label AI as unclassified traffic");
+    assert.match(result.warnings.join(" "), /AI.*客户端.*手动.*服务器无法/);
+    assert.equal(result.evidence.clientMeasured, false);
+  }
+  const fallback = await diagnoseRoutingDomain({ domain: "claude.ai", policy: { aiSelection: "fallback" } });
+  assert.ok(!fallback.warnings.some(warning => warning.includes("AI 节点由客户端")));
+});
+
+test("unclassified diagnostics identify the client selector instead of claiming a fixed proxy exit", async () => {
+  const result = await diagnoseRoutingDomain({ domain: "unknown.example", policy: { mode: "smart" },
+    lookup: async () => [{ address: "203.0.113.8", family: 4 }], matchRuleSet: async () => false });
+  assert.equal(result.outbound, "raylink-unknown");
+  assert.deepEqual(result.clientSelection, { group: "未分类流量", defaultAction: "proxy", choices: ["proxy", "direct"] });
+  assert.equal(result.singBoxPrediction.outbound, "raylink-unknown");
+  assert.match(result.warnings.join(" "), /客户端.*手动/);
+  assert.equal(result.evidence.clientMeasured, false);
+});
+
 test("routing diagnostics returns a retryable timeout when system DNS does not answer", async () => {
   let release;
   const lookup = () => new Promise((resolve) => { release = resolve; });
