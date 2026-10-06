@@ -1,5 +1,11 @@
 # RayLink Changelog
 
+## 0.2.46 - 2026-10-07
+
+- Fix unlisted domestic App/CDN traffic receiving overseas DNS answers in smart Mihomo subscriptions: accept only CN-address domestic candidates, otherwise use proxied DNS.
+- Derive the DNS rejection filter from the same reviewed CN ranges as routing, add a second domestic DNS endpoint, and preserve explicit AI/overseas/custom policies and manual fallback.
+- Add native DNS/HTTP regressions for CDN branching, mixed and invalid answers, resolver failures, and AI isolation. Other client formats and global modes retain their existing behavior.
+
 ## 0.2.45 - 2026-10-06
 
 - Use reviewed geographical CN IP data instead of ISP registered-country classification for domestic fallback, preserving IPv4/IPv6 and consistent binary/inline subscriptions.

@@ -281,6 +281,7 @@ try {
       .replace('log-level: "info"', 'log-level: "debug"')
       .replace('  enhanced-mode: "fake-ip"', `  enhanced-mode: "fake-ip"\n  listen: "127.0.0.1:${dnsPort}"\n  direct-nameserver: ["${directDial.endpoint}"]\n  direct-nameserver-follow-policy: false`)
       .replaceAll("https://223.5.5.5/dns-query", domestic.endpoint)
+      .replaceAll("https://223.6.6.6/dns-query", domestic.endpoint)
       .replaceAll("https://1.1.1.1/dns-query#AI 网站代理", aiDns.endpoint)
       .replaceAll("https://1.1.1.1/dns-query#RayLink 代理", remote.endpoint)
       .replaceAll('"223.5.5.5"', JSON.stringify(`127.0.0.1:${domestic.socket.address().port}`))

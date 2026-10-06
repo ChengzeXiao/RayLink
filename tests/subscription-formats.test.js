@@ -4,6 +4,21 @@ import test from "node:test";
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 import { buildMultiHostProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
 
+test("smart Mihomo subscriptions validate domestic DNS candidates without changing explicit modes", () => {
+  for (const format of ["mihomo", "mihomo-modern"]) {
+    const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;
+    assert.match(body, /\n  nameserver:\n    - "https:\/\/223\.5\.5\.5\/dns-query"\n    - "https:\/\/223\.6\.6\.6\/dns-query"\n/);
+    assert.match(body, /\n  fallback:\n    - "https:\/\/1\.1\.1\.1\/dns-query#RayLink 代理"\n/);
+    assert.match(body, /\n  fallback-filter:\n    geoip: false\n    ipcidr:/);
+    assert.match(body, /\n      - "::\/0"\n/);
+    for (const [mode, server] of [["direct", "https://223.5.5.5/dns-query"], ["global-proxy", "https://1.1.1.1/dns-query#RayLink 代理"]]) {
+      const other = buildSubscriptionArtifact({ format, singBoxConfig, routePolicy: { mode } }).body;
+      assert.ok(other.includes(`\n  nameserver:\n    - "${server}"\n`));
+      assert.doesNotMatch(other, /\n  fallback(?:-filter)?:/);
+    }
+  }
+});
+
 test("full YAML profiles carry reusable routing data attribution without changing native configuration", () => {
   for (const format of ["mihomo", "mihomo-modern", "egern-profile"]) {
     const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;

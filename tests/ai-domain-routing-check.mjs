@@ -69,6 +69,8 @@ async function dnsQuery(domain, port) {
       timeout = setTimeout(() => reject(new Error(`DNS timeout: ${domain}`)), 4000);
     })]);
     assert.equal(answer.readUInt16BE(2) & 15, 0, `DNS failed: ${domain}`);
+    assert.equal(answer.readUInt16BE(6), 1, `${domain}: fixture must return one A record`);
+    return [...answer.subarray(-4)].join(".");
   } finally { clearTimeout(timeout); client.close(); }
 }
 try {
@@ -93,6 +95,7 @@ try {
     .replace('log-level: "info"', 'log-level: "debug"')
     .replace('  enhanced-mode: "fake-ip"', `  enhanced-mode: "redir-host"\n  listen: "127.0.0.1:${dnsPort}"`)
     .replaceAll("https://223.5.5.5/dns-query", dnsEndpoint("domestic"))
+    .replaceAll("https://223.6.6.6/dns-query", dnsEndpoint("domestic"))
     .replaceAll('"223.5.5.5"', JSON.stringify(dnsEndpoint("domestic").replace("#DIRECT", "")))
     .replaceAll("https://1.1.1.1/dns-query#AI 网站代理", dnsEndpoint("ai"))
     .replaceAll("https://1.1.1.1/dns-query#RayLink 代理", dnsEndpoint("remote"));
@@ -122,8 +125,8 @@ try {
   for (const [domain, expectedDns, expectedRoute] of [
     ["api.assistant.invalid", "ai", "AI"],
     ["ordinary.assistant.invalid", "remote", "PROXY"],
-    ["disabled.invalid", "remote", "PROXY"],
-    ["assistant.invalid.example", "remote", "PROXY"],
+    ["disabled.invalid", ["domestic", "remote"], "PROXY"],
+    ["assistant.invalid.example", ["domestic", "remote"], "PROXY"],
     ["chatgpt.com", "ai", "AI"],
     ["ws.chatgpt.com", "ai", "AI"],
     ["api.openai.com", "ai", "AI"],
@@ -152,28 +155,30 @@ try {
     ["chat.mistral.ai", "ai", "AI"],
     ["api.cohere.com", "ai", "AI"],
     // Adjacent third-party hosts and lookalikes must not inherit AI routing.
-    ["workos.com", "remote", "PROXY"],
-    ["unrelated.workos.com", "remote", "PROXY"],
-    ["child.forwarder.workos.com", "remote", "PROXY"],
-    ["cloudflare.com", "remote", "PROXY"],
-    ["www.cloudflare.com", "remote", "PROXY"],
-    ["notchallenges.cloudflare.com", "remote", "PROXY"],
-    ["challenges.cloudflare.com.example", "remote", "PROXY"],
-    ["brunhild.challenges.cloudflare.com.example", "remote", "PROXY"],
-    ["evilclaude.com", "remote", "PROXY"],
+    // Unclassified hosts reject the private domestic fixture answer and fall
+    // back to remote DNS; known overseas domains must still skip that candidate.
+    ["workos.com", ["domestic", "remote"], "PROXY"],
+    ["unrelated.workos.com", ["domestic", "remote"], "PROXY"],
+    ["child.forwarder.workos.com", ["domestic", "remote"], "PROXY"],
+    ["cloudflare.com", ["domestic", "remote"], "PROXY"],
+    ["www.cloudflare.com", ["domestic", "remote"], "PROXY"],
+    ["notchallenges.cloudflare.com", ["domestic", "remote"], "PROXY"],
+    ["challenges.cloudflare.com.example", ["domestic", "remote"], "PROXY"],
+    ["brunhild.challenges.cloudflare.com.example", ["domestic", "remote"], "PROXY"],
+    ["evilclaude.com", ["domestic", "remote"], "PROXY"],
     ["mail.google.com", "remote", "PROXY"],
     ["accounts.google.com", "remote", "PROXY"],
     ["maps.googleapis.com", "remote", "PROXY"],
-    ["www.microsoft.com", "remote", "PROXY"],
-    ["outlook.cloud.microsoft", "remote", "PROXY"],
-    ["login.live.com", "remote", "PROXY"],
+    ["www.microsoft.com", ["domestic", "remote"], "PROXY"],
+    ["outlook.cloud.microsoft", ["domestic", "remote"], "PROXY"],
+    ["login.live.com", ["domestic", "remote"], "PROXY"],
     ["github.com", "remote", "PROXY"],
     ["other.githubusercontent.com", "remote", "PROXY"],
     ["child.copilot-proxy.githubusercontent.com", "remote", "PROXY"],
     ["child.aistudio.google.com", "remote", "PROXY"],
-    ["aistudio.google.com.example", "remote", "PROXY"],
-    ["api.githubcopilot.com.example", "remote", "PROXY"],
-    ["notopenrouter.ai", "remote", "PROXY"],
+    ["aistudio.google.com.example", ["domestic", "remote"], "PROXY"],
+    ["api.githubcopilot.com.example", ["domestic", "remote"], "PROXY"],
+    ["notopenrouter.ai", ["domestic", "remote"], "PROXY"],
     // Explicit user decisions still precede built-in dependencies in DNS and routing.
     ["cdn.workos.com", "domestic", "DIRECT"],
     ["workos.imgix.net", "remote", "PROXY"],
@@ -181,9 +186,10 @@ try {
     ["blog.csdn.net", "domestic", "DIRECT"]
   ]) {
     for (const resolver of resolvers) resolver.queries.length = 0;
-    await dnsQuery(domain, dnsPort);
-    assert.ok(resolvers.find((resolver) => resolver.name === expectedDns).queries.includes(domain), `${domain}: wrong DNS upstream\n${JSON.stringify(resolvers.map(({ name, queries }) => ({ name, queries })))}`);
-    for (const resolver of resolvers.filter((resolver) => resolver.name !== expectedDns)) assert.ok(!resolver.queries.includes(domain), `${domain} also queried through ${resolver.name}`);
+    const expectedUpstreams = Array.isArray(expectedDns) ? expectedDns : [expectedDns];
+    const answerAddress = await dnsQuery(domain, dnsPort);
+    assert.deepEqual(resolvers.filter((resolver) => resolver.queries.includes(domain)).map(({ name }) => name), expectedUpstreams, `${domain}: wrong DNS upstreams`);
+    assert.equal(answerAddress, resolvers.find(({ name }) => name === expectedUpstreams.at(-1)).address, `${domain}: wrong accepted DNS answer`);
     const { stdout } = await run("curl", ["--silent", "--show-error", "--fail", "--max-time", "5", "--noproxy", "", "--socks5-hostname", `127.0.0.1:${mixedPort}`, `http://${domain}:${originPort}/`]);
     assert.equal(stdout, expectedRoute, `${domain}: wrong route\n${logs.slice(-3000)}`);
     console.log(`${domain}: DNS=${expectedDns}, route=${expectedRoute}`);
