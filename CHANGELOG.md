@@ -1,5 +1,11 @@
 # RayLink Changelog
 
+## 0.2.45 - 2026-10-06
+
+- Use reviewed geographical CN IP data instead of ISP registered-country classification for domestic fallback, preserving IPv4/IPv6 and consistent binary/inline subscriptions.
+- Keep explicit AI, overseas and custom rules ahead of CN IP matching; retain manual AI choices and the unclassified selector.
+- Add native regression coverage for domestic cloud addresses with overseas registration and publish reproducible source provenance.
+
 ## 0.2.42 - 2026-10-04
 
 - 将“AI 入口主机”和“固定 AI 上游”合并为 AI 出口二选一：默认出口或住宅代理出口，按选择展示并提交配置。

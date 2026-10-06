@@ -10,6 +10,19 @@ const bundledDirectory = fileURLToPath(new URL("../routing/rule-sets/", import.m
 const filenames = ["geosite-geolocation-cn.srs", "geoip-cn.srs"];
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+function approvedSource(rule) {
+  if (rule.delivery === "bundled") {
+    const source = rule.source;
+    return rule.filename === "geoip-cn.srs" && rule.url === undefined
+      && source?.format === "dbip-country-lite-csv-gzip" && source.selection === "country=CN"
+      && /^https:\/\/download\.db-ip\.com\/free\/dbip-country-lite-\d{4}-(?:0[1-9]|1[0-2])\.csv\.gz$/.test(source.url)
+      && /^[a-f0-9]{64}$/.test(source.sha256)
+      && Number.isSafeInteger(source.bytes) && source.bytes > 32 && source.bytes <= 32 * 1024 * 1024;
+  }
+  return rule.delivery === undefined
+    && /^https:\/\/raw\.githubusercontent\.com\/SagerNet\/sing-(?:geoip|geosite)\/[a-f0-9]{40}\/[a-z-]+\.srs$/.test(rule.url);
+}
+
 export function validateRuleSetManifest(manifest) {
   if (manifest?.schemaVersion !== 1 || !/^[a-zA-Z0-9._-]{1,100}$/.test(manifest.version || "")
     || !Number.isFinite(Date.parse(manifest.publishedAt)) || manifest.rules?.length !== filenames.length) {
@@ -20,7 +33,7 @@ export function validateRuleSetManifest(manifest) {
     if (entries.length !== 1 || !/^[a-f0-9]{64}$/.test(entries[0].sha256)
       || !Number.isSafeInteger(entries[0].bytes) || entries[0].bytes <= 32
       || entries[0].bytes > 16 * 1024 * 1024
-      || !/^https:\/\/raw\.githubusercontent\.com\/SagerNet\/sing-(?:geoip|geosite)\/[a-f0-9]{40}\/[a-z-]+\.srs$/.test(entries[0].url)) {
+      || !approvedSource(entries[0])) {
       throw new Error(`Invalid approved rule-set source: ${filename}`);
     }
   }
@@ -145,6 +158,8 @@ export class ManagedRuleSetCache {
         if (existing.sha256 === rule.sha256 && existing.bytes === rule.bytes) {
           payload = await readFile(join(this.active.directory, rule.filename));
         } else {
+          // Source CSV is maintainer input, never a downloadable SRS artifact.
+          if (rule.delivery === "bundled") throw new Error(`${rule.filename} requires the reviewed application bundle`);
           const response = await this.fetchImpl(rule.url, {
             signal: AbortSignal.timeout(this.requestTimeoutMs),
             headers: { "user-agent": "RayLink rule-set cache" }

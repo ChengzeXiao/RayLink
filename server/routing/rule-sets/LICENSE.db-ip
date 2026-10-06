@@ -1,0 +1,26 @@
+IP Geolocation by DB-IP: https://db-ip.com
+
+The files geoip-cn.json and geoip-cn.srs contain an adaptation of the DB-IP
+IP to Country Lite database, October 2026 edition, published by DB-IP.com.
+Source: https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz
+Publication and license: https://db-ip.com/db/download/ip-to-country-lite
+
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+The full license is included in COPYING.CC-BY-4.0.
+
+Changes by RayLink: selected CSV records whose geographical country is CN;
+converted exact address ranges to a normalized, non-overlapping IPv4/IPv6
+CIDR union; encoded this union as sing-box source JSON and binary SRS.
+No ISP registration, ASN, or extra provider-wide range is used for selection.
+
+Attribution must be retained when sharing the data or adaptations. For web
+applications that display or use results, DB-IP requests a link back to
+https://db-ip.com, for example: <a href="https://db-ip.com">IP Geolocation by DB-IP</a>.
+DB-IP does not endorse RayLink. Country estimates can be incomplete or
+incorrect; no accuracy, location or connectivity guarantee is provided.
+
+The former LICENSE.sing-geoip notice is retained only for the prior baseline
+identified in country-review.json. It does not license these replacement
+DB-IP-derived files. LICENSE.sing-geosite and COPYING continue to cover the
+unchanged geosite-geolocation-cn files.

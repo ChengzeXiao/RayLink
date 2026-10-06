@@ -6,7 +6,7 @@
   <meta name="description" content="RayLink sing-box 多用户控制台前端原型">
   <title>RayLink · sing-box control plane</title>
   <link rel="icon" href="/assets/brand/raylink-mark.svg?v=20260726" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=0.2.44&amp;rev=tuic-alpn-1">
+  <link rel="stylesheet" href="./styles.css?v=0.2.45&amp;rev=tuic-alpn-1">
 </head>
 <body>
   <section class="connection-notice" id="connection-notice" role="status" aria-live="polite" hidden>
@@ -295,6 +295,7 @@
               <div class="setting-row"><div><strong>未分类流量</strong><small>智能模式先解析真实 A / AAAA 并按 GeoIP 判断；仍未分类时默认走普通代理，可在客户端切换直连</small></div><span class="status-badge neutral"><i></i>手动兜底</span></div>
               <div class="setting-row"><div><strong>主控 / sing-box 规则集</strong><small id="routing-rule-set-status">正在加载规则集状态</small></div><span id="routing-rule-set-version">—</span></div>
               <div class="setting-row"><div><strong>Mihomo / Egern 基线</strong><small>完整规则随应用发布更新</small></div><span id="routing-bundled-version">—</span></div>
+              <p class="muted">国内 IP 按地理位置分类。IP 数据：<a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">DB-IP</a>（CC BY 4.0）；国内域名：SagerNet。规则库可能有遗漏，仍以客户端连接记录为准。</p>
               <div class="setting-row"><div><strong>自定义规则</strong><small>按优先级先于内置规则执行</small></div><span class="status-badge neutral"><i></i><span id="routing-rule-count">0</span> 条</span></div>
             </aside>
           </section>
@@ -601,11 +602,11 @@
   </div>
 
   <script src="./qrcode.min.js?v=1.0.0"></script>
-  <script src="./subscription-qr.js?v=0.2.44"></script>
-  <script src="./subscription-session.js?v=0.2.44"></script>
-  <script src="./subscription-client-url.js?v=0.2.44"></script>
-  <script src="./subscription-quick.js?v=0.2.44"></script>
-  <script src="./protocol-health.js?v=0.2.44"></script>
-  <script src="./app.js?v=0.2.44&amp;rev=tuic-alpn-1"></script>
+  <script src="./subscription-qr.js?v=0.2.45"></script>
+  <script src="./subscription-session.js?v=0.2.45"></script>
+  <script src="./subscription-client-url.js?v=0.2.45"></script>
+  <script src="./subscription-quick.js?v=0.2.45"></script>
+  <script src="./protocol-health.js?v=0.2.45"></script>
+  <script src="./app.js?v=0.2.45&amp;rev=tuic-alpn-1"></script>
 </body>
 </html>

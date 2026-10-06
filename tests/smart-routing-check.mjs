@@ -12,10 +12,12 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { buildProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
+import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 
 const run = promisify(execFile);
 const binary = process.env.SING_BOX_BIN || "sing-box";
 const testIpPriority = process.argv.includes("--ip-priority");
+const bundledGeolocation = process.argv.includes("--bundled-geolocation");
 const directory = await mkdtemp(join(tmpdir(), "raylink-smart-routing-"));
 const origin = createServer((_request, response) => response.end("DIRECT"));
 const proxy = createServer((_request, response) => response.end("PROXY"));
@@ -36,7 +38,16 @@ dns.on("message", (query, remote) => {
   const type = query.readUInt16BE(cursor + 1);
   const question = query.subarray(12, cursor + 5);
   lookups.push(name);
-  const address = name.startsWith("rotating.")
+  const bundledAddresses = {
+    "unknown.example.test": [8, 141, 181, 226],
+    "cloud-130.example.test": [8, 130, 1, 1],
+    "cloud-152.example.test": [8, 152, 1, 1],
+    "foreign.example.test": [1, 1, 1, 1],
+    "forced.example.test": [8, 141, 181, 226],
+    "google.com": [8, 141, 181, 226],
+    "chatgpt.com": [8, 141, 181, 226]
+  };
+  const address = bundledGeolocation && bundledAddresses[name] ? bundledAddresses[name] : name.startsWith("rotating.")
     ? [192, 0, 2, type === 1 && ++rotatingQueries > 1 ? 30 : 20]
     : name.startsWith("private.") ? [127, 0, 0, 1]
     : name.startsWith("foreign.") ? [203, 0, 113, 20]
@@ -67,10 +78,10 @@ try {
   const proxyPort = await listen(proxy);
   dns.bind(0, "127.0.0.1"); await once(dns, "listening");
   const inboundPort = await unusedPort();
-  const config = buildProtocolClientConfig({
+  const generated = buildProtocolClientConfig({
     profiles: defaultProtocolConfigs(), server: "127.0.0.1", probeUrl: `http://127.0.0.1:${originPort}/probe`,
     credential: { email: "simulation@example.test", runtimePassword: "AAAAAAAAAAAAAAAAAAAAAA==", serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
-    routePolicy: { mode: "smart", rules: [
+    routePolicy: { mode: "smart", ...(bundledGeolocation ? { aiSelection: "manual" } : {}), rules: [
       { id: "explicit-proxy", match: "domain", value: "forced.example.test", action: "proxy", priority: 1 },
       ...(testIpPriority ? [
         { id: "ip-block", match: "ip_cidr", value: "192.0.2.30/32", action: "block", priority: 2 },
@@ -79,10 +90,11 @@ try {
       ] : [])
     ] }
   });
+  const config = JSON.parse(buildSubscriptionArtifact({ format: "singbox", singBoxConfig: generated }).body);
   config.log.level = "debug";
   config.inbounds = [{ type: "mixed", tag: "simulation", listen: "127.0.0.1", listen_port: inboundPort }];
   config.dns.servers = config.dns.servers.map(({ tag }) => ({ type: "udp", tag, server: "127.0.0.1", server_port: dns.address().port }));
-  config.route.rule_set = [
+  if (!bundledGeolocation) config.route.rule_set = [
     { type: "inline", tag: "geosite-geolocation-cn", rules: [{ domain_suffix: ["known.cn"] }] },
     { type: "inline", tag: "geoip-cn", rules: [{ ip_cidr: ["192.0.2.0/24"] }] }
   ];
@@ -101,19 +113,38 @@ try {
   for (let i = 0; i < 100 && !logs.includes("sing-box started") && child.exitCode === null; i++) await delay(25);
   assert.ok(logs.includes("sing-box started"), logs);
   const request = async (domain) => (await run("curl", ["--silent", "--show-error", "--fail", "--max-time", "8", "--noproxy", "", "--socks5-hostname", `127.0.0.1:${inboundPort}`, `http://${domain}:${originPort}/`])).stdout;
-  for (const [domain, expected] of [
+  const cases = bundledGeolocation ? [
+    ["unknown.example.test", "DIRECT"], ["cloud-130.example.test", "DIRECT"], ["cloud-152.example.test", "DIRECT"],
+    ["8.141.181.226", "DIRECT"], ["foreign.example.test", "PROXY"], ["1.1.1.1", "PROXY"],
+    ["private.example.test", "DIRECT"], ["forced.example.test", "PROXY"], ["chatgpt.com", "PROXY"], ["google.com", "PROXY"]
+  ] : [
     ["unknown.example.test", "DIRECT"], ["private.example.test", "DIRECT"],
     ["foreign.example.test", "PROXY"], ["forced.example.test", "PROXY"],
     ["192.0.2.20", "DIRECT"], ["203.0.113.20", "PROXY"],
     ["api.known.cn", "DIRECT"], ["chatgpt.com", "PROXY"], ["google.com", "PROXY"]
-  ]) {
+  ];
+  for (const [domain, expected] of cases) {
+    const logStart = logs.length;
     assert.equal(await request(domain), expected, `${domain}: wrong exit\n${logs}`);
+    if (bundledGeolocation && ["unknown.example.test", "cloud-130.example.test", "cloud-152.example.test", "8.141.181.226"].includes(domain)) {
+      assert.match(logs.slice(logStart), /router: match\[\d+\] rule_set=geoip-cn => route\(direct,/,
+        `${domain}: success must come from the bundled geographic IP route`);
+    }
     process.stdout.write(`${domain}: ${expected}\n`);
   }
   assert.ok(lookups.includes("unknown.example.test"), "unknown SOCKS hostname must be resolved for GeoIP matching");
-  assert.ok(lookups.includes("api.known.cn"), "known domestic hostname must use its selected DNS policy before direct dialing");
-  assert.ok(proxyTargets.includes(`192.0.2.40:${originPort}`), "custom proxy DNS must supply the actual dial address, not just a diagnostic label");
-  assert.ok(proxyTargets.includes(`192.0.2.50:${originPort}`), "known overseas DNS must supply the proxy dial address even for a China IP answer");
+  if (!bundledGeolocation) assert.ok(lookups.includes("api.known.cn"), "known domestic hostname must use its selected DNS policy before direct dialing");
+  assert.ok(proxyTargets.includes(`${bundledGeolocation ? "8.141.181.226" : "192.0.2.40"}:${originPort}`), "custom proxy DNS must supply the actual dial address, not just a diagnostic label");
+  assert.ok(proxyTargets.includes(`${bundledGeolocation ? "8.141.181.226" : "192.0.2.50"}:${originPort}`), "known overseas DNS must supply the proxy dial address even for a China IP answer");
+  if (bundledGeolocation) {
+    const ai = config.outbounds.find(({ tag }) => tag === "raylink-ai");
+    assert.equal(ai.type, "selector");
+    assert.ok(ai.outbounds.length && ai.outbounds.every((tag) => config.outbounds.find((outbound) => outbound.tag === tag)?.server), "Manual AI candidates must remain concrete authorized nodes");
+    const unknown = config.outbounds.find(({ tag }) => tag === "raylink-unknown");
+    assert.equal(unknown.default, "raylink-auto");
+    assert.equal(config.route.final, "raylink-unknown");
+    console.log("Bundled geographic CN rules: unknown 8.130/8.141/8.152 direct; 1.1.1.1 proxy; explicit AI/overseas/custom rules preserved (loopback HTTP payloads)");
+  }
   if (testIpPriority) {
     // An explicit IP rule must inspect the resolved address first and keep
     // that same address for dialing, including AI targets (DNS-rebind safety).
