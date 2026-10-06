@@ -63,6 +63,8 @@ async function dnsQuery(domain, port) {
     client.send(Buffer.concat([header, question]), port, "127.0.0.1");
     const [answer] = await Promise.race([response, delay(4000).then(() => { throw new Error(`DNS timeout: ${domain}`); })]);
     assert.equal(answer.readUInt16BE(2) & 15, 0, `DNS failed: ${domain}`);
+    assert.equal(answer.readUInt16BE(6), 1, `${domain}: fixture must return one A record`);
+    return [...answer.subarray(-4)].join(".");
   } finally { client.close(); }
 }
 try {
@@ -80,6 +82,7 @@ try {
     .replace('log-level: "info"', 'log-level: "debug"')
     .replace('  enhanced-mode: "fake-ip"', `  enhanced-mode: "redir-host"\n  listen: "127.0.0.1:${dnsPort}"`)
     .replaceAll("https://223.5.5.5/dns-query", dnsEndpoint("domestic"))
+    .replaceAll("https://223.6.6.6/dns-query", dnsEndpoint("domestic"))
     .replaceAll("https://1.1.1.1/dns-query#AI 网站代理", dnsEndpoint("ai"))
     .replaceAll("https://1.1.1.1/dns-query#RayLink 代理", dnsEndpoint("remote"));
   const start = yaml.indexOf("\nproxies:\n"); const end = yaml.indexOf("\nproxy-groups:\n", start);
@@ -105,14 +108,17 @@ try {
     ["a1.mzstatic.com", "domestic", "DIRECT"],
     ["blog.csdn.net", "domestic", "DIRECT"],
     ["www.alibaba", "domestic", "DIRECT"],
-    ["alibaba", "remote", "PROXY"],
+    // The suffix-only domestic rule does not classify the bare TLD. Its private
+    // domestic candidate must be rejected before the remote answer is accepted.
+    ["alibaba", ["domestic", "remote"], "PROXY"],
     ["google.com", "remote", "PROXY"],
     ["chatgpt.com", "ai", "AI"]
   ]) {
     for (const resolver of resolvers) resolver.queries.length = 0;
-    await dnsQuery(domain, dnsPort);
-    assert.ok(resolvers.find((resolver) => resolver.name === expectedDns).queries.includes(domain), `${domain}: wrong DNS upstream\n${JSON.stringify(resolvers.map(({ name, queries }) => ({ name, queries })))}`);
-    for (const resolver of resolvers.filter((resolver) => resolver.name !== expectedDns)) assert.ok(!resolver.queries.includes(domain), `${domain} also queried through ${resolver.name}`);
+    const expectedUpstreams = Array.isArray(expectedDns) ? expectedDns : [expectedDns];
+    const answerAddress = await dnsQuery(domain, dnsPort);
+    assert.deepEqual(resolvers.filter((resolver) => resolver.queries.includes(domain)).map(({ name }) => name), expectedUpstreams, `${domain}: wrong DNS upstreams`);
+    assert.equal(answerAddress, resolvers.find(({ name }) => name === expectedUpstreams.at(-1)).address, `${domain}: wrong accepted DNS answer`);
     const { stdout } = await run("curl", ["--silent", "--show-error", "--fail", "--max-time", "5", "--noproxy", "", "--socks5-hostname", `127.0.0.1:${mixedPort}`, `http://${domain}:${originPort}/`]);
     assert.equal(stdout, expectedRoute, `${domain}: wrong route\n${logs.slice(-3000)}`);
     console.log(`${domain}: DNS=${expectedDns}, route=${expectedRoute}`);

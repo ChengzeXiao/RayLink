@@ -12,6 +12,7 @@ import {
   ROUTE_POLICY_GROUPS
 } from "../routing/policy.js";
 import { getBundledRoutingRules } from "../routing/rule-sets/bundled.js";
+import { getDomesticDnsFallbackCidrs } from "../routing/domestic-dns.js";
 
 const chinaFallbackSuffixes = CHINA_FALLBACK_DOMAIN_SUFFIXES.map(suffix => suffix.replace(/^\./, ""));
 
@@ -687,9 +688,15 @@ function buildMihomoConfig(singBoxConfig, inputPolicy, endpointOverrides = {}, s
       ])],
       "respect-rules": true,
       "default-nameserver": ["223.5.5.5"],
-      nameserver: routePolicy.mode === "direct"
-        ? ["https://223.5.5.5/dns-query"]
+      nameserver: routePolicy.mode !== "global-proxy"
+        ? ["https://223.5.5.5/dns-query", ...(routePolicy.mode === "smart" ? ["https://223.6.6.6/dns-query"] : [])]
         : [`https://1.1.1.1/dns-query#${ROUTE_POLICY_GROUPS.proxy.name}`],
+      ...(routePolicy.mode === "smart" ? {
+        // Unknown domestic services need a nearby CDN answer before IP routing.
+        // Reject every non-CN candidate; explicit DNS policies still take priority.
+        fallback: [`https://1.1.1.1/dns-query#${ROUTE_POLICY_GROUPS.proxy.name}`],
+        "fallback-filter": { geoip: false, ipcidr: getDomesticDnsFallbackCidrs() }
+      } : {}),
       "nameserver-policy": {
         ...mihomoDnsPolicyRules(routePolicy),
         ...(routePolicy.mode === "smart"

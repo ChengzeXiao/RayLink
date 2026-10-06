@@ -15,17 +15,17 @@
 
 ## 推荐：一键安装与首次初始化
 
-v0.2.45 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。发布产物与升级说明见 GitHub Release。
+v0.2.46 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。发布产物与升级说明见 GitHub Release。
 使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | sudo bash'
 ```
 
 脚本检测 CPU 架构和公网 IP，自动补齐 Debian/Ubuntu 上缺少的归档校验工具，
@@ -33,19 +33,19 @@ bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/
 云主机若有 NAT、多块网卡，建议显式提供实际访问地址：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 安装指定版本：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | bash -s -- --version 0.2.45'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --version 0.2.46'
 ```
 
 只验证下载、校验和解压，不修改系统：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | bash -s -- --dry-run'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --dry-run'
 ```
 
 一键安装会完成：
@@ -76,7 +76,7 @@ sudo env RAYLINK_PUBLIC_IP=203.0.113.10 RAYLINK_DOMAIN=panel.example.com RAYLINK
 
 Caddy 自动申请并续期域名证书；控制台和订阅使用该域名，仍保留 IP 恢复入口。需要分别配置域名时，设置 `RAYLINK_INTERACTIVE_SETUP=true` 保留交互向导。详见 [自动安装与维护](../docs/automatic-installation.md)。
 
-### 升级到 v0.2.45
+### 升级到 v0.2.46
 
 在已安装 RayLink 的服务器上重新执行同一条一键命令即可。安装器会识别
 `/opt/raylink`，保持 sing-box Runtime 运行，备份当前应用和
@@ -84,12 +84,14 @@ Caddy 自动申请并续期域名证书；控制台和订阅使用该域名，�
 升级器会自动恢复应用、数据和 systemd 服务单元：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.45/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash'
 ```
 
 升级备份保存在 `/var/backups/raylink/`。新版还支持在「系统 → 版本与备份」检查正式 Release 并更新控制面；独立 systemd 更新任务在主控重启后保留结果，重新验证实际版本及服务状态。Node 0.9.0 起支持同样的远程程序更新；更旧 Node 需先执行一次升级命令。软件更新不执行发行版升级，也不自动重启服务器。
 
-v0.2.45 将国内 IP 兜底更新为经审核的地理位置数据，修复部分国内云服务器因运营商注册国家不同而误走代理的问题。保留 AI、明确国外域名、自定义规则的优先级，以及手动 AI 节点和未分类组。保留用户、凭据与本月用量；从 v0.2.44 升级无需更换 sing-box Runtime。各设备需刷新完整订阅并重新连接，再核对新连接记录。详见 [发布说明](../docs/release/v0.2.45.md)。
+v0.2.46 修改 Clash/Mihomo 智能完整订阅的未知域名 DNS 选择：采用通过受管中国 IPv4 检查的国内 A 记录候选，其他结果回退代理 DNS，减少国内 App 图片被分配到海外 CDN 的绕行。保留 AI、明确海外域名、自定义规则的优先级，以及手动 AI 节点和未分类组。保留用户、凭据与本月用量；从 v0.2.45 升级无需更换 sing-box Runtime。各设备需刷新完整订阅并重新连接，再核对新连接记录。其他客户端格式保持原语义。详见 [发布说明](../docs/release/v0.2.46.md)。
+
+v0.2.45 已将各完整订阅的国内 IP 兜底改为审核后的地理位置数据，修复国内云服务器因运营商注册国家不同而误分类的问题，详见 [历史发布说明](../docs/release/v0.2.45.md)。
 
 ### 从旧版本升级到 v0.2.12
 
@@ -141,17 +143,17 @@ sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime amd64
 `raylink-sing-box-1.14.2-linux-amd64 version`，确认版本和完整审批 build tags。
 原生架构构建会在脚本内部直接完成这项执行校验。
 
-本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.45 默认装配
+本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.46 默认装配
 AMD64 Runtime：
 
 ```bash
-bash deploy/package-release.sh 0.2.45
+bash deploy/package-release.sh 0.2.46
 ```
 
 也可以显式指定本次发布需要装配的架构：
 
 ```bash
-RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.45
+RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.46
 ```
 
 发布包包含运行程序、部署工具、README、变更日志和生产门槛文档，不会打包本地
