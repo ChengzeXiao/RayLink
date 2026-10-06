@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { validateRuleSetManifest, validRuleSet } from "../../singbox/rule-set-cache.js";
+import { readApprovedRuleSetResponse } from "./approved-response.js";
 
 const run = promisify(execFile);
 const [manifestPath, outputPath] = process.argv.slice(2);
@@ -20,9 +21,8 @@ const binary = process.env.SING_BOX_BIN || "sing-box";
 try {
   for (const source of manifest.rules) {
     const download = source.delivery === "bundled" ? source.source : source;
-    const response = await fetch(download.url, { signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`${source.filename}: HTTP ${response.status}`);
-    let payload = Buffer.from(await response.arrayBuffer());
+    const response = await fetch(download.url, { signal: AbortSignal.timeout(30_000), headers: { "accept-encoding": "identity" } });
+    let payload = await readApprovedRuleSetResponse(response, download.bytes);
     const binaryPath = join(staging, source.filename);
     if (source.delivery === "bundled") {
       if (payload.length !== download.bytes || createHash("sha256").update(payload).digest("hex") !== download.sha256) {
@@ -67,7 +67,7 @@ try {
     if (!(await readFile(rebuilt)).equals(payload)) throw new Error(`${source.filename}: binary/inline round trip differs`);
     await rm(rebuilt);
   }
-  for (const name of ["LICENSE.sing-geosite", "LICENSE.sing-geoip", "LICENSE.db-ip", "COPYING", "COPYING.CC-BY-4.0", "README.md", "generate-country.py"]) {
+  for (const name of ["LICENSE.sing-geosite", "LICENSE.sing-geoip", "LICENSE.db-ip", "COPYING", "COPYING.CC-BY-4.0", "README.md", "generate-country.py", "approved-response.js"]) {
     await copyFile(new URL(name, import.meta.url), join(staging, name));
   }
   const countrySource = manifest.rules.find((rule) => rule.delivery === "bundled")?.source;

@@ -1764,6 +1764,7 @@ test("user creates a stable subscription URL and rotating it revokes the old URL
     headers: { "if-none-match": subscriptionEtag }
   });
   assert.equal(notModifiedResponse.status, 304);
+  assert.equal(notModifiedResponse.headers.get("link"), '</rule-sets/attribution.txt>; rel="describedby"');
 
   const second = await (await fetch(`${testApp.baseUrl}/api/portal/subscription/rotate`, {
     method: "POST",
@@ -1809,6 +1810,7 @@ test("one universal subscription URL negotiates Mihomo, Loon, Egern and sing-box
     headers: { "user-agent": "clash-verge/v2.5.2" }
   });
   assert.equal(mihomo.status, 200);
+  assert.equal(mihomo.headers.get("link"), '</rule-sets/attribution.txt>; rel="describedby"');
   assert.match(mihomo.headers.get("content-type"), /application\/yaml/);
   assert.match(mihomo.headers.get("content-disposition"), /raylink-mihomo\.yaml/);
   assert.equal(
@@ -1843,6 +1845,7 @@ test("one universal subscription URL negotiates Mihomo, Loon, Egern and sing-box
     headers: { "user-agent": "clash-verge/v2.5.2" }
   });
   assert.equal(mihomoHead.status, 200);
+  assert.equal(mihomoHead.headers.get("link"), mihomo.headers.get("link"));
   assert.match(mihomoHead.headers.get("content-type"), /application\/yaml/);
   assert.ok(Number(mihomoHead.headers.get("content-length")) > 0);
   assert.equal(
@@ -2037,6 +2040,29 @@ test("subscription uses control-plane managed official rule sets when cached", a
   assert.equal(ruleSetResponse.status, 200);
   assert.equal(ruleSetResponse.headers.get("content-type"), "application/octet-stream");
   assert.equal(await ruleSetResponse.text(), "managed-geosite");
+  assert.equal(ruleSetResponse.headers.get("link"), '</rule-sets/attribution.txt>; rel="describedby"');
+});
+
+test("public routing data attribution is available on the subscription-only host and linked from cached SRS", async (t) => {
+  const testApp = await startTestApp({ subscriptionOrigin: "https://sub.example.com", ruleSetCache: undefined });
+  t.after(() => testApp.close());
+  const headers = { host: "sub.example.com" };
+  const rules = await fetch(`${testApp.baseUrl}/rule-sets/geoip-cn.srs`, { headers });
+  assert.equal(rules.status, 200);
+  assert.equal(rules.headers.get("link"), '</rule-sets/attribution.txt>; rel="describedby"');
+  await rules.arrayBuffer();
+  const cached = await fetch(`${testApp.baseUrl}/rule-sets/geoip-cn.srs`, {
+    headers: { ...headers, "if-none-match": rules.headers.get("etag") }
+  });
+  assert.equal(cached.status, 304);
+  assert.equal(cached.headers.get("link"), rules.headers.get("link"));
+  const notice = await fetch(`${testApp.baseUrl}/rule-sets/attribution.txt`, { headers });
+  assert.equal(notice.status, 200);
+  assert.match(notice.headers.get("content-type"), /text\/plain/);
+  const body = await notice.text();
+  assert.match(body, /https:\/\/db-ip\.com/);
+  assert.match(body, /https:\/\/creativecommons\.org\/licenses\/by\/4\.0/);
+  assert.match(body, /SagerNet/);
 });
 
 test("offline cold start serves the complete bundled routing baseline and reports its version", async (t) => {

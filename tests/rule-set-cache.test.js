@@ -168,12 +168,32 @@ test("restart rejects a corrupt new generation and retains the last good approve
 test("checksum-rejected candidate never publishes a partial rule set", async (t) => {
   const update = await candidate(t);
   const cache = new ManagedRuleSetCache({ dataDir: await directory(t), manifestPath: update.path,
-    fetchImpl: async () => new Response("SRS-unapproved-content") });
+    fetchImpl: async (url) => {
+      const corrupt = Buffer.from(update.payloads.get(url));
+      corrupt[corrupt.length - 1] ^= 1;
+      return new Response(corrupt);
+    } });
   await cache.prepare();
   assert.equal(cache.available(), true);
   assert.notEqual(cache.status().version, update.manifest.version);
   assert.match(cache.status().lastError, /checksum/);
   assert.equal(await cache.get("../../private"), null);
+});
+
+test("an oversized approved download is cancelled while the complete previous cache remains available", async (t) => {
+  const update = await candidate(t);
+  let cancellations = 0;
+  const cache = new ManagedRuleSetCache({ dataDir: await directory(t), manifestPath: update.path,
+    fetchImpl: async (url) => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(update.payloads.get(url).length + 1)); },
+      cancel() { cancellations++; }
+    })) });
+  await cache.prepare();
+  assert.equal(cache.available(), true);
+  assert.notEqual(cache.status().version, update.manifest.version);
+  assert.match(cache.status().lastError, /response exceeds approved size/);
+  assert.equal(cancellations, 1);
+  for (const name of filenames) assert.deepEqual(await cache.get(name), await readFile(new URL(`../server/routing/rule-sets/${name}`, import.meta.url)));
 });
 
 test("offline restart reports repairing a corrupt bundled cache generation", async (t) => {

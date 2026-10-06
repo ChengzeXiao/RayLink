@@ -88,6 +88,7 @@ const contentTypes = {
   ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".sh": "text/plain; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
   ".svg": "image/svg+xml"
 };
 
@@ -226,6 +227,7 @@ function sendSubscriptionArtifact(request, response, artifact, user) {
     "content-type": artifact.contentType,
     "content-length": Buffer.byteLength(payload),
     "content-disposition": `attachment; filename="${artifact.filename}"`,
+    link: '</rule-sets/attribution.txt>; rel="describedby"',
     etag,
     "subscription-userinfo": userInfo,
     "referrer-policy": "no-referrer",
@@ -2198,6 +2200,7 @@ export async function createRayLinkApp(options) {
           "cache-control": "public, max-age=3600, must-revalidate",
           "content-type": "application/octet-stream",
           "content-length": payload.length,
+          link: '</rule-sets/attribution.txt>; rel="describedby"',
           etag,
           "x-content-type-options": "nosniff"
         };

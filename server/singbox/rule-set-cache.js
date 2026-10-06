@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { readApprovedRuleSetResponse } from "../routing/rule-sets/approved-response.js";
 
 const execFile = promisify(execFileCallback);
 const bundledDirectory = fileURLToPath(new URL("../routing/rule-sets/", import.meta.url));
@@ -164,8 +165,7 @@ export class ManagedRuleSetCache {
             signal: AbortSignal.timeout(this.requestTimeoutMs),
             headers: { "user-agent": "RayLink rule-set cache" }
           });
-          if (!response.ok) throw new Error(`Rule-set download HTTP ${response.status}`);
-          payload = Buffer.from(await response.arrayBuffer());
+          payload = await readApprovedRuleSetResponse(response, rule.bytes);
         }
         if (!validRuleSet(payload, rule)) throw new Error(`Rule-set checksum mismatch: ${rule.filename}`);
         payloads.set(rule.filename, payload);
