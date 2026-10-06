@@ -487,6 +487,7 @@ function clientConfigForOutbounds(
   const aiTags = [...tcpTags, ...udpTags].filter((tag) => routePolicy.aiExit.mode === "auto"
     || outboundHostIds.get(tag) === routePolicy.aiExit.hostId);
   const aiUnavailable = aiTags.length === 0;
+  const aiManual = routePolicy.aiSelection === "manual";
   const healthyUdpTags = udpTags.filter((tag) => !smartExcludedTags.has(tag));
   const smartTags = [...tcpTags, ...healthyUdpTags];
   const usableSmartTags = smartTags.length ? smartTags : tags;
@@ -719,15 +720,22 @@ function clientConfigForOutbounds(
         default: tcpTags.length ? ROUTE_POLICY_GROUPS.tcp.tag : ROUTE_POLICY_GROUPS.smart.tag,
         interrupt_exist_connections: false
       },
+      ...(routePolicy.mode === "smart" ? [{
+        type: "selector",
+        tag: ROUTE_POLICY_GROUPS.unknown.tag,
+        outbounds: [ROUTE_POLICY_GROUPS.proxy.tag, ROUTE_POLICY_GROUPS.direct.tag],
+        default: ROUTE_POLICY_GROUPS.proxy.tag,
+        interrupt_exist_connections: false
+      }] : []),
       ...(!aiUnavailable ? [{
         type: "selector",
         tag: ROUTE_POLICY_GROUPS.ai.tag,
-        outbounds: [
+        outbounds: aiManual ? aiTags : [
           ROUTE_POLICY_GROUPS.aiStable.tag,
           ...(routePolicy.aiExit.mode === "auto" ? [ROUTE_POLICY_GROUPS.proxy.tag, ...selectorGroups] : []),
           ...aiTags
         ],
-        default: ROUTE_POLICY_GROUPS.aiStable.tag,
+        default: aiManual ? aiTags[0] : ROUTE_POLICY_GROUPS.aiStable.tag,
         interrupt_exist_connections: false
       }] : []),
       { type: "direct", tag: "direct" }
@@ -768,7 +776,7 @@ function clientConfigForOutbounds(
       rule_set: ruleSets,
       final: routePolicy.mode === "direct"
         ? ROUTE_POLICY_GROUPS.direct.tag
-        : ROUTE_POLICY_GROUPS.proxy.tag,
+        : routePolicy.mode === "smart" ? ROUTE_POLICY_GROUPS.unknown.tag : ROUTE_POLICY_GROUPS.proxy.tag,
       default_domain_resolver: "dns-local",
       auto_detect_interface: true
     },

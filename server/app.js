@@ -1576,7 +1576,8 @@ export async function createRayLinkApp(options) {
         });
       sendJson(response, 200, { ...diagnostic, aiDomain: { ...aiDomain,
         version: AI_DOMAIN_RULES_VERSION,
-        desiredEgress: diagnostic.action === "block" ? "blocked" : diagnostic.action === "direct" ? "client-direct"
+        desiredEgress: diagnostic.clientSelection ? "client-selection"
+          : diagnostic.action === "block" ? "blocked" : diagnostic.action === "direct" ? "client-direct"
           : aiDomain.eligible && upstream.enabled ? "residential" : "server",
         runtimeSync,
         evidence: "saved-domain-rules",

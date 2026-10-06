@@ -51,15 +51,17 @@ async function lookupWithDeadline(lookup, domain, timeoutMs) {
   }
 }
 
-function outboundForAction(action) {
+function outboundForAction(action, source) {
   if (action === "indeterminate") return null;
   if (action === "direct") return ROUTE_POLICY_GROUPS.direct.tag;
   if (action === "ai") return ROUTE_POLICY_GROUPS.ai.tag;
   if (action === "block") return "reject";
+  if (action === "proxy" && ["geoip", "fallback"].includes(source)) return ROUTE_POLICY_GROUPS.unknown.tag;
   return ROUTE_POLICY_GROUPS.proxy.tag;
 }
 
 function explained(result, domain, addresses = [], warnings = []) {
+  const clientSelectable = outboundForAction(result.action, result.source) === ROUTE_POLICY_GROUPS.unknown.tag;
   const explanations = {
     custom: "命中管理员自定义规则",
     mode: "由当前全局路由模式决定",
@@ -74,13 +76,16 @@ function explained(result, domain, addresses = [], warnings = []) {
     "geoip-mixed": "混合 IP 的路由结果取决于客户端匹配语义与实际选择地址",
     "custom-mixed": "解析地址命中不同的自定义规则，无法推断统一客户端出口",
     "address-limit": "解析地址过多，已停止规则匹配，不能推断完整结果",
-    fallback: "规则集暂不可用于诊断，按未知域名回退到代理"
+    fallback: "规则集暂不可用于诊断，候选路径为未分类流量组，默认代理"
   };
   return {
     domain,
     addresses,
     action: result.action,
-    outbound: outboundForAction(result.action),
+    outbound: outboundForAction(result.action, result.source),
+    ...(clientSelectable ? { clientSelection: {
+      group: ROUTE_POLICY_GROUPS.unknown.name, defaultAction: "proxy", choices: ["proxy", "direct"]
+    } } : {}),
     source: result.source,
     ruleId: result.ruleId || null,
     dns: result.dns,
@@ -92,6 +97,7 @@ function explained(result, domain, addresses = [], warnings = []) {
     },
     warnings: [
       ...(addresses.length ? ["主控 DNS 与客户端 DNS、网络和规则集版本可能不同，不能代表客户端实际出口。"] : []),
+      ...(clientSelectable ? ["未分类流量默认代理，但客户端可手动改为直连；服务器无法读取本机选择，请核对连接记录。"] : []),
       ...warnings
     ],
     checkedAt: new Date().toISOString()
@@ -108,9 +114,14 @@ export async function diagnoseRoutingDomain({
   const policy = normalizeRoutingPolicy(inputPolicy);
   const initial = routingDecisionForDomain(policy, domain);
   const normalizedDomain = String(domain).trim().toLowerCase().replace(/\.$/, "");
+  const explain = (result, addresses = [], warnings = []) => explained(result, normalizedDomain, addresses, [
+    ...(result.action === "ai" && policy.aiSelection === "manual"
+      ? ["AI 节点由客户端手动选择并保存在本机；服务器无法读取该选择或确认实际出口，请核对客户端连接记录。"] : []),
+    ...warnings
+  ]);
   const isGlobalDefault = (decision) => policy.mode === "global-proxy" && decision.source === "mode";
   if (initial.action !== "resolve" && !isGlobalDefault(initial)) {
-    return explained(initial, normalizedDomain);
+    return explain(initial);
   }
   let geositeMatch;
   let inferredDns = initial.dns;
@@ -126,7 +137,7 @@ export async function diagnoseRoutingDomain({
     if (geositeMatch === true) {
       inferredDns = "domestic";
       if (initial.source !== "custom-ip") {
-        return explained({ action: "direct", source: "geosite-cn", dns: inferredDns }, normalizedDomain);
+        return explain({ action: "direct", source: "geosite-cn", dns: inferredDns });
       }
     }
   }
@@ -151,8 +162,8 @@ export async function diagnoseRoutingDomain({
   ).values()];
   if (addresses.length > MAX_DIAGNOSTIC_ADDRESSES) {
     return {
-      ...explained({ action: "indeterminate", source: "address-limit", dns: inferredDns },
-        normalizedDomain, addresses.slice(0, MAX_DIAGNOSTIC_ADDRESSES),
+      ...explain({ action: "indeterminate", source: "address-limit", dns: inferredDns },
+        addresses.slice(0, MAX_DIAGNOSTIC_ADDRESSES),
         [`解析结果超出 ${MAX_DIAGNOSTIC_ADDRESSES} 个地址的诊断上限；仅展示部分地址，未对截断结果推断出口。`]),
       addressCount: addresses.length,
       addressesTruncated: true,
@@ -215,10 +226,10 @@ export async function diagnoseRoutingDomain({
   const result = mixed ? { action: "indeterminate", source: initial.source === "custom-ip"
     ? "custom-mixed" : "geoip-mixed", dns: inferredDns } : prediction;
   return {
-    ...explained(result, normalizedDomain, addresses, warnings),
+    ...explain(result, addresses, warnings),
     addressDecisions,
     singBoxPrediction: incomplete ? null : {
-      ...prediction, outbound: outboundForAction(prediction.action), matchSemantics: "any-address"
+      ...prediction, outbound: outboundForAction(prediction.action, prediction.source), matchSemantics: "any-address"
     }
   };
 }

@@ -1302,9 +1302,11 @@ export class RayLinkStore {
   }
 
   updateRoutingPolicy(input = {}) {
+    const previous = this.routingPolicy();
     const policy = normalizeRoutingPolicy({
       ...input,
-      aiExit: input.aiExit === undefined ? this.routingPolicy().aiExit : input.aiExit
+      aiExit: input.aiExit === undefined ? previous.aiExit : input.aiExit,
+      aiSelection: input.aiSelection === undefined ? previous.aiSelection : input.aiSelection
     });
     if (this.aiUpstreamSettings().enabled && (policy.mode !== "smart"
       || policy.aiExit.mode !== "pinned" || policy.aiExit.hostId !== "local")) {

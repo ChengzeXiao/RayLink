@@ -15,6 +15,9 @@ test("strategy workspace exposes simple modes, custom rules and explainable diag
   assert.match(html, /value="smart"/);
   assert.match(html, /value="global-proxy"/);
   assert.match(html, /value="direct"/);
+  assert.match(html, /<select name="aiSelection">/);
+  assert.match(html, /<option value="manual">手动固定节点<\/option>/);
+  assert.match(html, /<option value="fallback">协议自动回退<\/option>/);
   assert.match(html, /id="routing-rule-form"/);
   assert.match(html, /id="routing-diagnose-form"/);
   assert.match(script, /\/api\/settings\/routing/);
@@ -36,7 +39,10 @@ test("routing policy renders during the post-login bootstrap", async () => {
     controlPlane: { currentAdmin: { role: "owner" }, routingPolicy: { mode: "smart", rules: [] } },
     routingPolicySaving: false,
     document: {
-      querySelectorAll() {
+      querySelectorAll(selector) {
+        if (selector.includes('#routing-mode-form select,')) {
+          return [this.querySelector('#routing-mode-form select[name="aiSelection"]')];
+        }
         return [];
       },
       querySelector(selector) {
@@ -54,6 +60,14 @@ test("routing policy renders during the post-login bootstrap", async () => {
 
   assert.equal(nodes.get("#routing-mode-title").textContent, "智能分流");
   assert.equal(nodes.get("#routing-rule-count").textContent, "0");
+  const aiSelection = nodes.get('#routing-mode-form select[name="aiSelection"]');
+  assert.equal(aiSelection.value, "fallback", "older policies preserve protocol fallback");
+  assert.equal(aiSelection.disabled, false);
+  context.controlPlane.routingPolicy.aiSelection = "manual";
+  context.controlPlane.currentAdmin.role = "auditor";
+  context.renderRoutingPolicy();
+  assert.equal(aiSelection.value, "manual", "saved manual selection is shown after bootstrap");
+  assert.equal(aiSelection.disabled, true, "read-only roles cannot edit the selection");
 });
 
 test("saving routing rules separates publication metadata and refreshes coverage without clearing the AI draft", async () => {
@@ -78,6 +92,34 @@ test("saving routing rules separates publication metadata and refreshes coverage
   assert.equal(refreshed, 1);
   assert.equal(context.aiEgressDirty, true);
   assert.ok(messages.some(message => message.join(" ").includes("待发布")));
+});
+
+test("routing mode form saves manual AI selection with the existing host restriction and rules", async () => {
+  const script = await readFile(new URL("app.js", webRoot), "utf8");
+  const start = script.indexOf("async function saveRoutingMode(");
+  const end = script.indexOf("\nasync function addRoutingRule", start);
+  const policy = {
+    mode: "smart", aiSelection: "fallback", unknownDomain: "resolve-geoip",
+    aiExit: { mode: "pinned", hostId: "host-a" },
+    rules: [{ id: "direct-work", action: "direct", match: "domain", value: "work.example" }]
+  };
+  const saved = [];
+  const context = {
+    controlPlane: { routingPolicy: policy }, routingPolicySaving: false,
+    canManageRoutingPolicy: () => true,
+    FormData: class {
+      constructor(form) { this.form = form; }
+      get(name) { return this.form[name]; }
+    },
+    persistRoutingPolicy: async next => { saved.push(JSON.parse(JSON.stringify(next))); },
+    showToast() { assert.fail("saving the form must succeed"); }
+  };
+  vm.runInNewContext(script.slice(start, end), context);
+  await context.saveRoutingMode({ preventDefault() {}, currentTarget: { mode: "smart", aiSelection: "manual" } });
+  assert.deepEqual(saved, [{ ...policy, aiSelection: "manual" }]);
+  context.canManageRoutingPolicy = () => false;
+  await context.saveRoutingMode({ preventDefault() {}, currentTarget: { mode: "smart", aiSelection: "fallback" } });
+  assert.equal(saved.length, 1, "read-only users cannot change AI node selection");
 });
 
 test("routing saves reject read-only roles, coalesce duplicate writes and discard a previous session response", async () => {

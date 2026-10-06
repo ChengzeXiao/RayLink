@@ -8,7 +8,7 @@ fail() {
 
 script_directory="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source_root="$(CDPATH= cd -- "$script_directory/.." && pwd)"
-release_version="${1:-0.2.43}"
+release_version="${1:-0.2.44}"
 release_arches="${RAYLINK_RELEASE_ARCHES:-amd64}"
 runtime_version="${RAYLINK_RUNTIME_VERSION:-1.14.2}"
 release_arch_count="$(printf '%s\n' "$release_arches" | awk '{ print NF }')"

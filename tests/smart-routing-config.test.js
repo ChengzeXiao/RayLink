@@ -10,6 +10,22 @@ function clientConfig(routePolicy) {
   });
 }
 
+test("smart sing-box routes unclassified traffic through a manual proxy or direct choice", () => {
+  const config = clientConfig({ mode: "smart" });
+  const unknown = config.outbounds.find((outbound) => outbound.tag === "raylink-unknown");
+  assert.deepEqual(unknown, {
+    type: "selector", tag: "raylink-unknown", outbounds: ["raylink-auto", "direct"],
+    default: "raylink-auto", interrupt_exist_connections: false
+  });
+  assert.equal(config.route.final, "raylink-unknown");
+  assert.equal(config.route.rules.find((rule) => rule.rule_set === "geoip-cn")?.outbound, "direct");
+  for (const [mode, final] of [["global-proxy", "raylink-auto"], ["direct", "direct"]]) {
+    const other = clientConfig({ mode });
+    assert.equal(other.route.final, final);
+    assert.ok(!other.outbounds.some((outbound) => outbound.tag === "raylink-unknown"));
+  }
+});
+
 test("sing-box keeps AI dependencies on AI DNS and routing without broad shared-provider suffixes", () => {
   const config = clientConfig({ rules: [{ match: "domain_suffix", value: "workos.com", action: "direct" }] });
   const aiRoute = config.route.rules.find((rule) => rule.outbound === "raylink-ai" && rule.domain);
@@ -58,4 +74,27 @@ test("mobile default uses TCP while AI recovery retains every enabled transport"
   assert.ok(group("raylink-auto").outbounds.includes("raylink-udp"));
   assert.equal(group("raylink-ai").interrupt_exist_connections, false);
   assert.ok(group("raylink-ai").outbounds.includes("raylink-backup-vless"), "AI exit can be explicitly pinned");
+});
+
+test("manual AI selection can only use authorized protocols on the pinned Host", () => {
+  const profiles = defaultProtocolConfigs().filter((profile) => ["vless", "hysteria2"].includes(profile.type))
+    .map((profile) => ({ ...profile, enabled: true }));
+  const build = (hostId) => buildMultiHostProtocolClientConfig({
+    credential: { email: "test@example.com", runtimeUuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", runtimePassword: "fixture", serverPassword: "AAAAAAAAAAAAAAAAAAAAAA==" },
+    hosts: ["primary", "other-region"].map((id) => ({ id, address: `${id}.example.com`, protocols: profiles })),
+    routePolicy: { aiSelection: "manual", aiExit: { mode: "pinned", hostId } }
+  });
+  const config = build("primary");
+  const ai = config.outbounds.find((outbound) => outbound.tag === "raylink-ai");
+  assert.deepEqual(ai.outbounds, ["raylink-primary-vless", "raylink-primary-hysteria2"]);
+  assert.equal(ai.default, "raylink-primary-vless");
+  assert.equal(ai.interrupt_exist_connections, false);
+  assert.deepEqual(config.outbounds.find((outbound) => outbound.tag === "raylink-ai-stable").outbounds, ai.outbounds,
+    "Host membership must remain available to the other full-profile exporters");
+  assert.ok(config.outbounds.find((outbound) => outbound.tag === "raylink-auto").outbounds.includes("raylink-other-region-vless"),
+    "Ordinary traffic retains the other authorized Host");
+  const missing = build("no-longer-authorized");
+  assert.ok(!missing.outbounds.some((outbound) => outbound.tag === "raylink-ai"));
+  assert.equal(missing.route.rules.find((rule) => rule.domain_suffix?.includes("claude.ai"))?.action, "reject");
+  assert.equal(missing.dns.rules.find((rule) => rule.domain_suffix?.includes("claude.ai"))?.action, "reject");
 });

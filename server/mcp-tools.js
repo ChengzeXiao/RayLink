@@ -114,6 +114,7 @@ const protocolFields = {
 const protocolPath = (args) => `${hostPath(args)}/protocols/${encodeURIComponent(args.protocolType)}`;
 const routingFields = {
   mode: z.enum(["smart", "global-proxy", "direct"]),
+  aiSelection: z.enum(["fallback", "manual"]).optional(),
   aiExit: z.strictObject({ mode: z.enum(["auto", "pinned"]), hostId: id.nullable().optional() }).optional(),
   unknownDomain: z.literal("resolve-geoip").optional(),
   rules: z.array(z.strictObject({
@@ -196,8 +197,8 @@ export const mcpTools = [
   defineTool({ name: "hosts_protocol_measure", description: "Run protocol connection samples and save health evidence for a Host. Configuration changes cause skipped results that should be retried after publication; server probes do not prove mobile-client reachability.",
     permission: "runtime.manage", mutating: true, fields: { hostId: id }, method: "POST", path: (args) => `${hostPath(args)}/protocols/latency`, select: (value) => pick(value, ["hostId", "checkedAt", "results"]) }),
   defineTool({ name: "routing_get", description: "Read routing policy, AI domain coverage and version, and verified rule-set status.", path: "/api/bootstrap", select: (value) => ({ policy: value.routingPolicy, ruleSets: value.routingRuleSets, aiDomainRules: value.aiDomainRules }) }),
-  defineTool({ name: "routing_update", description: "Replace the routing policy. Supply the full rules array; omitted rules are not preserved. Domain AI rules also update the enabled residential Runtime; shared ordinary domains stay protected. Inspect runtimeSync for pending or simulated publication. Refresh full client subscriptions and reconnect to consume the new policy.",
-    permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules", "aiExit", "runtimeSync"]) }),
+  defineTool({ name: "routing_update", description: "Replace the routing policy. aiSelection chooses manual nodes or protocol fallback in full subscriptions; omitted aiSelection preserves the saved value. Supply the full rules array; omitted rules are not preserved. Domain AI rules also update the enabled residential Runtime; shared ordinary domains stay protected. Inspect runtimeSync for pending or simulated publication. Refresh full client subscriptions and reconnect to consume the new policy.",
+    permission: "runtime.manage", mutating: true, fields: routingFields, method: "PATCH", path: "/api/settings/routing", body: true, select: (value) => pick(value, ["mode", "unknownDomain", "rules", "aiExit", "aiSelection", "runtimeSync"]) }),
   defineTool({ name: "routing_ai_status", description: "Read the latest anonymous control-plane AI site checks. Results are server-egress evidence, not a phone/client, proxy protocol, account or model-generation test.", path: "/api/routing/ai-check" }),
   defineTool({ name: "routing_ai_egress_get", description: "Read the exclusive AI egress choice: server (default) or residential. Reports saved choice separately from the last successful publication; never returns proxy passwords. Client subscription refresh is still required.",
     path: "/api/settings/ai-egress", select: aiEgressView }),

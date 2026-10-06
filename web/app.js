@@ -62,7 +62,7 @@ const controlPlane = {
   telemetry: { windowHours: 24, networkSeries: [] },
   access: null,
   certificate: { mode: null, email: "" },
-  routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", rules: [] },
+  routingPolicy: { mode: "smart", unknownDomain: "resolve-geoip", aiSelection: "fallback", rules: [] },
   routingRuleSets: null,
   aiDomainRules: null,
   aiUpstream: null,
@@ -281,6 +281,7 @@ function applyBootstrap(data) {
   controlPlane.routingPolicy = data.routingPolicy || {
     mode: "smart",
     unknownDomain: "resolve-geoip",
+    aiSelection: "fallback",
     rules: []
   };
   const rollbackButton = document.querySelector("#rollback-config");
@@ -372,7 +373,7 @@ function renderRuntime() {
 const routingModeCopy = {
   smart: {
     title: "智能分流",
-    description: "内网和国内流量直接访问，AI 与境外流量走代理；未知域名解析真实 IP 后再判断。"
+    description: "内网和国内流量直接访问，AI 与境外流量走代理；未知域名先解析真实 IP，仍未分类的流量进入可手动切换的“未分类流量”组。"
   },
   "global-proxy": {
     title: "全局代理",
@@ -403,12 +404,14 @@ function renderRoutingPolicy() {
   const locked = !canManageRoutingPolicy() || routingPolicySaving;
   renderAiDomainRules();
   if (document.querySelector("#ai-egress-form")?.elements) renderAiEgress();
-  document.querySelectorAll('#routing-mode-form input, #routing-mode-form button, #routing-rule-form input, #routing-rule-form select, #routing-rule-form button').forEach(input => { input.disabled = locked; });
+  document.querySelectorAll('#routing-mode-form input, #routing-mode-form select, #routing-mode-form button, #routing-rule-form input, #routing-rule-form select, #routing-rule-form button').forEach(input => { input.disabled = locked; });
   const mode = routingModeCopy[policy.mode] || routingModeCopy.smart;
   document.querySelectorAll('#routing-mode-form input[name="mode"]').forEach((input) => {
     input.checked = input.value === policy.mode;
     input.disabled = locked || (Boolean(controlPlane.aiUpstream?.config?.enabled) && input.value !== "smart");
   });
+  const aiSelection = document.querySelector('#routing-mode-form select[name="aiSelection"]');
+  if (aiSelection) aiSelection.value = policy.aiSelection || "fallback";
   setText("#routing-mode-title", mode.title);
   setText("#routing-mode-description", mode.description);
   setText("#routing-rule-count", policy.rules.length);
@@ -501,10 +504,12 @@ async function saveRoutingMode(event) {
   event.preventDefault();
   if (!canManageRoutingPolicy() || routingPolicySaving) return;
   const form = event.currentTarget;
-  const mode = new FormData(form).get("mode");
+  const fields = new FormData(form);
+  const mode = fields.get("mode");
+  const aiSelection = fields.get("aiSelection") || controlPlane.routingPolicy.aiSelection || "fallback";
   try {
     await persistRoutingPolicy(
-      { ...controlPlane.routingPolicy, mode },
+      { ...controlPlane.routingPolicy, mode, aiSelection },
       "统一路由模式已保存。"
     );
   } catch (error) {
@@ -548,8 +553,8 @@ function renderRoutingDiagnostic(diagnostic) {
   const sources = { custom: "自定义规则", builtin: "内置 AI 域名", shared: "已知共享 / 普通域名保护", none: "未匹配 AI 域名", ai: "内置 AI 规则", mode: "全局路由模式" };
   const addresses = diagnostic.addresses || [];
   const aiClassification = ai?.eligible ? "AI 专用域名" : ai?.source === "shared" ? "共享 / 普通保护域名" : "未识别为 AI 专用域名";
-  const egressLabels = { residential: "住宅代理出口", server: "默认出口", blocked: "已拦截，无出口", "client-direct": "客户端直连" };
-  const terminalAction = ["blocked", "client-direct"].includes(ai?.desiredEgress);
+  const egressLabels = { residential: "住宅代理出口", server: "默认出口", blocked: "已拦截，无出口", "client-direct": "客户端直连", "client-selection": "未分类流量组，由客户端选择" };
+  const terminalAction = ["blocked", "client-direct", "client-selection"].includes(ai?.desiredEgress);
   const sync = ai?.runtimeSync;
   const published = sync?.publishedMode ? `${sync.runtimeMode === "dry-run" || sync.status === "simulated" ? "最近模拟记录" : "最近发布记录"}：${sync.publishedMode === "residential" ? "住宅代理出口" : "默认出口"}` : "";
   result.innerHTML = `
