@@ -30,7 +30,7 @@ EOF
 
 version="${RAYLINK_VERSION:-0.2.47}"
 public_ip="${RAYLINK_PUBLIC_IP:-}"
-default_release_base_url="https://github.com/ChengzeXiao/RayLink/releases/download"
+default_release_base_url="https://github.com/Zane-SI/RayLink/releases/download"
 release_base_url="${RAYLINK_RELEASE_BASE_URL:-$default_release_base_url}"
 dry_run=false
 

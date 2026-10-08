@@ -19,13 +19,13 @@ v0.2.47 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先�
 使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
 ```
 
 脚本检测 CPU 架构和公网 IP，自动补齐 Debian/Ubuntu 上缺少的归档校验工具，
@@ -33,19 +33,19 @@ bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/
 云主机若有 NAT、多块网卡，建议显式提供实际访问地址：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 安装指定版本：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --version 0.2.47'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --version 0.2.47'
 ```
 
 只验证下载、校验和解压，不修改系统：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --dry-run'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --dry-run'
 ```
 
 一键安装会完成：
@@ -85,7 +85,7 @@ Caddy 自动申请并续期域名证书；控制台和订阅使用该域名，�
 升级器会自动恢复应用、数据和 systemd 服务单元：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 升级备份保存在 `/var/backups/raylink/`。新版还支持在「系统 → 版本与备份」检查正式 Release 并更新控制面；独立 systemd 更新任务在主控重启后保留结果，重新验证实际版本及服务状态。Node 0.9.0 起支持同样的远程程序更新；更旧 Node 需先执行一次升级命令。软件更新不执行发行版升级，也不自动重启服务器。

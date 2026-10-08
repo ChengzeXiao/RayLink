@@ -3,7 +3,7 @@
   <h1>RayLink</h1>
   <p><strong>把多用户、多 Host sing-box 服务变成一套可安装、可配置、可发布、可计量的控制面。</strong></p>
   <p>
-    <a href="https://github.com/ChengzeXiao/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/ChengzeXiao/RayLink?display_name=tag&style=flat-square"></a>
+    <a href="https://github.com/Zane-SI/RayLink/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Zane-SI/RayLink?display_name=tag&style=flat-square"></a>
     <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-%E2%89%A522.5-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white">
     <img alt="sing-box 1.14.x" src="https://img.shields.io/badge/sing--box-1.14.x-7BE495?style=flat-square">
     <img alt="Linux AMD64 and ARM64" src="https://img.shields.io/badge/Release-Linux%20AMD64%20%7C%20ARM64-2F3337?style=flat-square&logo=linux&logoColor=white">
@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/Zane-SI/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -204,7 +204,7 @@ docs/     架构决策、协议支持矩阵和生产落地资料
 要求 Node.js 22.5+。没有 sing-box 也可以使用 `dry-run` 查看和开发控制台；安装 sing-box 后可执行真实配置校验。
 
 ```bash
-git clone https://github.com/ChengzeXiao/RayLink.git
+git clone https://github.com/Zane-SI/RayLink.git
 cd RayLink
 npm ci --ignore-scripts
 npm start
