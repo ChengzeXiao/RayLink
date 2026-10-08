@@ -100,20 +100,20 @@ flowchart LR
 服务器需要预先具备 `curl`。使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
 ```
 
 脚本会检测公网 IP 和 CPU 架构，下载对应的 AMD64 或 ARM64 发布包及 SHA-256，校验后解压，再执行系统安装。
 若需要指定公网 IP：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 一键安装会自动完成：
@@ -295,6 +295,12 @@ npm run check:production
 - [v0.2.0 发布说明](docs/release/v0.2.0.md)
 
 
+### v0.2.47 / Runtime 稳定性、身份计量与安全修复
+
+完成系统审查 R01–R11：收紧 REST/MCP 凭据权限，修复密码重置与并发限流竞态，恢复丢失注册响应；回滚按当前授权重编译，计量绑定不可变用户身份及成功应用的 Host 授权。相同配置在活动文件、Runtime 实例及证书证据匹配时免重启，前端区分操作提交成功与刷新失败；修复 Mihomo HTTPUpgrade 和住宅出口下普通流量 DNS 回退。Node 更新至 0.9.2，保留旧版滚动兼容。
+
+本次有 SQLite 迁移，升级时使用默认完整数据回滚；旧 Runtime 首次建立应用证据可能受控重启并造成短暂重连。本地 797/797 回归和隔离原生验收已通过；正式发布 CI、生产状态与真实手机/住宅代理验收分别确认。使用 HTTPUpgrade 的设备需刷新完整订阅。详见 [发布说明](docs/release/v0.2.47.md) 与 [修复验收记录](docs/system-fixes-2026-10-08.md)。
+
 ### v0.2.46 / 国内 CDN 的智能 DNS 选择
 
 Clash/Mihomo 智能完整订阅对未收录域名先取得国内 DNS 候选，仅接受受管中国 IPv4 范围内的 A 记录，否则使用代理 DNS，减少国内 App 图片被分配到海外 CDN 的绕行。保留 AI、明确海外域名及自定义 DNS 优先级。更新完整订阅并重连后生效；其他客户端格式保持原语义。详见 [发布说明](docs/release/v0.2.46.md)。
@@ -341,6 +347,6 @@ TUIC 服务端、订阅与探测统一配置 h3 ALPN，修复部分客户端握�
 
 v0.2.34 起，流量额度按北京时间每月 1 日 00:00 重置。仅首次从 v0.2.33 或更早版本升级时归档旧累计并清零；从 v0.2.34 升级本版保留本月用量。界面、用户中心和 MCP 显示周期及历史，详见[月度流量规则](docs/monthly-usage.md)。
 
-当前正式版本为 v0.2.46，可使用上面的 Release 下载命令安装或升级。
+当前版本为 v0.2.47；正式发布资产通过 CI 并上传后，可使用上面的 Release 下载命令安装或升级。
 服务端允许 1.13 / 1.14 混合节点滚动升级；新导出的 sing-box JSON 需要 **1.14+ 客户端**。
 证书、DNS、计量和模拟测试说明见 [升级验收记录](docs/sing-box-1.14.2-upgrade.md)。

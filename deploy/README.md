@@ -15,17 +15,17 @@
 
 ## 推荐：一键安装与首次初始化
 
-v0.2.46 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。发布产物与升级说明见 GitHub Release。
+v0.2.47 支持 AMD64（x86_64）和 ARM64（aarch64）。服务器需要预先具备 `curl`。发布产物与升级说明见 GitHub Release。
 使用 root 登录时，直接复制执行这一条命令：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 普通用户登录时，把管道中的 `bash` 改为 `sudo bash`：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | sudo bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | sudo bash'
 ```
 
 脚本检测 CPU 架构和公网 IP，自动补齐 Debian/Ubuntu 上缺少的归档校验工具，
@@ -33,19 +33,19 @@ bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/
 云主机若有 NAT、多块网卡，建议显式提供实际访问地址：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --public-ip 203.0.113.10'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --public-ip 203.0.113.10'
 ```
 
 安装指定版本：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --version 0.2.46'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --version 0.2.47'
 ```
 
 只验证下载、校验和解压，不修改系统：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash -s -- --dry-run'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash -s -- --dry-run'
 ```
 
 一键安装会完成：
@@ -76,18 +76,25 @@ sudo env RAYLINK_PUBLIC_IP=203.0.113.10 RAYLINK_DOMAIN=panel.example.com RAYLINK
 
 Caddy 自动申请并续期域名证书；控制台和订阅使用该域名，仍保留 IP 恢复入口。需要分别配置域名时，设置 `RAYLINK_INTERACTIVE_SETUP=true` 保留交互向导。详见 [自动安装与维护](../docs/automatic-installation.md)。
 
-### 升级到 v0.2.46
+### 升级到 v0.2.47
 
 在已安装 RayLink 的服务器上重新执行同一条一键命令即可。安装器会识别
-`/opt/raylink`，保持 sing-box Runtime 运行，备份当前应用和
-`/var/lib/raylink` 数据，原子替换控制面并执行健康检查。新版本未能正常启动时，
+`/opt/raylink`，备份当前应用和 `/var/lib/raylink` 数据，先校验候选依赖及数据库副本迁移，
+再原子替换控制面并执行健康检查。应用升级不更换 sing-box/Cronet 二进制；首次应用证据
+建立或实际配置变更仍可能重启 Runtime。新版本未能正常启动时，
 升级器会自动恢复应用、数据和 systemd 服务单元：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.46/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/ChengzeXiao/RayLink/releases/download/v0.2.47/install.sh | bash'
 ```
 
 升级备份保存在 `/var/backups/raylink/`。新版还支持在「系统 → 版本与备份」检查正式 Release 并更新控制面；独立 systemd 更新任务在主控重启后保留结果，重新验证实际版本及服务状态。Node 0.9.0 起支持同样的远程程序更新；更旧 Node 需先执行一次升级命令。软件更新不执行发行版升级，也不自动重启服务器。
+
+v0.2.47 新增 Runtime 身份别名、Host 计量授权和加密注册回执等 SQLite 迁移。升级保留正常用户的已安装用户名、现有凭据和本月用量；历史身份冲突会隔离，远端成功发布历史已删除时需重新成功发布才能恢复对应计量。**本次不能启用 `RAYLINK_PRESERVE_DATA_ON_ROLLBACK=true`**：schema 已变化，应使用默认完整应用和数据恢复路径。升级前保留固定加密密钥和完整数据备份，详见 [身份与注册迁移](../docs/runtime-identity-and-enrollment.md)。
+
+升级前没有 `activation.json` 的 Runtime 需要一次受控应用来建立文件、证书与 systemd 实例证据，可能短暂中断长连接。发布后检查 Runtime 的 `configurationIntegrity=verified` 和实际配置哈希，经过至少两个 60 秒对账周期确认没有循环重启；ACME/provider 动态证书的 TLS 完整性可能显示 `unavailable`，不等于配置未应用。Node 0.9.0/0.9.1 可继续心跳和领取任务，控制面升级后再逐台更新至 0.9.2，无需重新注册。HTTPUpgrade 客户端需更新完整订阅。正式 CI 与生产验收状态见 [v0.2.47 发布说明](../docs/release/v0.2.47.md)。
+
+### v0.2.46 国内 DNS 变更回顾
 
 v0.2.46 修改 Clash/Mihomo 智能完整订阅的未知域名 DNS 选择：采用通过受管中国 IPv4 检查的国内 A 记录候选，其他结果回退代理 DNS，减少国内 App 图片被分配到海外 CDN 的绕行。保留 AI、明确海外域名、自定义规则的优先级，以及手动 AI 节点和未分类组。保留用户、凭据与本月用量；从 v0.2.45 升级无需更换 sing-box Runtime。各设备需刷新完整订阅并重新连接，再核对新连接记录。其他客户端格式保持原语义。详见 [发布说明](../docs/release/v0.2.46.md)。
 
@@ -143,17 +150,17 @@ sudo bash deploy/build-runtime-artifact.sh 1.14.2 ./release-runtime amd64
 `raylink-sing-box-1.14.2-linux-amd64 version`，确认版本和完整审批 build tags。
 原生架构构建会在脚本内部直接完成这项执行校验。
 
-本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.46 默认装配
+本地也可以在 Runtime 产物准备完成后构建单架构正式安装包。v0.2.47 默认装配
 AMD64 Runtime：
 
 ```bash
-bash deploy/package-release.sh 0.2.46
+bash deploy/package-release.sh 0.2.47
 ```
 
 也可以显式指定本次发布需要装配的架构：
 
 ```bash
-RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.46
+RAYLINK_RELEASE_ARCHES=amd64 bash deploy/package-release.sh 0.2.47
 ```
 
 发布包包含运行程序、部署工具、README、变更日志和生产门槛文档，不会打包本地
@@ -285,3 +292,5 @@ journalctl -u caddy -n 100 --no-pager
 ### 保留实时数据的应用回滚
 
 对于已审查并确认不存在不兼容数据迁移的控制面升级，可以设置 `RAYLINK_PRESERVE_DATA_ON_ROLLBACK=true`。安装器先在数据库副本上运行候选迁移，只有完整 SQLite schema 和 `user_version` 都未变化且完整性检查通过，才允许切换。候选启动失败时恢复旧程序与服务配置，保留实时数据库；默认仍使用原有整份数据备份恢复。该检查不能替代对数据含义变更的代码审查，不适合直接用于未知版本跨度。
+
+本节的保留数据回滚选项不适用于 v0.2.47 身份、授权和注册回执迁移；该版本使用默认完整数据回滚。

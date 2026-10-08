@@ -1,5 +1,16 @@
 # RayLink Changelog
 
+## 0.2.47 - 2026-10-08
+
+- Require explicit credential-read permissions in REST/MCP, redact Host protocol secrets from overview roles, and audit successful sensitive reads without storing credentials.
+- Recompile rollback authentication from current entitlements and credentials so historic deployments cannot restore revoked access; a broken current AI upstream no longer blocks a valid historical rollback.
+- Release Node 0.9.2 with persisted enrollment keys, atomic encrypted enrollment receipts and same-key retry recovery; retain Node 0.9.0/0.9.1 rolling compatibility.
+- Give new users immutable Runtime identities, preserve existing installed usernames, quarantine ambiguous legacy aliases and share counter watermarks across aliases. Bill remote usage only within successfully applied Host grant intervals.
+- Reject stale in-flight password logins after a password or account change, reserve source/account/global verification budgets before asynchronous authentication, and release budgets on every completion path.
+- Bind Runtime application evidence to active configuration, systemd InvocationID and known TLS assets; skip identical verified local/remote publications without hiding drift. Separate committed UI operations from subsequent refresh errors.
+- Fix Mihomo HTTPUpgrade export and ordinary-domain Runtime DNS fallback when an AI residential upstream is enabled, preserving AI-only routing and failure-closed behavior.
+- Local validation passed 797/797 tests plus isolated native protocol, metering, DNS, AI upstream and long-connection checks. Formal Linux release CI and production/device acceptance remain separate gates; this release adds SQLite migrations and requires the default full-data rollback path.
+
 ## 0.2.46 - 2026-10-07
 
 - Fix unlisted domestic App/CDN traffic receiving overseas DNS answers in smart Mihomo subscriptions: accept only CN-address domestic candidates, otherwise use proxied DNS.
