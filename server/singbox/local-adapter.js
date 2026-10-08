@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import { connect as tlsConnect } from "node:tls";
@@ -35,6 +36,7 @@ export class LocalSingBoxAdapter {
     this.runtimeDir = join(dataDir, "sing-box");
     this.activePath = join(this.runtimeDir, "config.json");
     this.backupPath = join(this.runtimeDir, "config.json.bak");
+    this.activationPath = join(this.runtimeDir, "activation.json");
     this.binaryPath = binaryPath;
     this.mode = mode;
     this.systemdUnit = systemdUnit;
@@ -95,9 +97,80 @@ export class LocalSingBoxAdapter {
     }
   }
 
+  async runtimeInstanceId() {
+    try {
+      const { stdout } = await this.runner("systemctl", ["show", this.systemdUnit, "--property=InvocationID", "--value"], { timeout: 5_000 });
+      const value = String(stdout).trim().toLowerCase();
+      return /^[a-f0-9]{32}$/.test(value) && !/^0+$/.test(value) ? value : null;
+    } catch { return null; }
+  }
+
+  async activationInputs(configText) {
+    const config = JSON.parse(configText);
+    const paths = new Set();
+    let complete = true;
+    const collect = (value) => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        // Providers and ACME can rotate material outside explicit paths. Their
+        // storage cannot be completely fingerprinted here, so never infer no-op.
+        if ((key === "certificate_providers" && child && (!Array.isArray(child) || child.length))
+          || (["acme", "certificate_provider"].includes(key) && child)) complete = false;
+        if (/(?:certificate|key)_path$/.test(key)) {
+          if (typeof child !== "string" || !isAbsolute(child)) complete = false;
+          else paths.add(child);
+        } else if (child && typeof child === "object") collect(child);
+      }
+    };
+    collect(config);
+    const checksum = createHash("sha256").update(configText).digest("hex");
+    // Always bind known files, including when a different listener uses a
+    // provider. Completeness only controls no-op eligibility; configuration and
+    // known-asset proof still prevent provider reconciliation restart loops.
+    const assets = [];
+    for (const path of [...paths].sort()) {
+      assets.push([path, createHash("sha256").update(await readFile(path)).digest("hex")]);
+    }
+    return {
+      checksum,
+      tlsChecksum: createHash("sha256").update(JSON.stringify(assets)).digest("hex"),
+      tlsInputsComplete: complete
+    };
+  }
+
+  async activationMatches(configText, evidence, expectedInstanceId = null) {
+    const runtimeInstanceId = await this.runtimeInstanceId();
+    const inputs = await this.activationInputs(configText);
+    if (!runtimeInstanceId || (expectedInstanceId && runtimeInstanceId !== expectedInstanceId)
+      || !inputs || evidence?.runtimeInstanceId !== runtimeInstanceId
+      || evidence.checksum !== inputs.checksum || evidence.tlsChecksum !== inputs.tlsChecksum
+      || evidence.tlsInputsComplete !== inputs.tlsInputsComplete) return false;
+    if (await readFile(this.activePath, "utf8") !== configText
+      || await this.runtimeInstanceId() !== runtimeInstanceId) return false;
+    const confirmedInputs = await this.activationInputs(configText);
+    return Boolean(confirmedInputs && confirmedInputs.checksum === inputs.checksum
+      && confirmedInputs.tlsChecksum === inputs.tlsChecksum
+      && confirmedInputs.tlsInputsComplete === inputs.tlsInputsComplete);
+  }
+
+  async recordActivation(configText, version = null, expectedInputs = null) {
+    if (!expectedInputs) return false;
+    const runtimeInstanceId = await this.runtimeInstanceId();
+    const evidence = { ...expectedInputs, runtimeInstanceId, version };
+    if (!await this.activationMatches(configText, evidence)) return false;
+    const path = `${this.activationPath}.tmp`;
+    try {
+      await writeFile(path, JSON.stringify(evidence), { mode: 0o600 });
+      await rename(path, this.activationPath);
+      return await this.activationMatches(configText, evidence);
+    } finally { await rm(path, { force: true }); }
+  }
+
   async activateCertificates({ config, certificates }) {
     if (this.mode !== "systemd") throw new Error("TLS activation requires a live systemd Runtime");
+    const expectedConfigText = await readFile(this.activePath, "utf8");
     await this.validate(this.activePath);
+    const expectedInputs = await this.activationInputs(expectedConfigText).catch(() => null);
     await this.restartSystemd();
     const expected = new Map(certificates.map((certificate) => [certificate.domain, certificate]));
     const inbounds = (config.inbounds || []).filter((inbound) => (
@@ -134,6 +207,7 @@ export class LocalSingBoxAdapter {
         }
       }
     }
+    try { await this.recordActivation(expectedConfigText, null, expectedInputs); } catch {}
   }
 
   async publish({ version, checksum, configText }) {
@@ -145,6 +219,17 @@ export class LocalSingBoxAdapter {
 
     try {
       const validation = await this.validate(candidatePath);
+      const actualChecksum = createHash("sha256").update(configText).digest("hex");
+      let sameFile = false;
+      try { sameFile = await readFile(this.activePath, "utf8") === configText; } catch {}
+      const before = sameFile ? await this.status() : null;
+      if (before?.configChecksum === actualChecksum && (this.mode === "dry-run"
+        || before.state === "running" && before.appliedChecksum === actualChecksum && before.noOpEligible)) {
+        return { mode: this.mode, configPath: this.activePath, checksum, validation,
+          runtimeVersion: before.runtimeVersion, activationConfirmed: true,
+          tlsActivationConfirmed: this.mode === "systemd" && before.tlsConfigurationIntegrity === "verified",
+          unchanged: true };
+      }
       let hadActiveConfig = false;
       try {
         await access(this.activePath);
@@ -155,15 +240,20 @@ export class LocalSingBoxAdapter {
       }
 
       await rename(candidatePath, this.activePath);
+      const expectedInputs = this.mode === "systemd"
+        ? await this.activationInputs(configText).catch(() => null) : null;
       if (this.mode === "systemd") {
         try {
           await this.restartSystemd();
         } catch (error) {
           try {
             if (hadActiveConfig) {
-              await copyFile(this.backupPath, candidatePath);
+              const previousConfigText = await readFile(this.backupPath, "utf8");
+              await writeFile(candidatePath, previousConfigText, { mode: 0o600 });
               await rename(candidatePath, this.activePath);
+              const rollbackInputs = await this.activationInputs(previousConfigText).catch(() => null);
               await this.restartSystemd();
+              try { await this.recordActivation(previousConfigText, null, rollbackInputs); } catch {}
             } else {
               await rm(this.activePath, { force: true });
               await this.stopSystemd();
@@ -177,6 +267,13 @@ export class LocalSingBoxAdapter {
         }
       }
 
+      let activationConfirmed = this.mode === "dry-run";
+      if (this.mode === "systemd") {
+        // Failure to persist evidence must not turn a completed activation into
+        // a retryable mutation failure. Status stays unverified until repaired.
+        try { activationConfirmed = await this.recordActivation(configText, version, expectedInputs); } catch {}
+      }
+
       let runtimeVersion = null;
       try {
         runtimeVersion = await this.binaryVersion();
@@ -186,7 +283,10 @@ export class LocalSingBoxAdapter {
         configPath: this.activePath,
         checksum,
         validation,
-        runtimeVersion
+        runtimeVersion,
+        activationConfirmed,
+        tlsActivationConfirmed: activationConfirmed && this.mode === "systemd" && expectedInputs?.tlsInputsComplete === true,
+        unchanged: false
       };
     } finally {
       await rm(candidatePath, { force: true });
@@ -194,35 +294,49 @@ export class LocalSingBoxAdapter {
   }
 
   async status() {
-    let configPresent = false;
+    let configChecksum = null, configText = null, evidence = null;
     try {
-      await access(this.activePath);
-      configPresent = true;
+      configText = await readFile(this.activePath, "utf8");
+      configChecksum = createHash("sha256").update(configText).digest("hex");
     } catch {}
+    try { evidence = JSON.parse(await readFile(this.activationPath, "utf8")); } catch {}
+    let runtimeVersion = null;
+    try { runtimeVersion = await this.binaryVersion(); } catch {}
 
     if (this.mode === "dry-run") {
       return {
-        state: configPresent ? "staged" : "not-configured",
+        state: configChecksum ? "staged" : "not-configured",
         mode: this.mode,
         configPath: this.activePath,
-        runtimeVersion: await this.binaryVersion()
+        runtimeVersion, configChecksum, appliedChecksum: null,
+        configurationIntegrity: configChecksum ? "staged" : "not-configured"
       };
     }
 
     try {
       const { stdout } = await this.runner("systemctl", ["is-active", this.systemdUnit], { timeout: 10_000 });
+      const running = String(stdout).trim() === "active";
+      const runtimeInstanceId = running ? await this.runtimeInstanceId() : null;
+      const verified = running && runtimeInstanceId && configText
+        && await this.activationMatches(configText, evidence, runtimeInstanceId).catch(() => false);
+      const tlsInputsAvailable = verified && evidence?.tlsInputsComplete === true;
       return {
-        state: String(stdout).trim() === "active" ? "running" : "stopped",
+        state: running ? "running" : "stopped",
         mode: this.mode,
         configPath: this.activePath,
-        runtimeVersion: await this.binaryVersion()
+        runtimeVersion, configChecksum, runtimeInstanceId,
+        appliedChecksum: verified ? configChecksum : null,
+        noOpEligible: Boolean(tlsInputsAvailable),
+        tlsConfigurationIntegrity: !verified ? "unverified" : tlsInputsAvailable ? "verified" : "unavailable",
+        configurationIntegrity: verified ? "verified" : !configChecksum ? "not-configured"
+          : evidence?.checksum && evidence.checksum !== configChecksum ? "drifted" : "unverified"
       };
     } catch {
       return {
         state: "stopped",
         mode: this.mode,
         configPath: this.activePath,
-        runtimeVersion: null
+        runtimeVersion, configChecksum, appliedChecksum: null, configurationIntegrity: "unverified"
       };
     }
   }

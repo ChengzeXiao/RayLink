@@ -36,7 +36,7 @@ import { BbrManager } from "./network-tuning.mjs";
 import { NodeSoftwareUpdater } from "./software-update.mjs";
 
 const execFile = promisify(execFileCallback);
-export const AGENT_VERSION = "0.9.1";
+export const AGENT_VERSION = "0.9.2";
 const SECRET_ENVELOPE_ALGORITHM = "x25519-hkdf-sha256-aes-256-gcm";
 const SECRET_ENVELOPE_CONTEXT = Buffer.from("raylink-node-secret-v1", "utf8");
 const PROTOCOL_PROBE_TYPES = new Set([
@@ -625,6 +625,74 @@ export class NodeRuntimeAdapter {
     return join(this.dataDir, "config.json");
   }
 
+  get activationPath() {
+    return join(this.dataDir, "activation.json");
+  }
+
+  async liveRuntimeInstanceId() {
+    if (this.runtimeMode !== "systemd") return null;
+    try {
+      const state = await this.commandRunner("systemctl", ["is-active", this.systemdUnit]);
+      if (String(state.stdout || "").trim() !== "active") return null;
+      const { stdout } = await this.commandRunner("systemctl", ["show", this.systemdUnit, "--property=InvocationID", "--value"]);
+      const id = String(stdout || "").trim().toLowerCase();
+      return /^[a-f0-9]{32}$/.test(id) && !/^0+$/.test(id) ? id : null;
+    } catch { return null; }
+  }
+
+  async activationInputs(configText) {
+    const config = JSON.parse(configText);
+    // Managed certificate providers can rotate material outside explicit file
+    // paths. Without a complete asset fingerprint, conservatively reapply.
+    if (config.certificate_providers?.length || config.inbounds?.some(inbound => inbound.tls?.acme || inbound.tls?.certificate_provider)) return null;
+    const paths = new Set();
+    const collect = value => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        if (/(?:certificate|key)_path$/.test(key) && typeof child === "string") paths.add(child);
+        else if (child && typeof child === "object") collect(child);
+      }
+    };
+    collect(config);
+    // The systemd Runtime may use a different working directory from Node.
+    if ([...paths].some(path => !isAbsolute(path))) return null;
+    const assets = [];
+    for (const path of [...paths].sort()) assets.push([path, createHash("sha256").update(await readFile(path)).digest("hex")]);
+    return {
+      checksum: createHash("sha256").update(configText).digest("hex"),
+      tlsChecksum: createHash("sha256").update(JSON.stringify(assets)).digest("hex")
+    };
+  }
+
+  async hasConfirmedActivation(configText) {
+    try {
+      if (await readFile(this.configPath, "utf8") !== configText) return false;
+      const evidence = JSON.parse(await readFile(this.activationPath, "utf8"));
+      const instance = await this.liveRuntimeInstanceId();
+      const inputs = await this.activationInputs(configText);
+      return Boolean(instance && inputs && evidence.runtimeInstanceId === instance
+        && evidence.checksum === inputs.checksum && evidence.tlsChecksum === inputs.tlsChecksum
+        && await this.liveRuntimeInstanceId() === instance
+        && await readFile(this.configPath, "utf8") === configText);
+    } catch { return false; }
+  }
+
+  async recordActivation(configText, version, expectedInputs) {
+    if (!expectedInputs) return false;
+    const instance = await this.liveRuntimeInstanceId();
+    if (!instance || await readFile(this.configPath, "utf8") !== configText) return false;
+    const inputs = await this.activationInputs(configText);
+    if (!inputs || inputs.checksum !== expectedInputs.checksum || inputs.tlsChecksum !== expectedInputs.tlsChecksum
+      || await this.liveRuntimeInstanceId() !== instance
+      || await readFile(this.configPath, "utf8") !== configText) return false;
+    const temporaryPath = `${this.activationPath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, JSON.stringify({ ...inputs, runtimeInstanceId: instance, version }), { mode: 0o600 });
+      await rename(temporaryPath, this.activationPath);
+      return true;
+    } finally { await rm(temporaryPath, { force: true }); }
+  }
+
   async openFirewall({ port, network }) {
     let status;
     try {
@@ -774,7 +842,7 @@ export class NodeRuntimeAdapter {
   }
 
   async installTlsBundle(task, privateKeyPem) {
-    if (!task?.sealedTlsBundle) return { count: 0, rollback: async () => {} };
+    if (!task?.sealedTlsBundle) return { count: 0, changed: false, rollback: async () => {} };
     if (!privateKeyPem) throw new Error("RayLink Node 缺少 TLS 资产解密私钥");
     const bundle = openSealedBundle(privateKeyPem, task.sealedTlsBundle);
     if (!Array.isArray(bundle.assets) || bundle.assets.length < 1 || bundle.assets.length > 32) {
@@ -859,6 +927,7 @@ export class NodeRuntimeAdapter {
     }
     return {
       count: bundle.assets.length,
+      changed: createdPaths.length > 0,
       rollback: () => removeNewTlsAssets(createdPaths)
     };
   }
@@ -885,11 +954,14 @@ export class NodeRuntimeAdapter {
     let hadConfig = false;
     let published = false;
     let configActivated = false;
+    let unchanged = false;
     const firewalls = [];
 
     try {
       hadConfig = await pathExists(this.configPath);
-      if (task.activation && this.portVerifier.assertAvailable) {
+      const appliedConfigText = `${task.configText.trim()}\n`;
+      unchanged = !tlsInstallation.changed && await this.hasConfirmedActivation(appliedConfigText);
+      if (!unchanged && task.activation && this.portVerifier.assertAvailable) {
         await this.portVerifier.assertAvailable(task.activation);
       }
       const challengePorts = new Map((task.activation?.challengePorts || []).map((challenge) => [`${challenge.port}/${challenge.network}`, challenge]));
@@ -914,13 +986,21 @@ export class NodeRuntimeAdapter {
           firewalls.push(await this.firewallManager.open(rule));
         }
       }
-      await writeFile(temporaryPath, `${task.configText.trim()}\n`, { mode: 0o640 });
+      await writeFile(temporaryPath, appliedConfigText, { mode: 0o640 });
       await this.commandRunner(this.binaryPath, ["check", "-c", temporaryPath]);
-      if (hadConfig) await copyFile(this.configPath, backupPath);
-      await rename(temporaryPath, this.configPath);
-      configActivated = true;
-      if (this.runtimeMode === "systemd") {
-        await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
+      // Recheck after firewall work, which may take time. Only a live process
+      // with the same file and durable activation evidence avoids a restart.
+      unchanged = unchanged && await this.hasConfirmedActivation(appliedConfigText);
+      // Bind proof to the exact assets presented before restart. A certificate
+      // changed during activation/probing may not be loaded by this process.
+      const expectedInputs = await this.activationInputs(appliedConfigText).catch(() => null);
+      if (!unchanged) {
+        if (hadConfig) await copyFile(this.configPath, backupPath);
+        await rename(temporaryPath, this.configPath);
+        configActivated = true;
+        if (this.runtimeMode === "systemd") {
+          await this.commandRunner("systemctl", ["restart", this.systemdUnit]);
+        }
       }
       let activation = null;
       if (task.activation) {
@@ -948,6 +1028,12 @@ export class NodeRuntimeAdapter {
         // will report the Runtime version without turning a valid publication into
         // a destructive rollback.
       }
+      let activationConfirmed = unchanged && await this.hasConfirmedActivation(appliedConfigText);
+      if (!unchanged) {
+        // Evidence is advisory. A failed disk write must not roll back an
+        // otherwise applied task or trigger an automatic mutation retry.
+        try { activationConfirmed = await this.recordActivation(appliedConfigText, task.version, expectedInputs); } catch {}
+      }
       published = true;
       await pruneTlsReleases(this.dataDir, [this.configPath, backupPath]).catch((error) => {
         console.error(
@@ -959,6 +1045,8 @@ export class NodeRuntimeAdapter {
         configPath: this.configPath,
         version: task.version,
         checksum: task.checksum,
+        activationConfirmed,
+        unchanged,
         ...(storageAdapted ? { appliedChecksum: createHash("sha256").update(`${task.configText.trim()}\n`).digest("hex") } : {}),
         tlsAssetsInstalled: tlsInstallation.count,
         ...(activation ? { activation } : {})
@@ -1372,7 +1460,10 @@ export class RayLinkNode {
     if (this.state) return this.state;
     try {
       this.state = JSON.parse(await readFile(this.statePath, "utf8"));
-      if (!this.state.hostId || !this.state.nodeSecret) throw new Error("节点凭据不完整");
+      if ((!this.state.hostId || !this.state.nodeSecret)
+        && !(this.state.enrollmentPending && this.state.encryptionPublicKey && this.state.encryptionPrivateKey)) {
+        throw new Error("节点凭据不完整");
+      }
       return this.state;
     } catch (error) {
       if (error.code === "ENOENT") return null;
@@ -1396,7 +1487,12 @@ export class RayLinkNode {
     return next;
   }
 
-  async ensureEnrolled() {
+  ensureEnrolled() {
+    this.enrollmentOperation ||= this.#ensureEnrolled().finally(() => { this.enrollmentOperation = null; });
+    return this.enrollmentOperation;
+  }
+
+  async #ensureEnrolled() {
     if (this.enableBbr) {
       this.bbrInitialization ||= this.bbrManager.configure().catch((error) => {
         // BBR is an optional TCP optimization. Report failures while keeping
@@ -1406,23 +1502,33 @@ export class RayLinkNode {
       await this.bbrInitialization;
     }
     const existing = await this.loadState();
-    if (existing) return this.ensureEncryptionState(existing);
+    if (existing?.hostId && existing.nodeSecret) return this.ensureEncryptionState(existing);
     if (!this.serverUrl) throw new Error("缺少 RAYLINK_SERVER");
     if (!this.enrollmentToken) throw new Error("缺少 RAYLINK_ENROLL_TOKEN");
-    const keypair = generateEncryptionKeypair();
+    const keypair = existing || { ...generateEncryptionKeypair(), enrollmentPending: true };
+    // Persist before the first request, so both process crashes and lost
+    // success responses replay the enrollment with the same recipient key.
+    if (!existing) await this.persistState(keypair);
     const metadata = await this.metadataProvider();
-    const credential = await this.request("/api/node/enroll", {
+    const response = await this.request("/api/node/enroll", {
       method: "POST",
       body: JSON.stringify({
         token: this.enrollmentToken,
+        sealedEnrollment: true,
         ...metadata,
         encryptionPublicKey: keypair.encryptionPublicKey
       })
     });
+    const credential = response.sealedCredential
+      ? openSealedBundle(keypair.encryptionPrivateKey, response.sealedCredential) : response;
+    if (!credential.hostId || !credential.nodeSecret || (response.hostId && response.hostId !== credential.hostId)) {
+      throw new Error("控制面返回的节点凭据不完整");
+    }
     const state = {
+      encryptionPublicKey: keypair.encryptionPublicKey,
+      encryptionPrivateKey: keypair.encryptionPrivateKey,
       hostId: credential.hostId,
-      nodeSecret: credential.nodeSecret,
-      ...keypair
+      nodeSecret: credential.nodeSecret
     };
     await this.persistState(state);
     return state;

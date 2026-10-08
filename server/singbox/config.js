@@ -45,7 +45,8 @@ function applyAiUpstream(config, snapshot) {
     outbound.domain_resolver = config.route.default_domain_resolver;
   }
   config.outbounds.push(outbound);
-  const aiRules = () => compileAiUpstreamRules(snapshot.routingPolicy);
+  const resolveRule = config.route.rules?.find(rule => rule.action === "resolve");
+  const aiRules = () => compileAiUpstreamRules(snapshot.routingPolicy, { resolveRule });
   config.route.rules = [
     // Prefer the original proxy destination over sniffed outer TLS names (ECH
     // can hide the real SNI). Sniffing is only a fallback for IP destinations.
@@ -116,7 +117,7 @@ export function buildSingBoxConfig(snapshot, options = {}) {
         listen: "127.0.0.1:10085",
         stats: {
           enabled: true,
-          users: users.map((user) => user.email)
+          users: users.map((user) => user.runtimeName || user.email)
         }
       }
     };

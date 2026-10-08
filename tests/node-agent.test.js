@@ -115,7 +115,8 @@ test("RayLink Node enrolls once and persists its node credential", async () => {
     }
   });
 
-  const state = await node.ensureEnrolled();
+  const [state, concurrentState] = await Promise.all([node.ensureEnrolled(), node.ensureEnrolled()]);
+  assert.deepEqual(concurrentState, state);
 
   assert.equal(state.hostId, "host-fra");
   assert.equal(state.nodeSecret, "node-secret");

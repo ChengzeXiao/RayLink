@@ -16,6 +16,7 @@ import { buildReadinessReport } from "./readiness.js";
 import { AlertWebhookDispatcher } from "./alert-dispatcher.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
 import { RayLinkStore } from "./database.js";
+import { safeManagementOutput } from "./management-output.js";
 import { McpCredentials, MCP_SCOPES } from "./mcp-credentials.js";
 import { createMcpService } from "./mcp.js";
 import { NodeProvisioning } from "./node-provisioning.js";
@@ -43,7 +44,7 @@ import {
   protocolAvailability,
   protocolCatalog
 } from "./singbox/protocol-catalog.js";
-import { RuntimeManager } from "./singbox/runtime-manager.js";
+import { RuntimeManager, runtimeConfigurationMatches } from "./singbox/runtime-manager.js";
 import { LocalTelemetryCollector } from "./telemetry.js";
 import { LocalTlsRenewalManager } from "./tls-renewal.js";
 import {
@@ -70,14 +71,14 @@ const PORTAL_SESSION_COOKIE = "raylink_portal_session";
 const REQUIRED_NODE_AGENT_VERSION = "0.7.0";
 const RUNTIME_UPGRADE_NODE_VERSION = "0.8.0";
 const MAINTENANCE_NODE_VERSION = "0.9.0";
-const CURRENT_NODE_VERSION = "0.9.1";
-const SUPPORTED_NODE_VERSIONS = [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION, MAINTENANCE_NODE_VERSION, CURRENT_NODE_VERSION];
+const CURRENT_NODE_VERSION = "0.9.2";
+const SUPPORTED_NODE_VERSIONS = [REQUIRED_NODE_AGENT_VERSION, RUNTIME_UPGRADE_NODE_VERSION, MAINTENANCE_NODE_VERSION, "0.9.1", CURRENT_NODE_VERSION];
 const supportsNodeMaintenance = (version) => /^\d+\.\d+\.\d+$/.test(version || "") && !versionIsOlder(version, MAINTENANCE_NODE_VERSION);
 const defaultWebDir = fileURLToPath(new URL("../web", import.meta.url));
 const rolePermissions = new Map([
-  ["owner", new Set(["read", "users.manage", "runtime.manage", "system.manage", "admins.manage", "audit.read"])],
-  ["operator", new Set(["read", "users.manage", "runtime.manage", "audit.read"])],
-  ["support", new Set(["read", "users.manage"])],
+  ["owner", new Set(["read", "secrets.read", "users.manage", "runtime.manage", "system.manage", "admins.manage", "audit.read"])],
+  ["operator", new Set(["read", "secrets.read", "users.manage", "runtime.manage", "audit.read"])],
+  ["support", new Set(["read", "secrets.read", "users.manage"])],
   ["auditor", new Set(["read", "audit.read"])]
 ]);
 
@@ -100,6 +101,7 @@ function adminPermissionForRequest(method, pathname) {
     return "admins.manage";
   }
   if (pathname === "/api/audit") return "audit.read";
+  if (["GET", "HEAD"].includes(method) && /^\/api\/users\/[^/]+\/subscription$/.test(pathname)) return "secrets.read";
   if (["GET", "HEAD"].includes(method)) return "read";
   if (/^\/api\/hosts\/[^/]+\/node-upgrade$/.test(pathname)) return "system.manage";
   if (pathname === "/api/users" || pathname.startsWith("/api/users/")) {
@@ -184,6 +186,14 @@ function httpError(code, message, statusCode) {
   error.code = code;
   error.statusCode = statusCode;
   return error;
+}
+
+function validateLoginRequest(body, identityField) {
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || typeof body[identityField] !== "string" || typeof body.password !== "string") {
+    throw httpError("INVALID_LOGIN_REQUEST", "登录账号和密码必须是字符串", 422);
+  }
+  return body;
 }
 
 function versionIsOlder(currentVersion, targetVersion) {
@@ -386,6 +396,13 @@ function normalizedOrigin(value, fieldName) {
     throw httpError("HTTPS_REQUIRED", `${fieldName}在非本机环境必须使用 HTTPS`, 422);
   }
   return url.origin;
+}
+
+function validateSetupRequest(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.token !== "string") {
+    throw httpError("INVALID_SETUP_INPUT", "初始化令牌必须是字符串", 422);
+  }
+  return body;
 }
 
 function normalizeSetupInput(body) {
@@ -669,12 +686,14 @@ export async function createRayLinkApp(options) {
     const config = store.aiUpstreamSettings();
     const active = store.listDeployments(100).find((deployment) => deployment.status === "active");
     const { preview, error } = runtimePreviewView();
-    const matches = preview !== null && active?.checksum === preview.checksum;
+    const matches = preview !== null && active?.checksum === preview.checksum
+      && runtimeConfigurationMatches(runtime, preview.checksum);
     const status = matches && runtime.mode === "dry-run" ? "simulated"
       : matches && runtime.state === "running" ? "current" : "pending";
     const publishedMode = active ? store.deploymentSnapshotMetadata(active.id).aiEgressMode : null;
     return { mode: config.enabled ? "residential" : "server", aiExit: store.routingPolicy().aiExit, upstream: config,
       runtimeSync: { status, runtimeState: runtime.state, runtimeMode: runtime.mode, publishedMode,
+      ...(runtime.configurationIntegrity ? { configurationIntegrity: runtime.configurationIntegrity } : {}),
       ...(status === "pending" ? { message: "设置已保存，尚未确认 Runtime 已应用；请发布配置并检查运行状态。" }
         : status === "simulated" ? { message: "开发模式仅生成配置，未启动实际代理。" } : {}),
       ...(error ? { errorCode: error.code, message: error.message } : {}) } };
@@ -688,8 +707,8 @@ export async function createRayLinkApp(options) {
       await refreshLocalRuntimeCapabilities();
       const active = store.listDeployments(100).find(deployment => deployment.status === "active");
       const runtime = await runtimeManager.status();
-      const ready = runtime.state === "running" || (runtime.mode === "dry-run" && runtime.state === "staged");
-      if (active?.checksum !== runtimeManager.preview().checksum || !ready) await runtimeManager.publish(publisherId);
+      const checksum = runtimeManager.preview().checksum;
+      if (active?.checksum !== checksum || !runtimeConfigurationMatches(runtime, checksum)) await runtimeManager.publish(publisherId);
       return false;
     } catch {
       // Native errors can contain upstream credentials; expose publication state only.
@@ -1222,24 +1241,66 @@ export async function createRayLinkApp(options) {
     return request.socket.remoteAddress || "unknown";
   };
   const authKey = (request, kind) => [clientAddress(request), kind].join("|");
-  const authAllowed = (key) => {
+  // Hash bounded request identifiers so admission keys never retain account PII.
+  const authAccountKey = (kind, identifier) => {
+    const normalized = typeof identifier === "string" ? identifier.trim().toLowerCase() : "";
+    return `account:${kind}:${createHash("sha256").update(normalized).digest("hex")}`;
+  };
+  // Reserve source and account budgets together before scrypt yields. A success
+  // clears completed failures, but never another request's in-flight reservation.
+  let pendingAuthVerifications = 0;
+  const maxPendingAuthVerifications = 16;
+  const reserveAuthAttempt = (...keys) => {
     const now = Date.now();
-    if (authAttempts.size > 10_000) {
+    if (pendingAuthVerifications >= maxPendingAuthVerifications) return null;
+    const uniqueKeys = [...new Set(keys)];
+    if (authAttempts.size + uniqueKeys.length > 10_000) {
       for (const [candidateKey, candidate] of authAttempts) {
-        if (candidate.resetAt <= now || authAttempts.size > 9_000) authAttempts.delete(candidateKey);
-        if (authAttempts.size <= 9_000) break;
+        if (candidate.pending === 0 && candidate.resetAt <= now) authAttempts.delete(candidateKey);
       }
     }
-    const entry = authAttempts.get(key);
-    if (!entry || entry.resetAt <= now) {
-      authAttempts.set(key, { count: 0, resetAt: now + authWindowMs });
-      return true;
+    const entries = uniqueKeys.map(key => {
+      const previous = authAttempts.get(key);
+      const entry = !previous || (previous.resetAt <= now && previous.pending === 0)
+        ? { failures: 0, pending: 0, resetAt: now + authWindowMs } : previous;
+      return { key, entry, missing: !previous };
+    });
+    if (entries.some(({ entry }) => entry.failures + entry.pending >= authAttemptLimit)
+      || authAttempts.size + entries.filter(({ missing }) => missing).length > 10_000) return null;
+    for (const { key, entry } of entries) {
+      authAttempts.set(key, entry);
+      entry.pending += 1;
     }
-    return entry.count < authAttemptLimit;
+    pendingAuthVerifications += 1;
+    return { entries, completed: false };
   };
-  const recordAuthFailure = (key) => {
-    const entry = authAttempts.get(key);
-    if (entry) entry.count += 1;
+  const completeAuthAttempt = (attempt, outcome) => {
+    if (attempt.completed) return;
+    attempt.completed = true;
+    pendingAuthVerifications -= 1;
+    for (const { key, entry } of attempt.entries) {
+      entry.pending -= 1;
+      if (outcome === "success") entry.failures = 0;
+      else if (outcome === "failure") entry.failures += 1;
+      if (entry.pending === 0 && entry.failures === 0) authAttempts.delete(key);
+    }
+  };
+  const verifySetupRequestToken = (request, body) => {
+    const attemptKey = authKey(request, "setup");
+    const attempt = reserveAuthAttempt(attemptKey);
+    if (!attempt) {
+      throw httpError("RATE_LIMITED", "初始化令牌尝试过多，请稍后再试", 429);
+    }
+    let outcome = "cancelled";
+    try {
+      if (!store.verifySetupToken(body.token)) {
+        outcome = "failure";
+        throw httpError("SETUP_TOKEN_INVALID", "初始化令牌无效或已经过期", 401);
+      }
+      return attemptKey;
+    } finally {
+      completeAuthAttempt(attempt, outcome);
+    }
   };
 
   // Browser API and MCP share the same authorization and business operations.
@@ -1257,7 +1318,10 @@ export async function createRayLinkApp(options) {
       return;
     }
 
-    if (!request.mcp && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+    const sensitiveRead = ["GET", "HEAD"].includes(request.method) && requiredPermission === "secrets.read";
+    // MCP records its own tool audit event; browser credential reads use the
+    // same finish hook as mutations, with no request/response credential data.
+    if (!request.mcp && (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) || sensitiveRead)) {
       const { resourceType, resourceId } = auditResource(url.pathname);
       response.once("finish", () => {
         if (response.statusCode >= 400) return;
@@ -1269,7 +1333,7 @@ export async function createRayLinkApp(options) {
             action: `${request.method} ${url.pathname}`,
             resourceType,
             resourceId,
-            metadata: { statusCode: response.statusCode }
+            metadata: { statusCode: response.statusCode, ...(sensitiveRead ? { sensitiveRead: true } : {}) }
           });
         } catch (error) {
           console.warn(`[RayLink] Audit event could not be recorded: ${error.message}`);
@@ -1283,20 +1347,25 @@ export async function createRayLinkApp(options) {
         sendJson(response, 403, { error: { code: "FORBIDDEN", message: "请通过浏览器登录后修改个人账号" } });
         return;
       }
+      const body = await readJson(request);
       const attemptKey = authKey(request, `account:${admin.id}`);
-      if (!authAllowed(attemptKey)) {
+      const attempt = reserveAuthAttempt(attemptKey, authAccountKey("admin", admin.username));
+      if (!attempt) {
         sendJson(response, 429, { error: { code: "RATE_LIMITED", message: "密码验证次数过多，请稍后重试" } });
         return;
       }
+      let outcome = "cancelled";
       try {
-        const result = await store.changeAdminAccount(admin.id, await readJson(request), {
+        const result = await store.changeAdminAccount(admin.id, body, {
           changePassword: url.pathname === "/api/account/password"
         });
-        authAttempts.delete(attemptKey);
+        outcome = "success";
         sendJson(response, 200, result, { "set-cookie": clearedSessionCookie(SESSION_COOKIE, currentPublicOrigin().protocol === "https:") });
       } catch (error) {
-        if (error.code === "CURRENT_PASSWORD_INVALID") recordAuthFailure(attemptKey);
+        if (error.code === "CURRENT_PASSWORD_INVALID") outcome = "failure";
         throw error;
+      } finally {
+        completeAuthAttempt(attempt, outcome);
       }
       return;
     }
@@ -1419,7 +1488,10 @@ export async function createRayLinkApp(options) {
       const bootstrap = store.bootstrap(admin);
       const deployments = store.listDeployments();
       const backups = await backupManager.list();
-      const hosts = bootstrap.hosts.map((host) => {
+      // Protocol drafts and applied profiles may contain Reality keys or advanced
+      // credentials. Read-only roles receive the same safe projection as MCP.
+      const visibleHosts = permissions.has("runtime.manage") ? bootstrap.hosts : safeManagementOutput(bootstrap.hosts);
+      const hosts = visibleHosts.map((host) => {
         const capabilities = host.id === "local"
           ? installation
           : {
@@ -1906,7 +1978,8 @@ export async function createRayLinkApp(options) {
       if (!host.enrolledAt) {
         throw httpError("NODE_NOT_ENROLLED", "远程主机尚未完成 RayLink Node 接入", 409);
       }
-      if (![RUNTIME_UPGRADE_NODE_VERSION, MAINTENANCE_NODE_VERSION, CURRENT_NODE_VERSION].includes(host.agentVersion)) {
+      if (!SUPPORTED_NODE_VERSIONS.includes(host.agentVersion)
+        || versionIsOlder(host.agentVersion, RUNTIME_UPGRADE_NODE_VERSION)) {
         throw httpError(
           "NODE_UPGRADE_REQUIRED",
           `请先通过 /node/upgrade.sh 将 RayLink Node 升级到 ${RUNTIME_UPGRADE_NODE_VERSION}，再升级 Runtime`,
@@ -2049,15 +2122,8 @@ export async function createRayLinkApp(options) {
         if (setup.state !== "SETUP_PENDING") {
           throw setupStateError(setup.state);
         }
-        const attemptKey = authKey(request, "setup");
-        if (!authAllowed(attemptKey)) {
-          throw httpError("RATE_LIMITED", "初始化令牌尝试过多，请稍后再试", 429);
-        }
-        const body = await readJson(request);
-        if (!store.verifySetupToken(body.token)) {
-          recordAuthFailure(attemptKey);
-          throw httpError("SETUP_TOKEN_INVALID", "初始化令牌无效或已经过期", 401);
-        }
+        const body = validateSetupRequest(await readJson(request));
+        verifySetupRequestToken(request, body);
         const input = normalizeSetupInput(body);
         preserveAutomaticRecoveryOrigin(input);
         input.runtime = store.normalizeHostUpdate("local", input.runtime);
@@ -2069,15 +2135,8 @@ export async function createRayLinkApp(options) {
         if (setup.state !== "SETUP_PENDING") {
           throw setupStateError(setup.state);
         }
-        const attemptKey = authKey(request, "setup");
-        if (!authAllowed(attemptKey)) {
-          throw httpError("RATE_LIMITED", "初始化令牌尝试过多，请稍后再试", 429);
-        }
-        const body = await readJson(request);
-        if (!store.verifySetupToken(body.token)) {
-          recordAuthFailure(attemptKey);
-          throw httpError("SETUP_TOKEN_INVALID", "初始化令牌无效或已经过期", 401);
-        }
+        const body = validateSetupRequest(await readJson(request));
+        const attemptKey = verifySetupRequestToken(request, body);
         const input = normalizeSetupInput(body);
         preserveAutomaticRecoveryOrigin(input);
         input.runtime = store.normalizeHostUpdate("local", input.runtime);
@@ -2260,60 +2319,70 @@ export async function createRayLinkApp(options) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/auth/login") {
-        const body = await readJson(request);
+        const body = validateLoginRequest(await readJson(request), "username");
         const attemptKey = authKey(request, "admin");
-        if (!authAllowed(attemptKey)) {
+        const attempt = reserveAuthAttempt(attemptKey, authAccountKey("admin", body.username));
+        if (!attempt) {
           sendJson(response, 429, { error: { code: "RATE_LIMITED", message: "登录尝试过多，请稍后再试" } });
           return;
         }
-        const admin = await store.authenticateAdmin(body.username, body.password);
-        if (!admin) {
-          recordAuthFailure(attemptKey);
-          sendJson(response, 401, { error: { code: "INVALID_CREDENTIALS", message: "用户名或密码不正确" } });
+        let outcome = "failure";
+        try {
+          const admin = await store.authenticateAdmin(body.username, body.password);
+          if (!admin) {
+            sendJson(response, 401, { error: { code: "INVALID_CREDENTIALS", message: "用户名或密码不正确" } });
+            return;
+          }
+          outcome = "success";
+          const session = store.createAdminSession(admin.id);
+          sendJson(
+            response,
+            200,
+            { currentAdmin: admin },
+            { "set-cookie": sessionCookie(SESSION_COOKIE, session.secret, session.expiresAt, currentPublicOrigin().protocol === "https:") }
+          );
           return;
+        } finally {
+          completeAuthAttempt(attempt, outcome);
         }
-        authAttempts.delete(attemptKey);
-        const session = store.createAdminSession(admin.id);
-        sendJson(
-          response,
-          200,
-          { currentAdmin: admin },
-          { "set-cookie": sessionCookie(SESSION_COOKIE, session.secret, session.expiresAt, currentPublicOrigin().protocol === "https:") }
-        );
-        return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/portal/login") {
-        const body = await readJson(request);
+        const body = validateLoginRequest(await readJson(request), "email");
         const attemptKey = authKey(request, "portal");
-        if (!authAllowed(attemptKey)) {
+        const attempt = reserveAuthAttempt(attemptKey, authAccountKey("portal", body.email));
+        if (!attempt) {
           sendJson(response, 429, { error: { code: "RATE_LIMITED", message: "登录尝试过多，请稍后再试" } });
           return;
         }
-        const user = await store.authenticateUser(body.email, body.password);
-        if (!user) {
-          recordAuthFailure(attemptKey);
-          sendJson(response, 401, { error: { code: "INVALID_CREDENTIALS", message: "邮箱或密码不正确" } });
+        let outcome = "failure";
+        try {
+          const user = await store.authenticateUser(body.email, body.password);
+          if (!user) {
+            sendJson(response, 401, { error: { code: "INVALID_CREDENTIALS", message: "邮箱或密码不正确" } });
+            return;
+          }
+          outcome = "success";
+          if (user.portalStatus !== "active") {
+            sendJson(response, 403, { error: { code: "ACCOUNT_NOT_ACTIVE", message: "账号尚未完成首次登录激活" } });
+            return;
+          }
+          const profile = store.portalProfile(user.id);
+          if (profile.user.state === "disabled") {
+            sendJson(response, 403, { error: { code: "ACCOUNT_DISABLED", message: "账号已经停用" } });
+            return;
+          }
+          const session = store.createUserSession(user.id);
+          sendJson(
+            response,
+            200,
+            profile,
+            { "set-cookie": sessionCookie(PORTAL_SESSION_COOKIE, session.secret, session.expiresAt, currentPublicOrigin().protocol === "https:") }
+          );
           return;
+        } finally {
+          completeAuthAttempt(attempt, outcome);
         }
-        authAttempts.delete(attemptKey);
-        if (user.portalStatus !== "active") {
-          sendJson(response, 403, { error: { code: "ACCOUNT_NOT_ACTIVE", message: "账号尚未完成首次登录激活" } });
-          return;
-        }
-        const profile = store.portalProfile(user.id);
-        if (profile.user.state === "disabled") {
-          sendJson(response, 403, { error: { code: "ACCOUNT_DISABLED", message: "账号已经停用" } });
-          return;
-        }
-        const session = store.createUserSession(user.id);
-        sendJson(
-          response,
-          200,
-          profile,
-          { "set-cookie": sessionCookie(PORTAL_SESSION_COOKIE, session.secret, session.expiresAt, currentPublicOrigin().protocol === "https:") }
-        );
-        return;
       }
 
       if (url.pathname.startsWith("/api/portal/")) {

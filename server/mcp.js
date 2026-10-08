@@ -46,7 +46,7 @@ export function createMcpService({ store, credentials, rolePermissions, originAl
   const permitted = (principal, tool) => principal
     && rolePermissions.get(principal.admin.role)?.has(tool.permission)
     && tool.requiresScopes.every((scope) => principal.scopes.includes(scope))
-    && (!tool.secret || principal.admin.role !== "auditor");
+    && (!tool.secret || rolePermissions.get(principal.admin.role)?.has("secrets.read"));
 
   const execute = async (auth, tool, args) => {
     // Re-read revocation, expiry and role immediately before performing the operation.

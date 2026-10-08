@@ -192,6 +192,8 @@ test("systemd certificate activation restarts once and verifies only managed lis
   f.config.inbounds.push({ type: "trojan", tag: "manual-trojan", listen: "127.0.0.1", listen_port: 1,
     tls: { enabled: true, server_name: domain, certificate_path: f.previous.certificatePath, key_path: f.previous.keyPath }
   });
+  await mkdir(join(f.directory, "sing-box"), { recursive: true });
+  await writeFile(join(f.directory, "sing-box", "config.json"), JSON.stringify(f.config));
   const adapterUrl = new URL("../server/singbox/local-adapter.js", import.meta.url).href;
   const script = `
     import { LocalSingBoxAdapter } from ${JSON.stringify(adapterUrl)};

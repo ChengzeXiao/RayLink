@@ -376,3 +376,21 @@ test("MCP shares AI rule coverage and publication evidence without exposing prox
   assert.ok(!JSON.stringify({ view, diagnosis, saved }).includes(secret));
   await assert.rejects(() => reader.callTool({ name: "routing_update", arguments: { ...args, requestId: "reader-denied" } }), /not found/);
 });
+
+test("MCP credential reads produce one sanitized tool audit without a duplicate REST audit", async (t) => {
+  const f = await fixture(t, { seedDemoData: false });
+  const user = f.app.store.createUser({ name: "Audit User", email: "audit-user@example.test",
+    password: "audit-user-password", portalStatus: "active", quotaGb: 10,
+    expiresAt: "2099-01-01", nodeScope: ["all"] });
+  f.app.store.rotateUserSubscription(user.id);
+  const { client } = await connect(t, f, ["read", "secrets.read"]);
+  const value = output(await client.callTool({ name: "users_subscription_get", arguments: { userId: user.id } }));
+  assert.equal(typeof value.subscriptionUrl, "string");
+  const { events } = await (await f.api("/api/audit")).json();
+  const reads = events.filter(event => event.action === "MCP users_subscription_get"
+    || event.action === `GET /api/users/${user.id}/subscription`);
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].action, "MCP users_subscription_get");
+  assert.equal(reads[0].metadata.statusCode, 200);
+  assert.ok(!JSON.stringify(events).includes(value.subscriptionUrl));
+});

@@ -831,7 +831,7 @@ test("empty-database API workflow reaches a multi-Host client configuration", as
   const task = await taskResponse.json();
   assert.equal(task.kind, "publish-config");
   const remoteConfig = JSON.parse(task.payload.configText);
-  assert.equal(remoteConfig.inbounds[0].users[0].name, "production-user@example.com");
+  assert.equal(remoteConfig.inbounds[0].users[0].name, testApp.app.store.clientCredential(user.id).runtimeName);
 
   const completionResponse = await fetch(
     `${testApp.baseUrl}/api/node/tasks/${encodeURIComponent(task.id)}/complete`,
@@ -1164,7 +1164,7 @@ test("old Nodes and non-owner administrators cannot be queued for unsupported so
   }
 });
 
-for (const agentVersion of ["0.9.0", "0.9.1"]) {
+for (const agentVersion of ["0.9.0", "0.9.1", "0.9.2"]) {
   test(`Node ${agentVersion} retains heartbeat, maintenance and Runtime upgrade support during a rolling Node upgrade`, async (t) => {
     const f = await startTestApp({ seedDemoData: false, installer: {
       ...createTestInstaller(), checkForUpdates: async () => ({ compatible: true, latestVersion: "1.14.2", approvedVersion: "1.14.2" })
@@ -1191,15 +1191,15 @@ for (const agentVersion of ["0.9.0", "0.9.1"]) {
     }
     const bootstrap = await (await api(f.baseUrl, cookie, "/api/bootstrap")).json();
     const host = bootstrap.hosts.find(entry => entry.id === credential.hostId);
-    assert.equal(host.nodeUpgrade.availableVersion, "0.9.1");
+    assert.equal(host.nodeUpgrade.availableVersion, "0.9.2");
     assert.equal(host.nodeUpgrade.supported, true);
     const upgrade = await api(f.baseUrl, cookie, `/api/hosts/${credential.hostId}/node-upgrade`, { method: "POST" });
-    if (agentVersion === "0.9.0") {
+    if (agentVersion !== "0.9.2") {
       assert.equal(upgrade.status, 202);
-      assert.equal((await upgrade.json()).targetVersion, "0.9.1");
+      assert.equal((await upgrade.json()).targetVersion, "0.9.2");
       const task = await (await fetch(`${f.baseUrl}/api/node/tasks/next`, { headers })).json();
       assert.equal(task.kind, "upgrade-node");
-      assert.equal(task.payload.targetVersion, "0.9.1");
+      assert.equal(task.payload.targetVersion, "0.9.2");
       assert.match(task.payload.scriptSha256, /^[a-f0-9]{64}$/);
     } else {
       assert.equal(upgrade.status, 409);
@@ -3169,6 +3169,8 @@ test("RayLink Node reports real cumulative user counters idempotently and enforc
       token: createdHost.enrollmentToken,
       agentVersion: "0.7.0",
       runtimeVersion: "1.14.2",
+      platform: "linux",
+      architecture: "amd64",
       buildTags: ["with_v2ray_api"]
     })
   })).json();
@@ -3177,11 +3179,18 @@ test("RayLink Node reports real cumulative user counters idempotently and enforc
     authorization: `Bearer ${enrolled.nodeSecret}`,
     "x-raylink-host-id": enrolled.hostId
   };
+  await enableHostShadowsocks(testApp.baseUrl, cookie, enrolled.hostId);
   const initialDeployment = await api(testApp.baseUrl, cookie, "/api/deployments", {
     method: "POST",
     body: JSON.stringify({})
   });
   assert.equal(initialDeployment.status, 201);
+  const initialTask = await (await fetch(`${testApp.baseUrl}/api/node/tasks/next`, { headers: nodeHeaders })).json();
+  const applied = await fetch(`${testApp.baseUrl}/api/node/tasks/${initialTask.id}/complete`, {
+    method: "POST", headers: nodeHeaders,
+    body: JSON.stringify({ attempt: initialTask.attempt, status: "succeeded" })
+  });
+  assert.equal(applied.status, 200);
   const failedStatus = await fetch(`${testApp.baseUrl}/api/node/usage/status`, {
     method: "POST",
     headers: nodeHeaders,
@@ -3412,7 +3421,7 @@ test("control plane serves the RayLink web application on the same origin", asyn
   assert.match(nodeRuntimeResponse.headers.get("content-type"), /javascript/);
   const nodeRuntime = await nodeRuntimeResponse.text();
   assert.match(nodeRuntime, /class RayLinkNode/);
-  assert.match(nodeRuntime, /AGENT_VERSION = "0\.9\.1"/);
+  assert.match(nodeRuntime, /AGENT_VERSION = "0\.9\.2"/);
   assert.match(nodeRuntime, /upgrade-runtime/);
 
   const portalResponse = await fetch(`${testApp.baseUrl}/portal/`);

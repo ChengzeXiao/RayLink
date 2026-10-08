@@ -794,21 +794,21 @@ function applyServerUsers(inbound, type, users, masterPassword) {
     inbound.network = "tcp";
     inbound.method = "2022-blake3-aes-128-gcm";
     inbound.password = masterPassword;
-    inbound.users = users.map((user) => ({ name: user.email, password: user.runtimePassword }));
+    inbound.users = users.map((user) => ({ name: user.runtimeName || user.email, password: user.runtimePassword }));
   } else if (["socks", "http", "mixed", "naive"].includes(type)) {
-    inbound.users = users.map((user) => ({ username: user.email, password: user.runtimePassword }));
+    inbound.users = users.map((user) => ({ username: user.runtimeName || user.email, password: user.runtimePassword }));
   } else if (["vmess", "vless"].includes(type)) {
-    inbound.users = users.map((user) => ({ name: user.email, uuid: user.runtimeUuid }));
+    inbound.users = users.map((user) => ({ name: user.runtimeName || user.email, uuid: user.runtimeUuid }));
   } else if (type === "tuic") {
     inbound.users = users.map((user) => ({
-      name: user.email,
+      name: user.runtimeName || user.email,
       uuid: user.runtimeUuid,
       password: user.runtimePassword
     }));
   } else if (type === "hysteria") {
-    inbound.users = users.map((user) => ({ name: user.email, auth_str: user.runtimePassword }));
+    inbound.users = users.map((user) => ({ name: user.runtimeName || user.email, auth_str: user.runtimePassword }));
   } else if (["trojan", "anytls", "hysteria2", "shadowtls"].includes(type)) {
-    inbound.users = users.map((user) => ({ name: user.email, password: user.runtimePassword }));
+    inbound.users = users.map((user) => ({ name: user.runtimeName || user.email, password: user.runtimePassword }));
   }
 }
 
@@ -823,13 +823,13 @@ function buildClientOutbound(profile, credential, server, tag = `raylink-${profi
     };
   }
   if (profile.type === "socks") {
-    return { ...common, username: credential.email, password: credential.runtimePassword };
+    return { ...common, username: credential.runtimeName || credential.email, password: credential.runtimePassword };
   }
   if (["http", "mixed"].includes(profile.type)) {
-    return addClientTls({ ...common, type: "http", username: credential.email, password: credential.runtimePassword }, profile);
+    return addClientTls({ ...common, type: "http", username: credential.runtimeName || credential.email, password: credential.runtimePassword }, profile);
   }
   if (profile.type === "naive") {
-    return addClientTls({ ...common, username: credential.email, password: credential.runtimePassword }, profile);
+    return addClientTls({ ...common, username: credential.runtimeName || credential.email, password: credential.runtimePassword }, profile);
   }
   if (profile.type === "vmess") {
     return addClientTransport(addClientTls({

@@ -103,8 +103,12 @@ test("SSH onboarding enrolls the real Node, applies a protocol and verifies exis
   assert.ok(!(await scopedResponse.text()).includes("203.0.113.42"));
   const applied = JSON.parse(f.publications.at(-1).configText);
   const runtimeUsers = applied.inbounds.find((entry) => entry.type === "shadowsocks").users;
-  assert.ok(runtimeUsers.some((entry) => entry.name === "allowed@example.com"));
-  assert.ok(!runtimeUsers.some((entry) => entry.name === "scoped@example.com"));
+  const allowedCredential = f.app.store.clientCredential(user.id);
+  const scopedCredential = f.app.store.clientCredential(scoped.id);
+  assert.ok(runtimeUsers.some((entry) => entry.name === allowedCredential.runtimeName
+    && entry.password === allowedCredential.runtimePassword));
+  assert.ok(!runtimeUsers.some((entry) => entry.name === scopedCredential.runtimeName
+    || entry.password === scopedCredential.runtimePassword));
   const listing = await (await f.api("/api/hosts/provision")).json();
   assert.doesNotMatch(JSON.stringify(listing), /ssh-secret-only-memory|enrollmentToken|nodeSecret/);
   const db = await readFile(join(f.dataDir, "raylink.db"));

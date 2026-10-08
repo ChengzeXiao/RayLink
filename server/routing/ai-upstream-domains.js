@@ -34,9 +34,9 @@ function sharedCustomAiMatch(rule) {
   ] };
 }
 
-export function compileAiUpstreamRules(policy = {}) {
+export function compileAiUpstreamRules(policy = {}, { resolveRule } = {}) {
   const rules = normalizeRoutingPolicy(policy).rules.filter(rule => rule.enabled && ["domain", "domain_suffix"].includes(rule.match));
-  return [
+  const compiled = [
     ...rules.flatMap(rule => rule.action === "ai" && !isIP(rule.value) ? [
       // A protected first match must terminate, not fall through into a later
       // rule whose action differs from the client's first matching AI rule.
@@ -47,6 +47,15 @@ export function compileAiUpstreamRules(policy = {}) {
     { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "udp", action: "reject" },
     { domain: [...AI_UPSTREAM_DOMAIN_NAMES], domain_suffix: [...AI_UPSTREAM_DOMAIN_SUFFIXES], network: "tcp", action: "route", outbound: "ai-residential" }
   ];
+  // Ordinary exceptions and shared-provider guards terminate before the
+  // general Runtime resolver. Preserve its DNS rules/fallback on those paths;
+  // residential targets must stay unresolved for remote DNS, and rejects need
+  // no lookup. System-DNS mode deliberately supplies no explicit resolve rule.
+  return compiled.flatMap(rule => {
+    if (!resolveRule || rule.action !== "route" || rule.outbound !== "direct") return [rule];
+    const { action: _action, outbound: _outbound, ...match } = rule;
+    return [{ ...match, ...resolveRule }, rule];
+  });
 }
 
 function normalizedDomain(value) {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRayLinkApp } from "../server/app.js";
+import { LocalSingBoxAdapter } from "../server/singbox/local-adapter.js";
 
 async function fixture(t, overrides = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "raylink-ai-egress-api-"));
@@ -141,4 +142,34 @@ test("failed dry-run switches retain explicit simulated Runtime evidence", async
   assert.equal(result.runtimeSync.status, "pending");
   assert.equal(result.runtimeSync.publishedMode, "server");
   assert.equal(result.runtimeSync.runtimeMode, "dry-run");
+});
+
+test("AI egress detects live file drift and repair does not skip publication based on database history", async (t) => {
+  const runtimeDir = await mkdtemp(join(tmpdir(), "raylink-ai-egress-drift-"));
+  let restarts = 0;
+  const adapter = new LocalSingBoxAdapter({ dataDir: runtimeDir, mode: "systemd", runner: async (command, args) => {
+    if (command !== "systemctl") return { stdout: args[0] === "version" ? "sing-box version 1.14.2\n" : "" };
+    if (args[0] === "restart") restarts++;
+    return { stdout: args[0] === "show" ? restarts.toString(16).padStart(32, "0") + "\n" : "active\n" };
+  } });
+  const { request, app } = await fixture(t, { runtimeAdapter: adapter });
+  t.after(() => rm(runtimeDir, { recursive: true, force: true }));
+  const saved = await (await request("/api/settings/ai-egress", "PATCH", {
+    mode: "residential", upstream: { type: "http", server: "proxy.example.test", port: 3128 }
+  })).json();
+  assert.equal(saved.runtimeSync.status, "current");
+  const config = JSON.parse(await readFile(adapter.activePath, "utf8"));
+  config.outbounds.find(outbound => outbound.tag === "ai-residential").server = "different.example.test";
+  await writeFile(adapter.activePath, JSON.stringify(config));
+  const drifted = await (await request("/api/settings/ai-egress")).json();
+  assert.equal(drifted.runtimeSync.status, "pending");
+  assert.equal(drifted.runtimeSync.configurationIntegrity, "drifted");
+  const repaired = await (await request("/api/settings/ai-egress/publish", "POST", {})).json();
+  assert.equal(repaired.runtimeSync.status, "current");
+  assert.equal(restarts, 2);
+  const current = JSON.parse(await readFile(adapter.activePath, "utf8"));
+  current.outbounds.find(outbound => outbound.tag === "ai-residential").server = "drift-again.example.test";
+  await writeFile(adapter.activePath, JSON.stringify(current));
+  assert.equal((await app.runtimeManager.reconcile()).changed, true);
+  assert.equal(restarts, 3);
 });

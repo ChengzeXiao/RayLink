@@ -341,11 +341,16 @@ function applyMihomoTls(proxy, outbound) {
 function applyMihomoTransport(proxy, outbound) {
   const transport = outbound.transport;
   if (!transport) return proxy;
-  const type = transport.type === "httpupgrade" ? "httpupgrade" : transport.type;
-  proxy.network = type;
-  if (type === "ws") {
+  const type = transport.type;
+  // Mihomo implements HTTPUpgrade as a WebSocket transport option, not a
+  // separate network. Unknown network values may pass validation but fail I/O.
+  proxy.network = type === "httpupgrade" ? "ws" : type;
+  if (type === "ws" || type === "httpupgrade") {
+    const headers = { ...transport.headers, ...(transport.host ? { Host: transport.host } : {}) };
     proxy["ws-opts"] = {
-      path: transport.path || "/"
+      path: transport.path || "/",
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...(type === "httpupgrade" ? { "v2ray-http-upgrade": true } : {})
     };
   } else if (type === "grpc") {
     proxy["grpc-opts"] = {
@@ -354,10 +359,6 @@ function applyMihomoTransport(proxy, outbound) {
   } else if (type === "http") {
     proxy["http-opts"] = {
       path: [transport.path || "/"]
-    };
-  } else if (type === "httpupgrade") {
-    proxy["http-upgrade-opts"] = {
-      path: transport.path || "/"
     };
   }
   return proxy;

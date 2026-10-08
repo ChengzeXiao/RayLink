@@ -24,6 +24,7 @@ const certificatePath = join(temporaryDirectory, "certificate.pem");
 const keyPath = join(temporaryDirectory, "private-key.pem");
 const user = {
   email: "protocol-check@example.com",
+  runtimeName: `rl-user-${randomUUID()}`,
   runtimeUuid: randomUUID(),
   runtimePassword: randomBytes(16).toString("base64"),
   state: "active",
@@ -221,6 +222,7 @@ try {
       profiles: [profile],
       credential: {
         email: user.email,
+        runtimeName: user.runtimeName,
         runtimeUuid: user.runtimeUuid,
         runtimePassword: user.runtimePassword,
         serverPassword: masterPassword
@@ -339,6 +341,7 @@ try {
     profiles: clientProfiles,
     credential: {
       email: user.email,
+      runtimeName: user.runtimeName,
       runtimeUuid: user.runtimeUuid,
       runtimePassword: user.runtimePassword,
       serverPassword: masterPassword
@@ -367,6 +370,7 @@ try {
     profiles: [shadowsocksProfile],
     credential: {
       email: user.email,
+      runtimeName: user.runtimeName,
       runtimeUuid: user.runtimeUuid,
       runtimePassword: user.runtimePassword,
       serverPassword: masterPassword

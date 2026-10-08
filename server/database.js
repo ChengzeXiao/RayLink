@@ -17,6 +17,7 @@ import {
   verifyPassword
 } from "./security.js";
 import { normalizeCertificateEmail } from "./certificate-settings.js";
+import { sealNodeSecret, validateNodeEncryptionPublicKey } from "./node-secrets.js";
 import {
   DEFAULT_AI_UPSTREAM, aiUpstreamSecretError, decryptAiUpstreamSecret,
   encryptAiUpstreamSecret, normalizeAiUpstreamSettings, publicAiUpstreamSettings,
@@ -348,6 +349,7 @@ export class RayLinkStore {
     this.monthlyUsage = new MonthlyUsagePeriods(this.db, this.clock);
     this.rolloverUsagePeriods();
     this.seed({ adminUsername, adminPassword, initialHostAddress, initialListenPort, seedDemoData });
+    this.initializeRuntimeIdentities();
     this.initializeSetup({ setupRequired, setupTokenHash, setupTokenExpiresAt });
   }
 
@@ -478,6 +480,31 @@ export class RayLinkStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS node_enrollment_receipts (
+        token_hash TEXT PRIMARY KEY,
+        host_id TEXT NOT NULL UNIQUE REFERENCES hosts(id) ON DELETE CASCADE,
+        encryption_public_key TEXT NOT NULL,
+        credential_envelope_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runtime_identity_aliases (
+        user_name TEXT PRIMARY KEY,
+        user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+      );
+      CREATE TABLE IF NOT EXISTS host_usage_authorizations (
+        host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        granted_at TEXT NOT NULL,
+        revoked_at TEXT,
+        PRIMARY KEY(host_id, user_id, granted_at)
+      );
+      CREATE TABLE IF NOT EXISTS usage_runtime_identity_bindings (
+        host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        runtime_instance_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        counter_name TEXT NOT NULL,
+        PRIMARY KEY(host_id, runtime_instance_id, user_id)
       );
       CREATE TABLE IF NOT EXISTS host_protocols (
         host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
@@ -655,6 +682,9 @@ export class RayLinkStore {
       }
     }
     const userColumns = this.db.prepare("PRAGMA table_info(users)").all();
+    if (!userColumns.some((column) => column.name === "runtime_name")) {
+      this.db.exec("ALTER TABLE users ADD COLUMN runtime_name TEXT");
+    }
     if (!userColumns.some((column) => column.name === "used_bytes")) {
       this.db.exec("ALTER TABLE users ADD COLUMN used_bytes INTEGER NOT NULL DEFAULT 0");
       this.db.exec(`
@@ -1579,10 +1609,15 @@ export class RayLinkStore {
     const user = this.db.prepare("SELECT * FROM users WHERE email = ?").get(String(email || "").trim().toLowerCase());
     const valid = await verifyPassword(password, user?.password_hash || DUMMY_PASSWORD_HASH);
     if (!user || !valid) return null;
+    // A reset or account change may commit while scrypt yields. Re-read the
+    // identity before allowing this request to create a new portal session.
+    const current = this.db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+    if (!current || current.password_hash !== user.password_hash || current.email !== user.email
+      || current.portal_status !== user.portal_status || current.state !== user.state) return null;
     return {
-      id: user.id,
-      email: user.email,
-      portalStatus: user.portal_status
+      id: current.id,
+      email: current.email,
+      portalStatus: current.portal_status
     };
   }
 
@@ -1628,7 +1663,7 @@ export class RayLinkStore {
 
   clientCredential(userId) {
     const row = this.db.prepare(`
-      SELECT users.email, users.runtime_uuid, users.runtime_password, users.state, users.portal_status,
+      SELECT users.email, users.runtime_name, users.runtime_uuid, users.runtime_password, users.state, users.portal_status,
              users.expires_at, users.used_gb, users.quota_gb, users.node_scope_json,
              (SELECT region FROM hosts WHERE id = 'local') AS host_region,
              (SELECT value FROM settings WHERE key = 'shadowsocks_master_password') AS server_password
@@ -1638,6 +1673,7 @@ export class RayLinkStore {
     if (!row) return null;
     return {
       email: row.email,
+      runtimeName: row.runtime_name || row.email,
       runtimeUuid: row.runtime_uuid,
       runtimePassword: row.runtime_password,
       serverPassword: row.server_password,
@@ -1811,6 +1847,82 @@ export class RayLinkStore {
     });
   }
 
+  initializeRuntimeIdentities() {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // Preserve usernames from installed pre-upgrade configurations. Once
+      // captured they no longer follow editable account email addresses.
+      this.db.exec("UPDATE users SET runtime_name = email WHERE runtime_name IS NULL");
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_runtime_name ON users(runtime_name)");
+      const alias = this.db.prepare("INSERT OR IGNORE INTO runtime_identity_aliases(user_name,user_id) VALUES (?,?)");
+      for (const user of this.db.prepare("SELECT id,email,runtime_name FROM users").all()) {
+        alias.run(user.runtime_name, user.id);
+        alias.run(user.email, user.id);
+      }
+      // Recover historic email aliases through immutable protocol credentials,
+      // rather than assuming that a currently reused email owns old counters.
+      if (!this.db.prepare("SELECT 1 FROM settings WHERE key='runtime_identity_history_migrated'").get()) {
+        for (const deployment of this.db.prepare("SELECT config_json,published_at,created_at FROM deployments WHERE status IN ('active','superseded') ORDER BY created_at").all()) {
+          const metadata = parseJson(deployment.config_json, {});
+          this.recordHostUsageAuthorization("local", metadata.config, deployment.published_at || deployment.created_at);
+        }
+        for (const task of this.db.prepare("SELECT host_id,payload_json,finished_at,created_at FROM node_tasks WHERE kind='publish-config' AND status='succeeded' ORDER BY created_at").all()) {
+          const payload = parseJson(task.payload_json, {});
+          this.recordHostUsageAuthorization(task.host_id, parseJson(payload.configText, null), task.finished_at || task.created_at);
+        }
+        this.db.prepare("INSERT INTO settings(key,value,updated_at) VALUES ('runtime_identity_history_migrated','true',?)").run(new Date(this.clock()).toISOString());
+      }
+      for (const user of this.db.prepare(`SELECT users.id,users.runtime_name FROM users
+        LEFT JOIN runtime_identity_aliases AS identity ON identity.user_name=users.runtime_name
+        WHERE identity.user_id IS NULL OR identity.user_id <> users.id`).all()) {
+        const stableName = `rl-user-${user.id}`;
+        this.db.prepare("INSERT OR IGNORE INTO runtime_identity_aliases(user_name,user_id) VALUES (?,?)").run(stableName, user.id);
+        this.db.prepare("UPDATE users SET runtime_name=? WHERE id=?").run(stableName, user.id);
+      }
+      for (const counter of this.db.prepare(`SELECT checkpoints.*,identity.user_id
+        FROM usage_counter_checkpoints AS checkpoints
+        JOIN runtime_identity_aliases AS identity ON identity.user_name=checkpoints.user_name
+        WHERE identity.user_id IS NOT NULL
+        ORDER BY checkpoints.uplink_bytes + checkpoints.downlink_bytes DESC`).all()) {
+        this.db.prepare(`INSERT OR IGNORE INTO usage_runtime_identity_bindings
+          (host_id,runtime_instance_id,user_id,counter_name) VALUES (?,?,?,?)`)
+          .run(counter.host_id, counter.runtime_instance_id, counter.user_id, counter.user_name);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  recordHostUsageAuthorization(hostId, config, appliedAt = new Date(this.clock()).toISOString()) {
+    if (!Array.isArray(config?.inbounds)) return;
+    const ids = new Set();
+    for (const inbound of config?.inbounds || []) for (const credential of inbound.users || []) {
+      const name = credential.name || credential.username;
+      if (!name || name === "raylink-probe@internal") continue;
+      // Credential matching is only used for trusted applied configuration
+      // migration. Reports themselves can only reference a persisted alias.
+      const user = credential.uuid
+        ? this.db.prepare("SELECT id FROM users WHERE runtime_uuid=?").get(credential.uuid)
+        : credential.password || credential.auth_str
+          ? this.db.prepare("SELECT id FROM users WHERE runtime_password=?").get(credential.password || credential.auth_str)
+          : null;
+      if (!user) continue;
+      const current = this.db.prepare("SELECT user_id FROM runtime_identity_aliases WHERE user_name=?").get(name);
+      if (current && current.user_id !== user.id) {
+        // A formerly reused email is ambiguous. Do not charge either owner by
+        // that name; new compilations use the unambiguous stable Runtime name.
+        this.db.prepare("UPDATE runtime_identity_aliases SET user_id=NULL WHERE user_name=?").run(name);
+      } else this.db.prepare("INSERT OR IGNORE INTO runtime_identity_aliases(user_name,user_id) VALUES (?,?)").run(name, user.id);
+      ids.add(user.id);
+    }
+    for (const current of this.db.prepare("SELECT user_id,granted_at FROM host_usage_authorizations WHERE host_id=? AND revoked_at IS NULL").all(hostId)) {
+      if (!ids.has(current.user_id)) this.db.prepare("UPDATE host_usage_authorizations SET revoked_at=? WHERE host_id=? AND user_id=? AND granted_at=?")
+        .run(appliedAt, hostId, current.user_id, current.granted_at);
+    }
+    for (const id of ids) if (!this.db.prepare("SELECT 1 FROM host_usage_authorizations WHERE host_id=? AND user_id=? AND revoked_at IS NULL").get(hostId, id)) {
+      this.db.prepare("INSERT OR IGNORE INTO host_usage_authorizations(host_id,user_id,granted_at) VALUES (?,?,?)").run(hostId, id, appliedAt);
+    }
+  }
+
   recordUsageSnapshot(hostId, input = {}) {
     const host = this.getHost(hostId);
     if (!host) throw domainError("HOST_NOT_FOUND", "主机不存在", 404);
@@ -1886,11 +1998,28 @@ export class RayLinkStore {
       const quotaExceededUserIds = [];
       for (const usage of normalized) {
         const user = this.db.prepare(`
-          SELECT id, used_bytes, quota_gb
-          FROM users
-          WHERE email = ?
+          SELECT users.id, users.used_bytes, users.quota_gb
+          FROM runtime_identity_aliases AS identity JOIN users ON users.id=identity.user_id
+          WHERE identity.user_name = ?
         `).get(usage.userName);
         if (!user) continue;
+        // A Node may only bill members of a configuration that actually
+        // completed on that Host. Keep historical grants for delayed samples;
+        // checking only today's region would discard legitimate old usage.
+        if (host.kind === "remote" && !this.db.prepare(`
+          SELECT 1 FROM host_usage_authorizations WHERE host_id=? AND user_id=?
+            AND julianday(?) >= julianday(granted_at) - ?
+            AND (revoked_at IS NULL OR julianday(?) <= julianday(revoked_at) + ?)
+          LIMIT 1
+        `).get(hostId, user.id, observedAt.toISOString(), MAX_USAGE_SAMPLE_FUTURE_SKEW_MS / 86_400_000,
+          observedAt.toISOString(), MAX_USAGE_SAMPLE_FUTURE_SKEW_MS / 86_400_000)) continue;
+        this.db.prepare(`INSERT OR IGNORE INTO usage_runtime_identity_bindings
+          (host_id,runtime_instance_id,user_id,counter_name) VALUES (?,?,?,?)`)
+          .run(hostId, runtimeInstanceId, user.id, usage.userName);
+        // Different legacy aliases still identify one cumulative counter for
+        // this User on this Runtime. They must share one monthly watermark.
+        usage.userName = this.db.prepare(`SELECT counter_name FROM usage_runtime_identity_bindings
+          WHERE host_id=? AND runtime_instance_id=? AND user_id=?`).get(hostId, runtimeInstanceId, user.id).counter_name;
         const checkpoint = this.db.prepare(`
           SELECT runtime_instance_id, uplink_bytes, downlink_bytes, baseline_pending
           FROM usage_counter_checkpoints
@@ -2193,40 +2322,71 @@ export class RayLinkStore {
   }
 
   enrollNode(token, metadata = {}) {
-    const row = this.db.prepare(`
-      SELECT id FROM hosts
-      WHERE kind = 'remote' AND enrollment_secret_hash = ?
-    `).get(hashSessionSecret(String(token || "")));
-    if (!row) throw domainError("NODE_ENROLLMENT_INVALID", "节点注册令牌无效或已经使用", 401);
+    const tokenHash = hashSessionSecret(String(token || ""));
+    const encryptionPublicKey = metadata.encryptionPublicKey
+      ? validateNodeEncryptionPublicKey(metadata.encryptionPublicKey) : null;
+    if (metadata.sealedEnrollment && !encryptionPublicKey) {
+      throw domainError("INVALID_NODE_ENCRYPTION_KEY", "密封注册必须提供节点加密公钥");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const receipt = this.db.prepare(`
+        SELECT host_id, encryption_public_key, credential_envelope_json
+        FROM node_enrollment_receipts WHERE token_hash = ?
+      `).get(tokenHash);
+      if (receipt) {
+        if (!encryptionPublicKey || receipt.encryption_public_key !== encryptionPublicKey) {
+          throw domainError("NODE_ENROLLMENT_INVALID", "节点注册令牌无效或已经使用", 401);
+        }
+        // Knowledge of the old token and public key is insufficient to recover
+        // the secret: only the originally persisted private key opens this receipt.
+        this.db.exec("COMMIT");
+        return { hostId: receipt.host_id, sealedCredential: parseJson(receipt.credential_envelope_json, null) };
+      }
+      const row = this.db.prepare(`
+        SELECT id FROM hosts
+        WHERE kind = 'remote' AND enrollment_secret_hash = ?
+      `).get(tokenHash);
+      if (!row) throw domainError("NODE_ENROLLMENT_INVALID", "节点注册令牌无效或已经使用", 401);
 
-    const nodeSecret = createSessionSecret();
-    const timestamp = nowIso();
-    const buildTags = Array.isArray(metadata.buildTags)
-      ? metadata.buildTags.map(String).filter((tag) => /^[a-zA-Z0-9_-]{1,64}$/.test(tag)).slice(0, 64)
-      : [];
-    const encryptionPublicKey = String(metadata.encryptionPublicKey || "").slice(0, 4_096) || null;
-    this.db.prepare(`
-      UPDATE hosts
-      SET enrollment_secret_hash = NULL, node_secret_hash = ?, status = 'online',
-          hostname = ?, platform = ?, architecture = ?, agent_version = ?,
-          runtime_version = ?, build_tags_json = ?, encryption_public_key = ?, last_seen_at = ?,
-          enrolled_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      hashSessionSecret(nodeSecret),
-      String(metadata.hostname || "").slice(0, 255) || null,
-      String(metadata.platform || "").slice(0, 64) || null,
-      String(metadata.architecture || "").slice(0, 64) || null,
-      String(metadata.agentVersion || "").slice(0, 64) || null,
-      String(metadata.runtimeVersion || "").slice(0, 64) || null,
-      JSON.stringify(buildTags),
-      encryptionPublicKey,
-      timestamp,
-      timestamp,
-      timestamp,
-      row.id
-    );
-    return { hostId: row.id, nodeSecret };
+      const nodeSecret = createSessionSecret();
+      const timestamp = nowIso();
+      const buildTags = Array.isArray(metadata.buildTags)
+        ? metadata.buildTags.map(String).filter((tag) => /^[a-zA-Z0-9_-]{1,64}$/.test(tag)).slice(0, 64)
+        : [];
+      const credential = { hostId: row.id, nodeSecret };
+      const sealedCredential = encryptionPublicKey ? sealNodeSecret(encryptionPublicKey, credential) : null;
+      const enrolled = this.db.prepare(`
+        UPDATE hosts
+        SET enrollment_secret_hash = NULL, node_secret_hash = ?, status = 'online',
+            hostname = ?, platform = ?, architecture = ?, agent_version = ?,
+            runtime_version = ?, build_tags_json = ?, encryption_public_key = ?, last_seen_at = ?,
+            enrolled_at = ?, updated_at = ?
+        WHERE id = ? AND enrollment_secret_hash = ?
+      `).run(
+        hashSessionSecret(nodeSecret),
+        String(metadata.hostname || "").slice(0, 255) || null,
+        String(metadata.platform || "").slice(0, 64) || null,
+        String(metadata.architecture || "").slice(0, 64) || null,
+        String(metadata.agentVersion || "").slice(0, 64) || null,
+        String(metadata.runtimeVersion || "").slice(0, 64) || null,
+        JSON.stringify(buildTags),
+        encryptionPublicKey,
+        timestamp,
+        timestamp,
+        timestamp,
+        row.id,
+        tokenHash
+      );
+      if (Number(enrolled.changes) !== 1) throw domainError("NODE_ENROLLMENT_INVALID", "节点注册令牌无效或已经使用", 401);
+      if (sealedCredential) this.db.prepare(`
+        INSERT INTO node_enrollment_receipts (token_hash, host_id, encryption_public_key, credential_envelope_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(tokenHash, row.id, encryptionPublicKey, JSON.stringify(sealedCredential), timestamp);
+      this.db.exec("COMMIT");
+      return metadata.sealedEnrollment && sealedCredential
+        ? { hostId: row.id, sealedCredential } : credential;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   authenticateNode(hostId, secret) {
@@ -2635,6 +2795,7 @@ export class RayLinkStore {
         hostId
       );
       if (succeeded && task.kind === "publish-config") {
+        this.recordHostUsageAuthorization(hostId, parseJson(payload.configText, null));
         if (Array.isArray(payload.protocols)) {
           this.markHostProtocolsApplied(hostId, payload.protocols);
         }
@@ -2753,13 +2914,14 @@ export class RayLinkStore {
     const initials = name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "新";
     const timestamp = nowIso();
     try {
+      this.db.exec("BEGIN IMMEDIATE");
       this.db.prepare(`
         INSERT INTO users (
           id, name, initials, email, password_hash, portal_status, state, used_gb, used_bytes,
           plan_id, quota_gb, device_limit, node_scope_json, client_formats_json,
           expires_at, runtime_uuid, runtime_password, subscription_public_id,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          created_at, updated_at, runtime_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         name,
@@ -2780,9 +2942,16 @@ export class RayLinkStore {
         createShadowsocksKey(),
         createRuntimePassword(18),
         timestamp,
-        timestamp
+        timestamp,
+        `rl-user-${id}`
       );
+      this.db.prepare("INSERT INTO runtime_identity_aliases(user_name,user_id) VALUES (?,?)").run(`rl-user-${id}`, id);
+      // Retain a non-reassignable legacy alias for counters arriving from
+      // previously generated configurations, including after email changes.
+      this.db.prepare("INSERT OR IGNORE INTO runtime_identity_aliases(user_name,user_id) VALUES (?,?)").run(email, id);
+      this.db.exec("COMMIT");
     } catch (error) {
+      this.db.exec("ROLLBACK");
       if (String(error.message).includes("UNIQUE")) {
         throw domainError("USER_EXISTS", "邮箱已经存在", 409);
       }
@@ -2910,7 +3079,7 @@ export class RayLinkStore {
     }
   }
 
-  runtimeSnapshot(hostId = "local") {
+  runtimeSnapshot(hostId = "local", { includeAiUpstream = true } = {}) {
     const host = this.db.prepare(`
       SELECT id, name, address, endpoint_domain AS endpointDomain, kind, region, status, build_tags_json, runtime_version AS runtimeVersion
       FROM hosts
@@ -2921,12 +3090,13 @@ export class RayLinkStore {
     delete host.build_tags_json;
     const setting = this.db.prepare("SELECT value FROM settings WHERE key = 'shadowsocks_master_password'").get();
     const users = this.db.prepare(`
-      SELECT users.email, users.state, users.portal_status, users.used_gb, users.expires_at,
+      SELECT users.email, users.runtime_name, users.state, users.portal_status, users.used_gb, users.expires_at,
              users.runtime_uuid, users.runtime_password, users.quota_gb, users.node_scope_json
       FROM users
       ORDER BY users.email
     `).all().map((row) => ({
       email: row.email,
+      runtimeName: row.runtime_name || row.email,
       state: row.state,
       portalStatus: row.portal_status,
       usedGb: row.used_gb,
@@ -2942,7 +3112,7 @@ export class RayLinkStore {
       users,
       protocols: this.listHostProtocolConfigs(hostId),
       routingPolicy: this.routingPolicy(),
-      ...(hostId === "local" ? { aiUpstream: this.aiUpstreamRuntimeSettings() } : {})
+      ...(hostId === "local" && includeAiUpstream ? { aiUpstream: this.aiUpstreamRuntimeSettings() } : {})
     };
   }
 
@@ -3069,6 +3239,8 @@ export class RayLinkStore {
 
   finishDeployment(id, { status, error = null }) {
     if (status === "active") {
+      const metadata = parseJson(this.db.prepare("SELECT config_json FROM deployments WHERE id=?").get(id)?.config_json, {});
+      this.recordHostUsageAuthorization("local", metadata.config);
       this.db.prepare(`
         UPDATE deployments SET status = 'superseded' WHERE status = 'active' AND id <> ?
       `).run(id);

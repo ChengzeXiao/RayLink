@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RayLinkStore } from "../server/database.js";
+import { applyRemoteRuntime } from "./helpers/applied-host.js";
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "raylink-runtime-ledger-"));
   const options = { dbPath: join(directory, "store.db"), adminUsername: "admin", adminPassword: "test-password-123", seedDemoData: false };
   const store = new RayLinkStore(options);
   t.after(async () => { store.close(); await rm(directory, { recursive: true, force: true }); });
-  const user = store.createUser({ name: "Usage user", email: "usage@example.com", quotaGb: 10, nodeScope: ["all"], expiresAt: "2027-01-01" });
+  const user = store.createUser({ name: "Usage user", email: "usage@example.com", quotaGb: 10, nodeScope: ["all"], portalStatus: "active", expiresAt: "2027-01-01" });
   return { store, user, options };
 }
 
@@ -53,7 +54,10 @@ test("legacy checkpoint migration preserves metered bytes across reopen and keep
   legacy.close();
   store = new RayLinkStore(options);
   assert.equal(sample("local", "sample-after", 130).appliedBytes, 30);
-  const { host } = store.createRemoteHost({ name: "Other Host", address: "192.0.2.1", region: "hk" });
+  const remote = store.createRemoteHost({ name: "Other Host", address: "192.0.2.1", region: "hk" });
+  store.updateUser(user.id, { portalStatus: "active" });
+  applyRemoteRuntime(store, remote);
+  const { host } = remote;
   assert.equal(sample(host.id, "sample-after", 50).appliedBytes, 50);
   store.close();
   store = new RayLinkStore(options);

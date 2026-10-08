@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import { protocolCatalog } from "./singbox/protocol-catalog.js";
+import { safeManagementOutput as safeOutput } from "./management-output.js";
 
 const requestId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -21,24 +22,6 @@ function findResource(items, resourceId, kind, key = "id") {
   error.code = "RESOURCE_NOT_FOUND";
   error.statusCode = 404;
   throw error;
-}
-
-// Defense in depth after the resource allowlist. Advanced JSON and raw errors
-// may embed credentials, so ordinary tools expose their status rather than text.
-function safeOutput(value) {
-  if (Array.isArray(value)) return value.map(safeOutput);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
-    const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
-    if (key === "passwordReset" && typeof child === "boolean") return [[key, child]];
-    if (key === "passwordConfigured" && typeof child === "boolean") return [[key, child]];
-    if (key === "tokenConfigured" && typeof child === "boolean") return [[key, child]];
-    if (key === "subscriptionVerified" && typeof child === "boolean") return [[key, child]];
-    if (key === "subscriptionStatus" && ["verified", "awaiting-users"].includes(child)) return [[key, child]];
-    if (/password|secret|token|privatekey|runtimeuuid|subscription|authorization|cookie|credential|configtext|configjson|sealedtlsbundle/.test(normalized)
-      || ["options", "config", "raw", "error", "lasterror", "rollbackerror"].includes(normalized)) return [];
-    return [[key, safeOutput(child)]];
-  }));
 }
 
 // Every route is fixed here; MCP callers cannot choose a URL, command or HTTP verb.

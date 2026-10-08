@@ -4,6 +4,26 @@ import test from "node:test";
 import { buildSubscriptionArtifact } from "../server/subscriptions/formats.js";
 import { buildMultiHostProtocolClientConfig, defaultProtocolConfigs } from "../server/singbox/protocol-catalog.js";
 
+test("Mihomo HTTPUpgrade exports use the supported WebSocket upgrade mode and retain handshake metadata", () => {
+  for (const format of ["mihomo", "mihomo-modern"]) {
+    for (const type of ["vmess", "vless", "trojan"]) {
+      const body = buildSubscriptionArtifact({ format, singBoxConfig: { outbounds: [{
+        type, tag: "upgrade-fixture", server: "node.example", server_port: 443,
+        uuid: "3365c019-4b70-4dd5-9b3a-48d83a22f24d", password: "fixture",
+        transport: { type: "httpupgrade", path: "/tunnel", host: "upgrade.example", headers: { "X-Fixture": "preserved" } }
+      }] } }).body;
+      // Modern exports keep the same node fields in an inline provider.
+      const proxies = body;
+      assert.match(proxies, /network: "ws"/);
+      assert.match(proxies, /ws-opts:\n\s+path: "\/tunnel"/);
+      assert.match(proxies, /v2ray-http-upgrade: true/);
+      assert.match(proxies, /Host: "upgrade\.example"/);
+      assert.match(proxies, /X-Fixture: "preserved"/);
+      assert.doesNotMatch(proxies, /http-upgrade-opts:|network: "httpupgrade"/);
+    }
+  }
+});
+
 test("smart Mihomo subscriptions validate domestic DNS candidates without changing explicit modes", () => {
   for (const format of ["mihomo", "mihomo-modern"]) {
     const body = buildSubscriptionArtifact({ format, singBoxConfig }).body;

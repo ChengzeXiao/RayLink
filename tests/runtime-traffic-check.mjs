@@ -21,7 +21,7 @@ const directory = await mkdtemp(join(tmpdir(), "raylink-traffic-"));
 const certificatePath = join(directory, "cert.pem");
 const keyPath = join(directory, "key.pem");
 const payload = "raylink-1.14.2-".repeat(16384);
-const user = { email: "traffic@example.com", runtimeUuid: randomUUID(),
+const user = { email: "traffic@example.com", runtimeName: `rl-user-${randomUUID()}`, runtimeUuid: randomUUID(),
   runtimePassword: randomBytes(16).toString("base64"), state: "active", portalStatus: "active",
   quotaGb: 10, usedGb: 0, expiresAt: "2099-12-31", nodeScope: ["all"] };
 const masterPassword = randomBytes(16).toString("base64");
@@ -104,10 +104,10 @@ try {
       let counters;
       for (let attempt = 0; attempt < 20; attempt++) {
         counters = normalizeV2RayUserStats(await queryV2RayUserStats({ endpoint: `http://127.0.0.1:${statsPort}` }));
-        if (counters.some((entry) => entry.name === user.email && entry.downlinkBytes >= payload.length)) break;
+        if (counters.some((entry) => entry.name === user.runtimeName && entry.downlinkBytes >= payload.length)) break;
         await delay(50);
       }
-      const measured = counters.find((entry) => entry.name === user.email);
+      const measured = counters.find((entry) => entry.name === user.runtimeName);
       assert.ok(measured?.uplinkBytes > 0, `${type}: upload must be charged to the User`);
       assert.ok(measured?.downlinkBytes >= payload.length, `${type}: download must be charged to the User`);
       assert.ok(!counters.some((entry) => entry.name === "raylink-probe@internal"));

@@ -3643,6 +3643,7 @@ async function publishConfig() {
     showToast("校验完成", `${preview.eligibleUsers} 位有效用户，${preview.inboundCount} 个入站。`);
 
     const deployment = await api("/api/deployments", { method: "POST" });
+    button.dataset.lastDeploymentId = deployment.id;
     items.forEach((item) => {
       item.className = "done";
       item.querySelector("span").innerHTML = icon("check");
@@ -3653,8 +3654,13 @@ async function publishConfig() {
     document.querySelectorAll(".release-version").forEach((element) => {
       element.textContent = deployment.version;
     });
-    await loadBootstrap();
-    showToast("配置已生效", `${deployment.eligibleUsers} 位用户已写入 sing-box 配置。`);
+    try {
+      await loadBootstrap();
+    } catch {
+      showToast("发布已提交", `${deployment.version} 已提交成功，但页面状态刷新失败。请刷新页面核对进度，无需重复发布。`);
+      return;
+    }
+    showToast("发布已提交", `${deployment.version} 已提交，包含 ${deployment.eligibleUsers} 位有效用户。请在部署记录查看各主机结果。`);
   } catch (error) {
     button.innerHTML = `${icon("terminal")} 重试发布`;
     statusBadge.className = "status-badge warning";
@@ -3677,8 +3683,14 @@ async function rollbackConfig() {
     const deployment = await api(`/api/deployments/${encodeURIComponent(deploymentId)}/rollback`, {
       method: "POST"
     });
-    await loadBootstrap();
-    showToast("回滚已生效", `已从历史快照创建 ${deployment.version}。`);
+    button.dataset.lastDeploymentId = deployment.id;
+    try {
+      await loadBootstrap();
+    } catch {
+      showToast("回滚已提交", `${deployment.version} 已提交成功，但页面状态刷新失败。请刷新页面核对进度，无需重复回滚。`);
+      return;
+    }
+    showToast("回滚已提交", `已从历史快照创建 ${deployment.version}。请在部署记录查看各主机结果。`);
   } catch (error) {
     showToast("回滚失败", error.message);
   } finally {

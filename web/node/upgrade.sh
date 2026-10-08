@@ -89,7 +89,7 @@ RAYLINK_VERIFY_MODULE="$candidate_root/raylink-node.mjs" "$node_binary" --input-
   import { pathToFileURL } from "node:url";
   // Keep argv[1] empty: importing a program must not trigger its CLI main guard.
   const node = await import(pathToFileURL(process.env.RAYLINK_VERIFY_MODULE).href);
-  if (node.AGENT_VERSION !== "0.9.1") throw new Error("控制面未提供 Node 0.9.1");
+  if (node.AGENT_VERSION !== "0.9.2") throw new Error("控制面未提供 Node 0.9.2");
 '
 cp -p "$RAYLINK_NODE_ROOT/raylink-node.mjs" "$backup_root/raylink-node.mjs"
 for asset in build-metered-runtime.sh network-tuning.mjs software-update.mjs; do
@@ -129,5 +129,5 @@ for attempt in 1 2; do
   systemctl is-active --quiet raylink-node.service || fail "新 Node 未通过服务健康检查"
 done
 succeeded=true
-printf 'RayLink Node 已更新为 0.9.1；备份：%s\n' "$backup_root"
-printf 'BBR 将自动配置并由心跳上报真实状态；等待控制面显示 Node 0.9.1。\n'
+printf 'RayLink Node 已更新为 0.9.2；备份：%s\n' "$backup_root"
+printf 'BBR 将自动配置并由心跳上报真实状态；等待控制面显示 Node 0.9.2。\n'

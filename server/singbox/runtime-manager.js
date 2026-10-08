@@ -8,8 +8,17 @@ function deploymentVersion(prefix = "v", now = new Date()) {
   return `${prefix}${now.toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;
 }
 
-function compile(store, listenPort, runtimeDns, hostId = "local", protocols = null) {
-  const snapshot = store.runtimeSnapshot(hostId);
+export function runtimeConfigurationMatches(runtime, checksum) {
+  if (!checksum || !(runtime?.state === "running" || runtime?.mode === "dry-run" && runtime.state === "staged")) return false;
+  // The built-in adapter always supplies read-back and activation evidence.
+  // Retain compatibility with injected adapters that predate these fields.
+  if ("configChecksum" in runtime && runtime.configChecksum !== checksum) return false;
+  if (runtime.mode !== "dry-run" && "appliedChecksum" in runtime && runtime.appliedChecksum !== checksum) return false;
+  return true;
+}
+
+function compile(store, listenPort, runtimeDns, hostId = "local", protocols = null, snapshotOptions = {}) {
+  const snapshot = store.runtimeSnapshot(hostId, snapshotOptions);
   if (protocols) snapshot.protocols = protocols;
   const config = buildSingBoxConfig(snapshot, { listenPort, runtimeDns });
   const configText = `${JSON.stringify(config, null, 2)}\n`;
@@ -41,6 +50,34 @@ function removesRuntimeCredentials(previousConfig, nextConfig) {
   const previous = runtimeCredentialNames(previousConfig);
   const next = runtimeCredentialNames(nextConfig);
   return [...previous].some((credential) => !next.has(credential));
+}
+
+function authorizeRollback(store, snapshot, listenPort, runtimeDns, hostId = "local") {
+  // A deployment may restore topology, never an old grant or rotated secret.
+  // Keep historical TLS asset paths and upstream settings, but compile users
+  // against today's entitlement and the historical protocol profiles.
+  const authorized = compile(store, listenPort, runtimeDns, hostId, snapshot.protocols, { includeAiUpstream: false });
+  const currentInbounds = new Map(authorized.config.inbounds.map(inbound => [inbound.tag, inbound]));
+  const config = structuredClone(snapshot.config);
+  config.inbounds = config.inbounds.map(inbound => {
+    const current = currentInbounds.get(inbound.tag);
+    if (!current || current.type !== inbound.type || Array.isArray(inbound.users) && !Array.isArray(current.users)) {
+      throw Object.assign(new Error("历史协议无法按当前权益安全回滚"), {
+        code: "ROLLBACK_AUTHORIZATION_UNAVAILABLE", statusCode: 409
+      });
+    }
+    if (!Array.isArray(current.users)) return inbound;
+    return { ...inbound, users: current.users,
+      ...(inbound.type === "shadowsocks" ? { password: current.password } : {}) };
+  });
+  if (config.experimental?.v2ray_api?.stats) {
+    config.experimental.v2ray_api.stats.users = [...runtimeCredentialNames(config)]
+      .filter(name => name && name !== "raylink-probe@internal");
+  }
+  const configText = `${JSON.stringify(config, null, 2)}\n`;
+  return { ...snapshot, config, configText,
+    checksum: createHash("sha256").update(configText).digest("hex"),
+    eligibleUsers: authorized.eligibleUsers };
 }
 
 function deploymentCandidateMatchesSnapshot(candidate, snapshot) {
@@ -201,6 +238,7 @@ export class RuntimeManager {
     if (
       deploymentCandidateMatchesSnapshot(candidate, activeSnapshot)
       && options.forceCritical !== true
+      && runtimeConfigurationMatches(await this.status(), candidate.compiled.checksum)
     ) {
       const pending = this.#pendingRemoteDeployments(candidate);
       let remoteQueued = 0;
@@ -230,12 +268,16 @@ export class RuntimeManager {
   }
 
   async #rollback(sourceDeploymentId, publisherAdminId) {
-    const snapshot = this.store.deploymentSnapshot(sourceDeploymentId);
-    const configText = `${JSON.stringify(snapshot.config, null, 2)}\n`;
+    const historical = this.store.deploymentSnapshot(sourceDeploymentId);
+    const snapshot = authorizeRollback(this.store, historical, this.listenPort, this.runtimeDns);
+    snapshot.hostSnapshots = historical.hostSnapshots.filter(remote => {
+      const host = this.store.getHost(remote.hostId);
+      return host?.kind === "remote" && host.enrolledAt;
+    }).map(remote => authorizeRollback(this.store, remote, this.listenPort, this.runtimeDns, remote.hostId));
     const deployment = await this.#publishCompiled({
       config: snapshot.config,
-      configText,
-      checksum: createHash("sha256").update(configText).digest("hex"),
+      configText: snapshot.configText,
+      checksum: snapshot.checksum,
       eligibleUsers: snapshot.eligibleUsers,
       protocols: snapshot.protocols,
       hostSnapshots: snapshot.hostSnapshots,

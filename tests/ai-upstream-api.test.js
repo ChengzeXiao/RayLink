@@ -189,6 +189,28 @@ test("disabled publication and reconciliation do not need a previous deployment'
   await assert.rejects(app.runtimeManager.rollback(old.id), { code: "AI_UPSTREAM_SECRET_UNAVAILABLE" });
 });
 
+test("rollback to a server exit keeps current revocations when current upstream credentials are unavailable", async (t) => {
+  const { app, request } = await fixture(t);
+  const user = app.store.createUser({ name: "Revoked User", email: "rollback-revoked@example.test",
+    portalStatus: "active", quotaGb: 10, nodeScope: ["all"], expiresAt: "2099-12-31" });
+  const historical = await app.runtimeManager.publish();
+  await request("/api/settings/ai-upstream", "PATCH", { enabled: true, server: "proxy.example.com",
+    username: "owner", password: "current-upstream-password" });
+  const row = JSON.parse(app.store.db.prepare("SELECT value FROM settings WHERE key='ai_upstream'").get().value);
+  row.passwordEncrypted = "unavailable-fixture-secret";
+  app.store.db.prepare("UPDATE settings SET value=? WHERE key='ai_upstream'").run(JSON.stringify(row));
+  app.store.updateUser(user.id, { state: "disabled" });
+
+  const rollback = await app.runtimeManager.rollback(historical.id);
+  assert.equal(rollback.status, "active");
+  const restored = app.store.deploymentSnapshot(rollback.id).config;
+  assert.ok(!restored.outbounds.some(outbound => outbound.tag === "ai-residential"));
+  assert.ok(restored.inbounds.every(inbound => !(inbound.users || []).some(credential =>
+    credential.name === app.store.clientCredential(user.id).runtimeName)));
+  assert.ok(app.store.deploymentSnapshot(historical.id).config.inbounds.some(inbound => inbound.users?.some(
+    credential => credential.name === app.store.clientCredential(user.id).runtimeName)));
+});
+
 
 test("explicitly disabling an enabled upstream remains possible when its stored password is unavailable", async (t) => {
   const { app, request } = await fixture(t);

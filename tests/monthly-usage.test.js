@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { RayLinkStore } from "../server/database.js";
+import { applyRemoteRuntime } from "./helpers/applied-host.js";
 
 async function fixture(t, instant = "2026-10-31T15:59:59.999Z") {
   const directory = await mkdtemp(join(tmpdir(), "raylink-monthly-"));
@@ -114,7 +115,9 @@ test("unknown old Runtime instances remain conservative after another instance a
   const f = await fixture(t);
   const user = createUser(f.store);
   sample(f, user, 100);
-  const { host } = f.store.createRemoteHost({ name: "Other Host", address: "192.0.2.4", region: "hk" });
+  const remote = f.store.createRemoteHost({ name: "Other Host", address: "192.0.2.4", region: "hk" });
+  applyRemoteRuntime(f.store, remote);
+  const { host } = remote;
   sample(f, user, 300, { host: host.id });
   f.setTime("2026-10-31T16:01:00.000Z");
   assert.equal(sample(f, user, 500).appliedBytes, 0);

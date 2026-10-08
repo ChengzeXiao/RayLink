@@ -174,7 +174,7 @@ test("runtime manager reserves publication before asynchronous TLS preparation",
   assert.equal(store.listDeployments().length, 1);
 });
 
-test("rollback republishes an immutable historical snapshot as a new active deployment", async (t) => {
+test("rollback restores historical protocols while retaining current quota revocation", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "raylink-deploy-rollback-"));
   const store = new RayLinkStore({
     dbPath: join(dataDir, "raylink.db"),
@@ -212,9 +212,11 @@ test("rollback republishes an immutable historical snapshot as a new active depl
   const rollback = await manager.rollback(first.id);
   assert.match(rollback.version, /^r/);
   assert.equal(rollback.status, "active");
-  assert.equal(rollback.eligibleUsers, 5);
+  assert.equal(rollback.eligibleUsers, 4);
   assert.equal(adapter.publications.length, 3);
-  assert.equal(adapter.publications[2].configText, firstConfig);
+  const restored = JSON.parse(adapter.publications[2].configText);
+  assert.deepEqual(restored.inbounds.map(inbound => inbound.type), JSON.parse(firstConfig).inbounds.map(inbound => inbound.type));
+  assert.ok(restored.inbounds.every(inbound => !(inbound.users || []).some(candidate => candidate.name === store.clientCredential(user.id).runtimeName)));
   assert.equal(
     store.getHost("local").appliedProtocols.find((profile) => profile.type === "vless").enabled,
     false
@@ -331,6 +333,48 @@ test("rollback queues the matching historical protocol snapshot for remote Hosts
     JSON.parse(rollbackTask.payload.configText).inbounds.map((inbound) => inbound.type),
     ["shadowsocks"]
   );
+});
+
+test("rollback cannot revive a disabled user on either local or remote Runtime", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "raylink-rollback-revocation-"));
+  const store = new RayLinkStore({ dbPath: join(dataDir, "raylink.db"),
+    adminUsername: "admin", adminPassword: "test-password", seedDemoData: false });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const user = store.createUser({ name: "Revoked", email: "revoked@example.test", password: "test-user-password",
+    quotaGb: 100, expiresAt: "2099-12-31", nodeScope: ["all"], portalStatus: "active" });
+  const host = store.createRemoteHost({ name: "Remote", address: "remote.example.test", region: "test" });
+  const enrolled = store.enrollNode(host.enrollmentToken, { agentVersion: "0.8.0", runtimeVersion: "1.14.2" });
+  store.updateHostProtocolConfig(enrolled.hostId, "shadowsocks", { enabled: true });
+  const adapter = new RecordingRuntimeAdapter();
+  const manager = new RuntimeManager({ store, adapter });
+  const first = await manager.publish();
+  const secret = store.runtimeSnapshot().users.find(candidate => candidate.email === user.email).runtimePassword;
+  assert.ok(adapter.publications[0].configText.includes(secret));
+  store.updateUser(user.id, { state: "disabled" });
+  await manager.publish();
+  const rollback = await manager.rollback(first.id);
+  assert.equal(rollback.eligibleUsers, 0);
+  assert.ok(!adapter.publications.at(-1).configText.includes(secret));
+  const task = store.nextNodeTask(enrolled.hostId);
+  assert.equal(task.payload.reason, "rollback");
+  assert.ok(!task.payload.configText.includes(secret));
+  assert.ok(JSON.stringify(store.deploymentSnapshot(first.id).config).includes(secret), "the archive remains immutable");
+});
+
+test("safe rollback preserves system inbounds without user authentication", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "raylink-rollback-system-"));
+  const store = new RayLinkStore({ dbPath: join(dataDir, "raylink.db"),
+    adminUsername: "admin", adminPassword: "test-password", seedDemoData: false });
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  store.updateHostProtocolConfig("local", "direct", { enabled: true });
+  const adapter = new RecordingRuntimeAdapter();
+  const manager = new RuntimeManager({ store, adapter });
+  const first = await manager.publish();
+  const rollback = await manager.rollback(first.id);
+  assert.equal(rollback.status, "active");
+  const inbound = JSON.parse(adapter.publications.at(-1).configText).inbounds.find(inbound => inbound.type === "direct");
+  assert.ok(inbound);
+  assert.equal(Object.hasOwn(inbound, "users"), false);
 });
 
 test("concurrent control-plane processes cannot claim the same RayLink Node task", async (t) => {
@@ -610,7 +654,7 @@ test("a monthly entitlement change waits for the new remote config and ignores u
   assert.equal(changed.remotePending, 1);
   assert.equal(changed.remoteQueued, 1);
   const task = store.nextNodeTask(host.id);
-  assert.ok(JSON.parse(task.payload.configText).inbounds.some(inbound => inbound.users?.some(entry => entry.name === user.email)));
+  assert.ok(JSON.parse(task.payload.configText).inbounds.some(inbound => inbound.users?.some(entry => entry.name === store.clientCredential(user.id).runtimeName)));
   store.completeNodeTask(host.id, task.id, { status: "succeeded", attempt: task.attempt });
   assert.equal((await manager.reconcile(null, { retryUntilApplied: true })).remotePending, 0);
   assert.equal(store.listDeployments().length, 2);

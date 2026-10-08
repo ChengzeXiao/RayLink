@@ -13,6 +13,7 @@ import { buildSingBoxConfig } from "../server/singbox/config.js";
 
 const run = promisify(execFile);
 const binary = process.env.SING_BOX_BIN || "sing-box";
+const residential = process.argv.includes("--residential");
 const directory = await mkdtemp(join(tmpdir(), "raylink-runtime-dns-"));
 const target = createServer((_request, response) => response.end("runtime-dns-fixture"));
 const upstreams = [];
@@ -80,7 +81,16 @@ try {
   const local = await upstream();
   target.listen(0, "127.0.0.1");
   await once(target, "listening");
-  const config = buildSingBoxConfig({ host: { kind: "local", runtimeVersion: version }, users: [], protocols: [], masterPassword: "fixture" },
+  const config = buildSingBoxConfig({ host: { kind: "local", runtimeVersion: version }, users: [], protocols: [], masterPassword: "fixture",
+    ...(residential ? {
+      aiUpstream: { enabled: true, hostId: "local", type: "http", server: "127.0.0.1", port: 9 },
+      routingPolicy: { rules: [
+        { match: "domain_suffix", value: "custom.runtime-dns.invalid", action: "proxy" },
+        { match: "domain", value: "direct.runtime-dns.invalid", action: "direct" },
+        { match: "domain_suffix", value: "google.com", action: "ai" },
+        { match: "domain", value: "blocked.runtime-dns.invalid", action: "block" }
+      ] }
+    } : {}) },
     { runtimeDns: { privateSuffixes: ["corp.example"] } });
   const productionPath = join(directory, "production.json");
   await writeFile(productionPath, JSON.stringify(config));
@@ -132,9 +142,24 @@ try {
   await assert.rejects(() => request(socksPort, "both-failed.runtime-dns.invalid"));
   assert.ok(secondary.queries.includes("both-failed.runtime-dns.invalid"));
   assert.equal(local.queries.length, localQueryCount, "public resolver failures must not silently restore untrusted system DNS");
+  if (residential) {
+    primary.mode = "servfail";
+    secondary.mode = "answer";
+    for (const domain of ["test.custom.runtime-dns.invalid", "direct.runtime-dns.invalid", "www.google.com"]) {
+      await request(socksPort, domain);
+      assert.ok(primary.queries.includes(domain), `${domain}: ordinary traffic must use trusted DNS`);
+      assert.ok(secondary.queries.includes(domain), `${domain}: residential shortcuts must retain DNS failover`);
+    }
+    const queryCount = upstreams.reduce((total, item) => total + item.queries.length, 0);
+    await assert.rejects(() => request(socksPort, "blocked.runtime-dns.invalid"));
+    await assert.rejects(() => request(socksPort, "api.openai.com"));
+    assert.equal(upstreams.reduce((total, item) => total + item.queries.length, 0), queryCount,
+      "blocked requests need no DNS; AI target domains must stay intact for upstream DNS");
+  }
   await request(socksPort, "127.0.0.1");
   process.stdout.write(`${JSON.stringify({ runtime: version, trustedLookup: true, cacheMs, timeoutFallbackMs: fallbackMs,
-    servfailFallback: true, primaryRecovery: true, privateNamesStayLocal: true, failureDoesNotLeak: true, literalIpWorks: true })}\n`);
+    servfailFallback: true, primaryRecovery: true, privateNamesStayLocal: true, failureDoesNotLeak: true, literalIpWorks: true,
+    residentialCustomDnsFallback: residential })}\n`);
 } catch (error) {
   process.stderr.write(`${error.stack || error.message}\n${log}\n`);
   process.exitCode = 1;
